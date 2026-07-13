@@ -131,7 +131,17 @@ artist credits retained as artist identities. A source SHA-256 becomes the
 stable recording identity; the KuGou ID remains a source-track ID. The
 resulting canonical analysis keeps immutable provenance for all delivery fields in
 `campaign_delivery_provenance`, including the delivery schema/campaign IDs,
-runner contract, attempt ID, and optional canonicalized provenance JSON.
+source title/artist, runner contract, attempt ID, and canonicalized producer
+metadata. Non-core producer fields (for example model/runtime/prompt hashes,
+generation controls, clip duration, and truncation status) are preserved inside
+that immutable provenance JSON even when the producer did not wrap them in a
+`provenance` object.
+
+`manifest_index` is a per-campaign, per-attempt delivery coordinate: a later
+campaign or a corrected later attempt may reuse the same index and
+canonical-source label without colliding with earlier provenance, while two
+contradictory rows that claim the same campaign/source/index/attempt are
+rejected.
 
 Real delivery JSONL, audio, lyrics, production SQLite files, and private paths
 must remain outside Git.

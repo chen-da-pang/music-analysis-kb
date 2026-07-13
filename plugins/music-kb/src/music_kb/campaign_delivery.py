@@ -37,6 +37,7 @@ REQUIRED_FIELDS = (
     "attempt_id",
     "canonical_source",
 )
+_DELIVERY_CORE_FIELDS = frozenset((*REQUIRED_FIELDS, "provenance"))
 DELIVERY_SCHEMA_VERSION = 1
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -154,6 +155,11 @@ def group_campaign_delivery(
                 "Campaign delivery source aliases must have identical source_bytes: "
                 f"{source_sha256}"
             )
+        if any(entry.generated_token_count != first.generated_token_count for entry in ordered[1:]):
+            raise ValidationError(
+                "Campaign delivery source aliases must have identical generated_token_count: "
+                f"{source_sha256}"
+            )
         result.append(ordered)
     return sorted(result, key=lambda group: (group[0].manifest_index, group[0].line_number))
 
@@ -258,7 +264,7 @@ def _parse_entry(value: Mapping[str, Any], *, line_number: int) -> CampaignDeliv
     contract = _required_text(value["contract"], "contract", line_number=line_number)
     attempt_id = _required_text(value["attempt_id"], "attempt_id", line_number=line_number)
     canonical_source = _required_text(value["canonical_source"], "canonical_source", line_number=line_number)
-    provenance_json = _optional_provenance(value.get("provenance"), line_number=line_number)
+    provenance_json = _delivery_provenance(value, line_number=line_number)
     return CampaignDeliveryEntry(
         line_number=line_number,
         delivery_schema_version=delivery_schema_version,
@@ -359,13 +365,42 @@ def _relative_audio_path(value: object, *, line_number: int) -> str:
     return path
 
 
-def _optional_provenance(value: object, *, line_number: int) -> str | None:
+def _delivery_provenance(value: Mapping[str, Any], *, line_number: int) -> str | None:
+    """Retain optional wrapped provenance and all producer-defined fields.
+
+    The published CNB delivery places runner/model evidence at the top level,
+    while some synthetic or future producers use an explicit ``provenance``
+    wrapper.  Core contract fields have normalized relational columns; every
+    other producer field belongs in the immutable JSON evidence rather than
+    being silently dropped.
+    """
+
+    wrapped = value.get("provenance")
+    producer_fields = {
+        key: child for key, child in value.items() if key not in _DELIVERY_CORE_FIELDS
+    }
+    if wrapped is None:
+        provenance: object = producer_fields or None
+    elif not producer_fields:
+        # Preserve the original public shape for explicit-only provenance.
+        provenance = wrapped
+    else:
+        provenance = {
+            "declared_provenance": wrapped,
+            "producer_fields": producer_fields,
+        }
+    return _canonicalize_provenance(provenance, line_number=line_number)
+
+
+def _canonicalize_provenance(value: object, *, line_number: int) -> str | None:
     if value is None:
         return None
     try:
         # Canonical JSON makes the immutable database comparison independent of
         # field ordering in the producer's JSONL serializer.
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"Campaign delivery line {line_number} provenance must be JSON-compatible") from exc
 

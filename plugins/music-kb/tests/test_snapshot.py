@@ -46,6 +46,8 @@ def test_snapshot_removes_noncanonical_recording_identity_data(master_database, 
     candidate["recording"]["title"] = "未发布候选曲"
     candidate["analysis"]["raw_text"] = "Candidate-only analysis."
     candidate["canonical"] = False
+    candidate["source_tracks"][0]["source_track_id"] = "fixture-candidate-001"
+    candidate["source_tracks"][0]["source_title"] = "未发布候选曲"
     candidate["tags"] = [
         {
             "namespace": "production",

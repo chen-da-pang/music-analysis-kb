@@ -6,7 +6,7 @@ from pathlib import Path
 from .errors import DatabaseNotInitializedError, MusicKBError, ReadOnlyError
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA_SQL = """
@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS source_track (
     source_artist_credit TEXT,
     UNIQUE(source_name, source_track_id)
 );
+CREATE INDEX IF NOT EXISTS idx_source_track_source_track_id ON source_track(source_track_id);
 
 CREATE TABLE IF NOT EXISTS analysis_revision (
     id TEXT PRIMARY KEY,
@@ -98,6 +99,8 @@ CREATE TABLE IF NOT EXISTS campaign_delivery_provenance (
     delivery_id TEXT NOT NULL,
     analysis_id TEXT NOT NULL REFERENCES analysis_revision(id) ON DELETE CASCADE,
     manifest_index INTEGER NOT NULL CHECK(manifest_index >= 0),
+    source_title TEXT NOT NULL,
+    source_artist TEXT NOT NULL,
     relative_audio_path TEXT NOT NULL,
     source_sha256 TEXT NOT NULL,
     source_bytes INTEGER NOT NULL CHECK(source_bytes > 0),
@@ -110,14 +113,18 @@ CREATE TABLE IF NOT EXISTS campaign_delivery_provenance (
     provenance_json TEXT,
     imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK(generated_token_count <= max_new_tokens),
-    UNIQUE(canonical_source, manifest_index)
+    -- The deterministic provenance ID is the immutable identity. Manifest
+    -- coordinates are scoped to the producing attempt: a later campaign or
+    -- corrected attempt may reuse an index, while two contradictory rows from
+    -- the same declared attempt cannot coexist.
+    UNIQUE(campaign_id, canonical_source, manifest_index, attempt_id)
 );
 CREATE INDEX IF NOT EXISTS idx_campaign_delivery_analysis
     ON campaign_delivery_provenance(analysis_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_delivery_delivery_id
     ON campaign_delivery_provenance(delivery_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_delivery_source_index
-    ON campaign_delivery_provenance(canonical_source, manifest_index);
+    ON campaign_delivery_provenance(campaign_id, canonical_source, manifest_index, attempt_id);
 
 CREATE TABLE IF NOT EXISTS tag_namespace (
     name TEXT PRIMARY KEY,
@@ -231,8 +238,94 @@ def connect(path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
     return connection
 
 
+def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
+    """Rebuild the v2 provenance table without losing immutable evidence.
+
+    Version 2 used a global ``(canonical_source, manifest_index)`` uniqueness
+    boundary and did not retain source title/artist in provenance. SQLite
+    cannot alter either constraint in place, so copy into the v3 table inside
+    one transaction. Existing source-track metadata is the only authoritative
+    title/artist source available to v2, and is preserved as the migration
+    backfill.
+    """
+
+    legacy_table = "campaign_delivery_provenance_v2_legacy"
+    with connection:
+        connection.execute(
+            f"ALTER TABLE campaign_delivery_provenance RENAME TO {legacy_table}"
+        )
+        for index in (
+            "idx_campaign_delivery_analysis",
+            "idx_campaign_delivery_delivery_id",
+            "idx_campaign_delivery_source_index",
+        ):
+            connection.execute(f"DROP INDEX IF EXISTS {index}")
+        connection.execute(
+            """
+            CREATE TABLE campaign_delivery_provenance (
+                id TEXT PRIMARY KEY,
+                delivery_schema_version INTEGER NOT NULL CHECK(delivery_schema_version = 1),
+                campaign_id TEXT NOT NULL,
+                delivery_id TEXT NOT NULL,
+                analysis_id TEXT NOT NULL REFERENCES analysis_revision(id) ON DELETE CASCADE,
+                manifest_index INTEGER NOT NULL CHECK(manifest_index >= 0),
+                source_title TEXT NOT NULL,
+                source_artist TEXT NOT NULL,
+                relative_audio_path TEXT NOT NULL,
+                source_sha256 TEXT NOT NULL,
+                source_bytes INTEGER NOT NULL CHECK(source_bytes > 0),
+                output_text_sha256 TEXT NOT NULL,
+                generated_token_count INTEGER NOT NULL CHECK(generated_token_count >= 0),
+                max_new_tokens INTEGER NOT NULL CHECK(max_new_tokens > 0),
+                contract TEXT NOT NULL,
+                attempt_id TEXT NOT NULL,
+                canonical_source TEXT NOT NULL,
+                provenance_json TEXT,
+                imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(generated_token_count <= max_new_tokens),
+                UNIQUE(campaign_id, canonical_source, manifest_index, attempt_id)
+            )
+            """
+        )
+        connection.execute(
+            f"""
+            INSERT INTO campaign_delivery_provenance(
+                id, delivery_schema_version, campaign_id, delivery_id, analysis_id,
+                manifest_index, source_title, source_artist, relative_audio_path,
+                source_sha256, source_bytes, output_text_sha256,
+                generated_token_count, max_new_tokens, contract, attempt_id,
+                canonical_source, provenance_json, imported_at
+            )
+            SELECT c.id, c.delivery_schema_version, c.campaign_id, c.delivery_id, c.analysis_id,
+                   c.manifest_index,
+                   COALESCE(st.source_title, ''),
+                   COALESCE(st.source_artist_credit, ''),
+                   c.relative_audio_path,
+                   c.source_sha256, c.source_bytes, c.output_text_sha256,
+                   c.generated_token_count, c.max_new_tokens, c.contract, c.attempt_id,
+                   c.canonical_source, c.provenance_json, c.imported_at
+            FROM {legacy_table} c
+            LEFT JOIN analysis_revision ar ON ar.id = c.analysis_id
+            LEFT JOIN source_track st
+              ON st.recording_id = ar.recording_id
+             AND st.source_name = 'kugou'
+             AND st.source_track_id = c.delivery_id
+            """
+        )
+        connection.execute(f"DROP TABLE {legacy_table}")
+        # Commit the version transition with the rebuilt table. If process
+        # startup stops before the later idempotent SCHEMA_SQL pass, the next
+        # `init` sees v3 and only creates any missing indexes/triggers instead
+        # of attempting a second v2 table rename.
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION),),
+        )
+
+
 def initialize_database(path: str | Path) -> Path:
     database = _path(path)
+    version: int | None = None
     if database.is_file():
         existing = connect(database, read_only=True)
         try:
@@ -254,6 +347,8 @@ def initialize_database(path: str | Path) -> Path:
     try:
         try:
             connection.execute("PRAGMA journal_mode = WAL")
+            if version == 2:
+                _migrate_v2_to_v3(connection)
             connection.executescript(SCHEMA_SQL)
         except sqlite3.OperationalError as exc:
             if "fts5" in str(exc).casefold():
