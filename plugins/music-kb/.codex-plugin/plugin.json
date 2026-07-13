@@ -1,0 +1,29 @@
+{
+  "name": "music-kb",
+  "version": "0.1.0",
+  "description": "Local SQLite music-analysis search for agents, with a publisher CLI and read-only MCP tools.",
+  "author": {
+    "name": "Wuyou Music",
+    "url": "https://github.com/chen-da-pang"
+  },
+  "homepage": "https://github.com/chen-da-pang/music-analysis-kb",
+  "repository": "https://github.com/chen-da-pang/music-analysis-kb",
+  "license": "UNLICENSED",
+  "keywords": ["music", "sqlite", "mcp", "suno", "music-flamingo"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Music Knowledge Base",
+    "shortDescription": "Search a local, read-only Music Flamingo analysis library.",
+    "longDescription": "A local-first SQLite knowledge base: publishers create verified snapshots; agents query a read-only local copy through MCP.",
+    "developerName": "Wuyou Music",
+    "category": "Productivity",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": [
+      "Find tracks with a specific rare production tag.",
+      "Compare canonical music analyses for a Suno-safe style direction.",
+      "Check whether my local music knowledge-base snapshot is current."
+    ],
+    "brandColor": "#5B4BDB"
+  },
+  "mcpServers": "./.mcp.json"
+}

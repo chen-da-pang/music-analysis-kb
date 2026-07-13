@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "music-kb"
+version = "0.1.0"
+description = "Local-first Music Flamingo analysis knowledge-base CLI and read-only MCP server."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "UNLICENSED" }
+authors = [{ name = "Wuyou Music" }]
+dependencies = [
+  "mcp>=1.12,<2",
+]
+
+[project.scripts]
+music-kb = "music_kb.cli:main"
+music-kb-mcp = "music_kb.mcp_server:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/music_kb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

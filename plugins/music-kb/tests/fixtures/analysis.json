@@ -1,0 +1,59 @@
+{
+  "recording": {
+    "id": "rec_neon_night_studio",
+    "title": "霓虹夜航",
+    "version_label": "studio",
+    "audio_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "artists": [
+    {
+      "name": "示例乐队",
+      "aliases": ["Shi Li Yue Dui", "SLYD"],
+      "role": "primary"
+    }
+  ],
+  "title_aliases": ["Neon Night Flight", "Ni Hong Ye Hang"],
+  "analysis": {
+    "raw_text": "102 BPM electronic pop with a granular vocal chop, syncopated rimshot, wide sidechained pads, and a restrained nocturnal build.",
+    "summary": "Nocturnal electronic pop with granular vocal treatment and syncopated percussion.",
+    "model_version": "music-flamingo-fixture-v1",
+    "prompt_version": "taxonomy-v1",
+    "generated_token_count": 993,
+    "quality_state": "passed"
+  },
+  "tags": [
+    {
+      "namespace": "genre",
+      "name": "electronic pop",
+      "path": "genre/electronic-pop",
+      "aliases": ["电子流行"],
+      "confidence": 0.96,
+      "status": "approved",
+      "suno_safe": true
+    },
+    {
+      "namespace": "production",
+      "name": "granular vocal chop",
+      "path": "production/vocal/granular-chop",
+      "aliases": ["颗粒人声切片"],
+      "confidence": 0.91,
+      "status": "approved",
+      "suno_safe": true
+    },
+    {
+      "namespace": "drum",
+      "name": "syncopated rimshot",
+      "path": "drum/snare/syncopated-rimshot",
+      "aliases": ["切分边击"],
+      "confidence": 0.83,
+      "status": "candidate",
+      "suno_safe": false
+    }
+  ],
+  "numeric_features": [
+    {"name": "bpm", "value": 102, "unit": "bpm", "confidence": 0.97}
+  ],
+  "source_tracks": [
+    {"source": "fixture", "source_track_id": "fixture-001", "source_title": "霓虹夜航"}
+  ]
+}
