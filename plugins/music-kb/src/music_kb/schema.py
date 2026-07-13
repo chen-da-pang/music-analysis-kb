@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .errors import DatabaseNotInitializedError, MusicKBError
+from .errors import DatabaseNotInitializedError, MusicKBError, ReadOnlyError
 
 
 SCHEMA_VERSION = 1
@@ -201,6 +201,19 @@ def connect(path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
 
 def initialize_database(path: str | Path) -> Path:
     database = _path(path)
+    if database.is_file():
+        existing = connect(database, read_only=True)
+        try:
+            try:
+                ensure_initialized(existing)
+            except DatabaseNotInitializedError:
+                pass
+            else:
+                kind = existing.execute("SELECT value FROM meta WHERE key = 'database_kind'").fetchone()
+                if kind is not None and str(kind["value"]) == "snapshot":
+                    raise ReadOnlyError("Client snapshots cannot be initialized or converted into publisher databases.")
+        finally:
+            existing.close()
     connection = connect(database)
     try:
         try:

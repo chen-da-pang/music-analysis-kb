@@ -76,7 +76,7 @@ def create_snapshot(
 
         # A client release is intentionally public-surface only: remove all
         # noncanonical audit revisions after the consistent backup completes.
-        with MusicKBRepository(snapshot_path) as snapshot:
+        with MusicKBRepository(snapshot_path, allow_snapshot_write=True) as snapshot:
             with snapshot.connection:
                 snapshot.connection.execute(
                     """

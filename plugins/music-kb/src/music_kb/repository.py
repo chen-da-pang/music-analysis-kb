@@ -32,9 +32,12 @@ def _rows_to_dicts(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
 class MusicKBRepository:
     """All database operations. MCP uses only its read methods."""
 
-    def __init__(self, database: str | Path, *, read_only: bool = False) -> None:
+    def __init__(
+        self, database: str | Path, *, read_only: bool = False, allow_snapshot_write: bool = False
+    ) -> None:
         self.path = Path(database).expanduser().resolve()
         self.read_only = read_only
+        self.allow_snapshot_write = allow_snapshot_write
         self.connection = connect(self.path, read_only=read_only)
         ensure_initialized(self.connection)
 
@@ -52,6 +55,17 @@ class MusicKBRepository:
             from .errors import ReadOnlyError
 
             raise ReadOnlyError("This operation requires the writable publisher database.")
+        database_kind = self.connection.execute(
+            "SELECT value FROM meta WHERE key = 'database_kind'"
+        ).fetchone()
+        if (
+            database_kind is not None
+            and str(database_kind["value"]) == "snapshot"
+            and not self.allow_snapshot_write
+        ):
+            from .errors import ReadOnlyError
+
+            raise ReadOnlyError("Client snapshots are never valid write targets; use the publisher master database.")
 
     # -- importer ---------------------------------------------------------
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from music_kb.errors import SnapshotVerificationError
+from music_kb.errors import ReadOnlyError, SnapshotVerificationError
 from music_kb.repository import MusicKBRepository
 from music_kb.snapshot import create_snapshot, install_snapshot, verify_snapshot
 
@@ -70,3 +70,16 @@ def test_verify_rejects_tampered_database(master_database, tmp_path: Path) -> No
         handle.write(b"tampered")
     with pytest.raises(SnapshotVerificationError, match="SHA-256 mismatch"):
         verify_snapshot(release["manifest"])
+
+
+def test_client_snapshot_rejects_writer_operations_even_if_file_is_made_writable(
+    master_database, fixture_payload, tmp_path: Path
+) -> None:
+    release = create_snapshot(master_database, tmp_path / "published", release_name="music-kb-2026w32")
+    database = Path(release["database"])
+    os.chmod(database, 0o644)
+    payload = copy.deepcopy(fixture_payload)
+    payload["analysis"]["raw_text"] = "This must never write to a client snapshot."
+    with MusicKBRepository(database) as snapshot:
+        with pytest.raises(ReadOnlyError, match="never valid write targets"):
+            snapshot.import_analysis(payload)
