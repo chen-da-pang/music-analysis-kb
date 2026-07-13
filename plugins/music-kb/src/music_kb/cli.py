@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from .campaign_delivery import load_campaign_delivery_file
 from .errors import DatabaseNotInitializedError, MusicKBError
 from .repository import MusicKBRepository, load_import_file
 from .schema import SCHEMA_VERSION, initialize_database
@@ -44,6 +45,21 @@ def build_parser() -> argparse.ArgumentParser:
     importer = commands.add_parser("import-analysis", help="Import one JSON/JSONL Music Flamingo analysis")
     _add_database_argument(importer, required=True)
     importer.add_argument("--input", type=Path, required=True, help="JSON object, array, or JSONL input file")
+
+    campaign_importer = commands.add_parser(
+        "import-campaign-delivery",
+        help="Import a strict LF JSONL canonical KuGou/Music Flamingo delivery",
+    )
+    _add_database_argument(campaign_importer, required=True)
+    campaign_importer.add_argument(
+        "--input", type=Path, required=True, help="Verified canonical campaign delivery JSONL"
+    )
+    campaign_importer.add_argument(
+        "--expected-count",
+        type=int,
+        default=None,
+        help="Optionally require an exact entry count (use 927 for the full campaign)",
+    )
 
     validator = commands.add_parser("validate", help="Validate canonical and search invariants")
     _add_database_argument(validator, required=True)
@@ -121,6 +137,13 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         )
         imported["count"] = len(records)
         return 0, imported
+    if args.command == "import-campaign-delivery":
+        entries = load_campaign_delivery_file(args.input, expected_count=args.expected_count)
+        return 0, _with_repository(
+            args.db,
+            read_only=False,
+            operation=lambda repo: repo.import_campaign_delivery(entries),
+        )
     if args.command == "validate":
         result = _with_repository(args.db, read_only=True, operation=lambda repo: repo.validate())
         return (0 if result["valid"] else 1), result

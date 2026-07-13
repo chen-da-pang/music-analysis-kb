@@ -6,7 +6,7 @@ from pathlib import Path
 from .errors import DatabaseNotInitializedError, MusicKBError, ReadOnlyError
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SCHEMA_SQL = """
@@ -86,6 +86,38 @@ CREATE TABLE IF NOT EXISTS analysis_revision (
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_revision_recording ON analysis_revision(recording_id);
 CREATE INDEX IF NOT EXISTS idx_analysis_revision_status ON analysis_revision(status);
+
+-- Immutable, campaign-specific evidence for canonical KuGou deliveries.
+-- This stays normalized rather than being folded into the model text so a
+-- publisher can audit the exact source/output/runner contract that produced a
+-- public analysis without exposing a second mutable analysis representation.
+CREATE TABLE IF NOT EXISTS campaign_delivery_provenance (
+    id TEXT PRIMARY KEY,
+    delivery_schema_version INTEGER NOT NULL CHECK(delivery_schema_version = 1),
+    campaign_id TEXT NOT NULL,
+    delivery_id TEXT NOT NULL,
+    analysis_id TEXT NOT NULL REFERENCES analysis_revision(id) ON DELETE CASCADE,
+    manifest_index INTEGER NOT NULL CHECK(manifest_index >= 0),
+    relative_audio_path TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    source_bytes INTEGER NOT NULL CHECK(source_bytes > 0),
+    output_text_sha256 TEXT NOT NULL,
+    generated_token_count INTEGER NOT NULL CHECK(generated_token_count >= 0),
+    max_new_tokens INTEGER NOT NULL CHECK(max_new_tokens > 0),
+    contract TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    canonical_source TEXT NOT NULL,
+    provenance_json TEXT,
+    imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK(generated_token_count <= max_new_tokens),
+    UNIQUE(canonical_source, manifest_index)
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_delivery_analysis
+    ON campaign_delivery_provenance(analysis_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_delivery_delivery_id
+    ON campaign_delivery_provenance(delivery_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_delivery_source_index
+    ON campaign_delivery_provenance(canonical_source, manifest_index);
 
 CREATE TABLE IF NOT EXISTS tag_namespace (
     name TEXT PRIMARY KEY,
@@ -205,10 +237,14 @@ def initialize_database(path: str | Path) -> Path:
         existing = connect(database, read_only=True)
         try:
             try:
-                ensure_initialized(existing)
+                version = _stored_schema_version(existing)
             except DatabaseNotInitializedError:
-                pass
-            else:
+                version = None
+            if version is not None and version > SCHEMA_VERSION:
+                raise DatabaseNotInitializedError(
+                    f"Unsupported schema version {version}; this music-kb build supports up to {SCHEMA_VERSION}."
+                )
+            if version is not None:
                 kind = existing.execute("SELECT value FROM meta WHERE key = 'database_kind'").fetchone()
                 if kind is not None and str(kind["value"]) == "snapshot":
                     raise ReadOnlyError("Client snapshots cannot be initialized or converted into publisher databases.")
@@ -239,13 +275,21 @@ def initialize_database(path: str | Path) -> Path:
 
 
 def ensure_initialized(connection: sqlite3.Connection) -> None:
+    version = _stored_schema_version(connection)
+    if version != SCHEMA_VERSION:
+        raise DatabaseNotInitializedError(
+            f"Unsupported schema version {version}; expected {SCHEMA_VERSION}."
+        )
+
+
+def _stored_schema_version(connection: sqlite3.Connection) -> int:
     try:
         row = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     except sqlite3.OperationalError as exc:
         raise DatabaseNotInitializedError("Database is not a music-kb database; run music-kb init.") from exc
     if row is None:
         raise DatabaseNotInitializedError("Database is not initialized; run music-kb init.")
-    if int(row["value"]) != SCHEMA_VERSION:
-        raise DatabaseNotInitializedError(
-            f"Unsupported schema version {row['value']}; expected {SCHEMA_VERSION}."
-        )
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError) as exc:
+        raise DatabaseNotInitializedError("Database schema version is invalid; run music-kb init.") from exc

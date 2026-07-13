@@ -16,5 +16,8 @@ uv run music-kb --json doctor
 uv run music-kb-mcp
 ```
 
+Publisher-only KuGou campaign imports use `music-kb import-campaign-delivery`
+with a strict LF JSONL manifest; see [`../../docs/import-contract.md`](../../docs/import-contract.md).
+
 Read the repository-level [README](../../README.md) for the publisher/client
 workflow and deployment rules.

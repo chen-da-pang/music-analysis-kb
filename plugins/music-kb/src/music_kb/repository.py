@@ -4,9 +4,11 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from .campaign_delivery import CampaignDeliveryEntry, group_campaign_delivery, to_import_payload
 from .errors import NotFoundError, ValidationError
 from .normalization import fts_query, normalized, require_text
 from .schema import SCHEMA_VERSION, connect, ensure_initialized
@@ -69,7 +71,9 @@ class MusicKBRepository:
 
     # -- importer ---------------------------------------------------------
 
-    def import_analysis(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def import_analysis(
+        self, payload: Mapping[str, Any], *, _transactional: bool = True
+    ) -> dict[str, Any]:
         """Import one immutable revision and make it canonical when eligible."""
 
         self._require_writer()
@@ -94,7 +98,12 @@ class MusicKBRepository:
             analysis = payload
         if not isinstance(analysis, Mapping):
             raise ValidationError("analysis must be an object")
-        raw_text = require_text(analysis.get("raw_text") or payload.get("raw_text"), "analysis.raw_text")
+        raw_text_value = analysis.get("raw_text") or payload.get("raw_text")
+        if not isinstance(raw_text_value, str) or not raw_text_value.strip():
+            raise ValidationError("analysis.raw_text must be a non-empty string")
+        # Preserve the exact model output.  Campaign delivery hashes are over
+        # UTF-8 bytes and must not silently change because of .strip().
+        raw_text = raw_text_value
         summary = str(analysis.get("summary") or payload.get("summary") or "").strip()
         quality_state = str(analysis.get("quality_state") or payload.get("quality_state") or "passed").strip()
         if quality_state not in {"passed", "needs_review", "failed"}:
@@ -134,7 +143,8 @@ class MusicKBRepository:
         for tag in tags:
             self._validate_tag_boundary(tag)
 
-        with self.connection:
+        transaction = self.connection if _transactional else nullcontext()
+        with transaction:
             existing = self.connection.execute(
                 "SELECT id FROM analysis_revision WHERE recording_id = ? AND output_sha256 = ?",
                 (recording_id, output_sha256),
@@ -218,6 +228,222 @@ class MusicKBRepository:
             "idempotent": False,
             "canonical": canonical_requested,
         }
+
+    def import_campaign_delivery(
+        self, entries: Sequence[CampaignDeliveryEntry]
+    ) -> dict[str, Any]:
+        """Import an already validated KuGou canonical delivery atomically.
+
+        The JSONL parser validates every physical line before this method is
+        called.  This method adds database-level conflict protection and keeps
+        the generic canonical importer plus provenance row in one SQLite
+        transaction, so a late conflict cannot leave a partial delivery in the
+        master database.
+        """
+
+        self._require_writer()
+        if not entries:
+            raise ValidationError("Campaign delivery must contain at least one entry")
+        groups = group_campaign_delivery(entries)
+        imported: list[dict[str, Any]] = []
+        with self.connection:
+            for group in groups:
+                primary = group[0]
+                for entry in group:
+                    self._assert_campaign_source_identity(entry)
+                payload = to_import_payload(group)
+                result = self.import_analysis(payload, _transactional=False)
+                if result["idempotent"]:
+                    # The generic importer correctly avoids duplicating the
+                    # analysis revision, but its early-return path has not
+                    # seen a newly delivered source alias. Add that identity
+                    # metadata explicitly before publishing the provenance.
+                    self._ensure_campaign_group_identity_metadata(
+                        str(result["recording_id"]), payload
+                    )
+                analysis_id = str(result["analysis_id"])
+                row = self.connection.execute(
+                    "SELECT output_sha256 FROM analysis_revision WHERE id = ?", (analysis_id,)
+                ).fetchone()
+                if row is None or str(row["output_sha256"]) != primary.output_text_sha256:
+                    raise ValidationError(
+                        f"Campaign delivery {primary.delivery_id} did not retain its verified output hash"
+                    )
+                provenance_idempotent = [
+                    self._upsert_campaign_delivery_provenance(analysis_id, entry) for entry in group
+                ]
+                imported.append(
+                    {
+                        "delivery_id": primary.delivery_id,
+                        "manifest_index": primary.manifest_index,
+                        **result,
+                        "source_track_count": len(group),
+                        "delivery_ids": [entry.delivery_id for entry in group],
+                        "provenance_idempotent": all(provenance_idempotent),
+                    }
+                )
+        return {
+            "count": len(entries),
+            "recording_count": len(imported),
+            "source_track_count": len(entries),
+            "imports": imported,
+            "canonical_sources": sorted({entry.canonical_source for entry in entries}),
+            "attempt_ids": sorted({entry.attempt_id for entry in entries}),
+        }
+
+    def _ensure_campaign_group_identity_metadata(
+        self, recording_id: str, payload: Mapping[str, Any]
+    ) -> None:
+        """Attach new source aliases when a campaign import is analysis-idempotent."""
+
+        recording_data = payload["recording"]
+        assert isinstance(recording_data, Mapping)
+        title = require_text(recording_data.get("title"), "recording.title")
+        title_aliases = self._string_list(payload.get("title_aliases"))
+        artists = self._parse_artists(payload)
+        self._upsert_title_aliases(recording_id, [title, *title_aliases])
+        for position, artist in enumerate(artists):
+            artist_id = self._upsert_artist(artist["name"], artist["aliases"])
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO recording_artist(recording_id, artist_id, role, position)
+                VALUES (?, ?, ?, ?)
+                """,
+                (recording_id, artist_id, artist["role"], position),
+            )
+        self._insert_identity_tags(recording_id, title, title_aliases, artists)
+        source_tracks = payload.get("source_tracks")
+        assert isinstance(source_tracks, list)
+        for source in source_tracks:
+            self._upsert_source_track(recording_id, source)
+        self.connection.execute(
+            "UPDATE recording SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (recording_id,)
+        )
+        self.rebuild_search_projection(recording_id)
+
+    def _assert_campaign_source_identity(self, entry: CampaignDeliveryEntry) -> None:
+        """Prevent a delivery ID from being reassociated with another audio file."""
+
+        row = self.connection.execute(
+            """
+            SELECT st.recording_id, r.audio_sha256
+            FROM source_track st JOIN recording r ON r.id = st.recording_id
+            WHERE st.source_name = 'kugou' AND st.source_track_id = ?
+            """,
+            (entry.delivery_id,),
+        ).fetchone()
+        if row is not None and str(row["audio_sha256"] or "") != entry.source_sha256:
+            raise ValidationError(
+                f"Campaign delivery ID {entry.delivery_id} is already associated with different source audio",
+                details={
+                    "existing_recording_id": str(row["recording_id"]),
+                    "existing_source_sha256": row["audio_sha256"],
+                    "incoming_source_sha256": entry.source_sha256,
+                },
+            )
+
+    def _upsert_campaign_delivery_provenance(
+        self, analysis_id: str, entry: CampaignDeliveryEntry
+    ) -> bool:
+        """Insert immutable delivery evidence and return whether it was already present."""
+
+        provenance_id = _stable_id(
+            "delivery",
+            str(entry.delivery_schema_version),
+            entry.campaign_id,
+            entry.delivery_id,
+            str(entry.manifest_index),
+            entry.relative_audio_path,
+            entry.source_sha256,
+            str(entry.source_bytes),
+            entry.output_text_sha256,
+            str(entry.generated_token_count),
+            str(entry.max_new_tokens),
+            entry.contract,
+            entry.attempt_id,
+            entry.canonical_source,
+            entry.provenance_json or "",
+        )
+        expected = {
+            "id": provenance_id,
+            "delivery_schema_version": entry.delivery_schema_version,
+            "campaign_id": entry.campaign_id,
+            "delivery_id": entry.delivery_id,
+            "analysis_id": analysis_id,
+            "manifest_index": entry.manifest_index,
+            "relative_audio_path": entry.relative_audio_path,
+            "source_sha256": entry.source_sha256,
+            "source_bytes": entry.source_bytes,
+            "output_text_sha256": entry.output_text_sha256,
+            "generated_token_count": entry.generated_token_count,
+            "max_new_tokens": entry.max_new_tokens,
+            "contract": entry.contract,
+            "attempt_id": entry.attempt_id,
+            "canonical_source": entry.canonical_source,
+            "provenance_json": entry.provenance_json,
+        }
+        existing = self.connection.execute(
+            """
+            SELECT id, delivery_schema_version, campaign_id, delivery_id,
+                   analysis_id, manifest_index, relative_audio_path,
+                   source_sha256, source_bytes, output_text_sha256,
+                   generated_token_count, max_new_tokens, contract, attempt_id,
+                   canonical_source, provenance_json
+            FROM campaign_delivery_provenance WHERE id = ?
+            """,
+            (provenance_id,),
+        ).fetchone()
+        if existing is not None:
+            observed = {key: existing[key] for key in expected}
+            if observed != expected:
+                raise ValidationError(
+                    f"Campaign delivery provenance conflict for {entry.delivery_id}; immutable evidence differs",
+                    details={"expected": expected, "observed": observed},
+                )
+            return True
+
+        index_owner = self.connection.execute(
+            """
+            SELECT delivery_id FROM campaign_delivery_provenance
+            WHERE canonical_source = ? AND manifest_index = ?
+            """,
+            (entry.canonical_source, entry.manifest_index),
+        ).fetchone()
+        if index_owner is not None:
+            raise ValidationError(
+                "Campaign delivery provenance conflict: canonical_source + manifest_index already belongs to "
+                f"{index_owner['delivery_id']}"
+            )
+        self.connection.execute(
+            """
+            INSERT INTO campaign_delivery_provenance(
+                id, delivery_schema_version, campaign_id, delivery_id, analysis_id,
+                manifest_index, relative_audio_path,
+                source_sha256, source_bytes, output_text_sha256,
+                generated_token_count, max_new_tokens, contract, attempt_id,
+                canonical_source, provenance_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                provenance_id,
+                entry.delivery_schema_version,
+                entry.campaign_id,
+                entry.delivery_id,
+                analysis_id,
+                entry.manifest_index,
+                entry.relative_audio_path,
+                entry.source_sha256,
+                entry.source_bytes,
+                entry.output_text_sha256,
+                entry.generated_token_count,
+                entry.max_new_tokens,
+                entry.contract,
+                entry.attempt_id,
+                entry.canonical_source,
+                entry.provenance_json,
+            ),
+        )
+        return False
 
     def _parse_artists(self, payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         artist_items: Any = payload.get("artists")
@@ -613,6 +839,9 @@ class MusicKBRepository:
                 "SELECT COUNT(*) FROM recording WHERE canonical_analysis_id IS NOT NULL"
             ).fetchone()[0],
             "analysis_revisions": self.connection.execute("SELECT COUNT(*) FROM analysis_revision").fetchone()[0],
+            "campaign_delivery_provenance": self.connection.execute(
+                "SELECT COUNT(*) FROM campaign_delivery_provenance"
+            ).fetchone()[0],
             "tags": self.connection.execute("SELECT COUNT(*) FROM tag").fetchone()[0],
         }
         return {
@@ -812,6 +1041,23 @@ class MusicKBRepository:
             "SELECT name, value, unit, confidence FROM numeric_feature WHERE analysis_id = ? ORDER BY name",
             (analysis_id,),
         )
+        provenance_rows = self.connection.execute(
+            """
+            SELECT delivery_schema_version, campaign_id, delivery_id,
+                   manifest_index, relative_audio_path, source_sha256,
+                   source_bytes, output_text_sha256, generated_token_count,
+                   max_new_tokens, contract, attempt_id, canonical_source,
+                   provenance_json, imported_at
+            FROM campaign_delivery_provenance
+            WHERE analysis_id = ?
+            ORDER BY canonical_source, manifest_index, delivery_id
+            """,
+            (analysis_id,),
+        )
+        delivery_provenance = _rows_to_dicts(provenance_rows)
+        for item in delivery_provenance:
+            raw_provenance = item.pop("provenance_json")
+            item["provenance"] = json.loads(str(raw_provenance)) if raw_provenance else None
         return {
             "recording_id": str(row["id"]),
             "title": str(row["canonical_title"]),
@@ -837,6 +1083,7 @@ class MusicKBRepository:
             },
             "tags": _rows_to_dicts(tag_rows),
             "numeric_features": _rows_to_dicts(numeric_rows),
+            "campaign_delivery_provenance": delivery_provenance,
         }
 
     def tag_facets(
@@ -963,6 +1210,34 @@ class MusicKBRepository:
                 SELECT r.id FROM recording r
                 WHERE r.canonical_analysis_id IS NOT NULL
                   AND NOT EXISTS (SELECT 1 FROM search_fts f WHERE f.recording_id = r.id)
+                """,
+            ),
+            (
+                "campaign_delivery_output_hash_mismatch",
+                """
+                SELECT c.delivery_id AS id
+                FROM campaign_delivery_provenance c
+                JOIN analysis_revision ar ON ar.id = c.analysis_id
+                WHERE c.output_text_sha256 <> ar.output_sha256
+                """,
+            ),
+            (
+                "campaign_delivery_source_hash_mismatch",
+                """
+                SELECT c.delivery_id AS id
+                FROM campaign_delivery_provenance c
+                JOIN analysis_revision ar ON ar.id = c.analysis_id
+                JOIN recording r ON r.id = ar.recording_id
+                WHERE c.source_sha256 <> r.audio_sha256
+                """,
+            ),
+            (
+                "campaign_delivery_token_count_mismatch",
+                """
+                SELECT c.delivery_id AS id
+                FROM campaign_delivery_provenance c
+                JOIN analysis_revision ar ON ar.id = c.analysis_id
+                WHERE c.generated_token_count <> ar.generated_token_count
                 """,
             ),
         ]
