@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from .campaign_delivery import load_campaign_delivery_file
 from .errors import DatabaseNotInitializedError, MusicKBError
-from .repository import MusicKBRepository, load_import_file
+from .repository import MusicKBRepository, iter_import_file
 from .schema import SCHEMA_VERSION, initialize_database
 from .snapshot import create_snapshot, install_snapshot, verify_snapshot
 
@@ -45,6 +45,18 @@ def build_parser() -> argparse.ArgumentParser:
     importer = commands.add_parser("import-analysis", help="Import one JSON/JSONL Music Flamingo analysis")
     _add_database_argument(importer, required=True)
     importer.add_argument("--input", type=Path, required=True, help="JSON object, array, or JSONL input file")
+    importer.add_argument(
+        "--batch-size",
+        type=int,
+        default=500,
+        help="Bounded generic import transaction size (1-5000; default: 500); .jsonl/.ndjson streams",
+    )
+
+    rebuild_search = commands.add_parser(
+        "rebuild-search",
+        help="Rebuild all publisher FTS projections after an interrupted batch import",
+    )
+    _add_database_argument(rebuild_search, required=True)
 
     campaign_importer = commands.add_parser(
         "import-campaign-delivery",
@@ -146,14 +158,19 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 "expected_default": str(default_client_database()),
             }
     if args.command == "import-analysis":
-        records = load_import_file(args.input)
-        imported = _with_repository(
+        return 0, _with_repository(
             args.db,
             read_only=False,
-            operation=lambda repo: {"imports": [repo.import_analysis(item) for item in records]},
+            operation=lambda repo: repo.import_analyses(
+                iter_import_file(args.input), batch_size=args.batch_size
+            ),
         )
-        imported["count"] = len(records)
-        return 0, imported
+    if args.command == "rebuild-search":
+        return 0, _with_repository(
+            args.db,
+            read_only=False,
+            operation=lambda repo: {"recording_count": repo.rebuild_all_search_projections()},
+        )
     if args.command == "import-campaign-delivery":
         entries = load_campaign_delivery_file(args.input, expected_count=args.expected_count)
         return 0, _with_repository(

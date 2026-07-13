@@ -54,6 +54,13 @@ uv run music-kb import-analysis \
   --db "$HOME/.music-kb/music-master.sqlite" \
   --input tests/fixtures/analysis.json
 
+# For 100k-scale generic updates, use a physical-LF .jsonl/.ndjson file.
+# It streams in bounded batches and rebuilds FTS only once at the end.
+uv run music-kb import-analysis \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --input /secure/path/new-analyses.jsonl \
+  --batch-size 500
+
 # The CNB KuGou campaign uses its own strict, hash-verified JSONL adapter.
 # Keep the real delivery outside this repository; the full corpus should be 927.
 uv run music-kb import-campaign-delivery \
@@ -113,6 +120,7 @@ all of these tags exist to improve local retrieval.
 - [Schema and retrieval design](docs/schema.md)
 - [Snapshot publishing and SSH operations](docs/operations.md)
 - [Architecture decision](docs/architecture/2026-07-13-music-analysis-knowledge-base.md)
+- [Synthetic 100k benchmark](docs/benchmarks/2026-07-13-generic-100k.md)
 
 ## Development
 
@@ -120,6 +128,7 @@ all of these tags exist to improve local retrieval.
 cd plugins/music-kb
 uv sync --all-groups
 uv run pytest
+uv run python scripts/benchmark_100k.py --records 1000  # fast synthetic smoke test
 python3 /Users/wycm/.codex/skills/plugin-creator/scripts/validate_plugin.py .
 ```
 

@@ -12,7 +12,7 @@ from music_kb.campaign_delivery import load_campaign_delivery_file
 from music_kb.cli import build_parser, run
 from music_kb.errors import ReadOnlyError, ValidationError
 from music_kb.repository import MusicKBRepository
-from music_kb.schema import initialize_database
+from music_kb.schema import SCHEMA_VERSION, initialize_database
 from music_kb.snapshot import create_snapshot
 from music_kb.tagging import PARSER_SOURCE, extract_music_flamingo_metadata
 
@@ -397,7 +397,7 @@ def test_init_migrates_v3_numeric_feature_source_and_preserves_legacy_value(tmp_
             (analysis_id,),
         ).fetchone()
         assert dict(preserved) == {"value": 130.43, "source": "legacy"}
-        assert repository.status()["schema_version"] == 4
+        assert repository.status()["schema_version"] == SCHEMA_VERSION
         assert repository.validate()["valid"] is True
 
 
@@ -472,5 +472,5 @@ def test_init_migrates_real_v1_shape_before_marking_schema_v4(tmp_path: Path) ->
             """
         ).fetchone()
         assert created["source"] == "model"
-        assert repository.status()["schema_version"] == 4
+        assert repository.status()["schema_version"] == SCHEMA_VERSION
         assert repository.validate()["valid"] is True

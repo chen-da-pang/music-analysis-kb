@@ -6,7 +6,7 @@ from pathlib import Path
 from .errors import DatabaseNotInitializedError, MusicKBError, ReadOnlyError
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 SCHEMA_SQL = """
@@ -87,6 +87,8 @@ CREATE TABLE IF NOT EXISTS analysis_revision (
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_revision_recording ON analysis_revision(recording_id);
 CREATE INDEX IF NOT EXISTS idx_analysis_revision_status ON analysis_revision(status);
+CREATE INDEX IF NOT EXISTS idx_analysis_revision_recording_status
+    ON analysis_revision(recording_id, status);
 
 -- Immutable, campaign-specific evidence for canonical KuGou deliveries.
 -- This stays normalized rather than being folded into the model text so a
@@ -143,6 +145,7 @@ CREATE TABLE IF NOT EXISTS tag (
     UNIQUE(namespace, normalized_name)
 );
 CREATE INDEX IF NOT EXISTS idx_tag_namespace_name ON tag(namespace, normalized_name);
+CREATE INDEX IF NOT EXISTS idx_tag_normalized_name ON tag(normalized_name);
 
 CREATE TABLE IF NOT EXISTS tag_alias (
     tag_id INTEGER NOT NULL REFERENCES tag(id) ON DELETE CASCADE,
@@ -377,6 +380,36 @@ def _migrate_v1_to_v4(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
+    """Install scale-critical indexes for every already-published v4 master.
+
+    Version 4 databases predate the generic 100k import path.  The new
+    indexes are performance requirements rather than optional optimizations:
+    without them a canonical switch can scan every canonical revision and a
+    rare exact tag may scan the complete tag catalogue.  Recording this as a
+    schema migration forces the publisher to run ``music-kb init`` before a
+    v4 master is accepted by the v5 CLI/MCP process.
+    """
+
+    with connection:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tag_normalized_name ON tag(normalized_name)"
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_analysis_revision_recording_status
+            ON analysis_revision(recording_id, status)
+            """
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES ('search_projection_state', 'current')"
+        )
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("5",),
+        )
+
+
 def initialize_database(path: str | Path) -> Path:
     database = _path(path)
     version: int | None = None
@@ -410,6 +443,9 @@ def initialize_database(path: str | Path) -> Path:
             if version == 3:
                 _migrate_v3_to_v4(connection)
                 version = 4
+            if version == 4:
+                _migrate_v4_to_v5(connection)
+                version = 5
             connection.executescript(SCHEMA_SQL)
         except sqlite3.OperationalError as exc:
             if "fts5" in str(exc).casefold():
@@ -424,6 +460,9 @@ def initialize_database(path: str | Path) -> Path:
             )
             connection.execute(
                 "INSERT OR IGNORE INTO meta(key, value) VALUES ('database_kind', 'master')"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO meta(key, value) VALUES ('search_projection_state', 'current')"
             )
     finally:
         connection.close()

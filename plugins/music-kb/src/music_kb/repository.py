@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from pathlib import Path
@@ -19,6 +19,12 @@ from .tagging import PARSER_SOURCE, PARSER_SOURCE_PREFIX, extract_music_flamingo
 MAX_SEARCH_LIMIT = 50
 MAX_FACET_LIMIT = 100
 DEFAULT_ENRICH_BATCH_SIZE = 500
+DEFAULT_IMPORT_BATCH_SIZE = 500
+IMPORT_LOOKUP_CACHE_SIZE = 8_192
+MAX_IMPORT_RESULT_SAMPLE = 1_000
+SEARCH_PROJECTION_STATE_KEY = "search_projection_state"
+SEARCH_PROJECTION_CURRENT = "current"
+SEARCH_PROJECTION_DIRTY = "dirty"
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -34,6 +40,58 @@ def _rows_to_dicts(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+class _BoundedImportLookupCache:
+    """Bound repeated generic-import identity lookups without retaining a corpus.
+
+    Generic payloads commonly repeat a compact controlled-tag vocabulary and a
+    relatively small artist catalogue, while title tags are mostly unique. An
+    LRU lets the hot vocabulary avoid thousands of identical upsert/select
+    round trips but evicts old title keys, preserving the importer's bounded
+    memory promise at 100k scale.
+    """
+
+    def __init__(self, *, limit: int = IMPORT_LOOKUP_CACHE_SIZE) -> None:
+        self.limit = limit
+        self._namespaces: OrderedDict[str, None] = OrderedDict()
+        self._artists: OrderedDict[tuple[str, tuple[str, ...]], str] = OrderedDict()
+        self._tags: OrderedDict[tuple[str, str, tuple[str, ...], str, str, bool], int] = OrderedDict()
+
+    @staticmethod
+    def _get(values: OrderedDict[Any, Any], key: Any) -> Any:
+        value = values.pop(key, None)
+        if value is not None:
+            values[key] = value
+        return value
+
+    def artist(self, key: tuple[str, tuple[str, ...]]) -> str | None:
+        return self._get(self._artists, key)
+
+    def tag(self, key: tuple[str, str, tuple[str, ...], str, str, bool]) -> int | None:
+        return self._get(self._tags, key)
+
+    def has_namespace(self, namespace: str) -> bool:
+        if namespace not in self._namespaces:
+            return False
+        self._namespaces.move_to_end(namespace)
+        return True
+
+    def remember_namespace(self, namespace: str) -> None:
+        self._namespaces[namespace] = None
+        if len(self._namespaces) > self.limit:
+            self._namespaces.popitem(last=False)
+
+    def _put(self, values: OrderedDict[Any, Any], key: Any, value: Any) -> None:
+        values[key] = value
+        if len(values) > self.limit:
+            values.popitem(last=False)
+
+    def remember_artist(self, key: tuple[str, tuple[str, ...]], artist_id: str) -> None:
+        self._put(self._artists, key, artist_id)
+
+    def remember_tag(self, key: tuple[str, str, tuple[str, ...], str, str, bool], tag_id: int) -> None:
+        self._put(self._tags, key, tag_id)
+
+
 class MusicKBRepository:
     """All database operations. MCP uses only its read methods."""
 
@@ -44,7 +102,12 @@ class MusicKBRepository:
         self.read_only = read_only
         self.allow_snapshot_write = allow_snapshot_write
         self.connection = connect(self.path, read_only=read_only)
-        ensure_initialized(self.connection)
+        self._supports_returning = sqlite3.sqlite_version_info >= (3, 35, 0)
+        try:
+            ensure_initialized(self.connection)
+        except Exception:
+            self.connection.close()
+            raise
 
     def close(self) -> None:
         self.connection.close()
@@ -81,6 +144,7 @@ class MusicKBRepository:
         _transactional: bool = True,
         _promote_existing: bool = True,
         _rebuild_projection: bool = True,
+        _lookup_cache: _BoundedImportLookupCache | None = None,
     ) -> dict[str, Any]:
         """Import one immutable revision and make it canonical when eligible."""
 
@@ -175,7 +239,9 @@ class MusicKBRepository:
             self._upsert_recording(recording_id, title, version_label, audio_sha256)
             self._upsert_title_aliases(recording_id, [title, *title_aliases])
             for position, artist in enumerate(artists):
-                artist_id = self._upsert_artist(artist["name"], artist["aliases"])
+                artist_id = self._upsert_artist(
+                    artist["name"], artist["aliases"], lookup_cache=_lookup_cache
+                )
                 self.connection.execute(
                     """
                     INSERT OR REPLACE INTO recording_artist(recording_id, artist_id, role, position)
@@ -184,7 +250,9 @@ class MusicKBRepository:
                     (recording_id, artist_id, artist["role"], position),
                 )
 
-            self._insert_identity_tags(recording_id, title, title_aliases, artists)
+            self._insert_identity_tags(
+                recording_id, title, title_aliases, artists, lookup_cache=_lookup_cache
+            )
             for source in source_tracks:
                 self._upsert_source_track(recording_id, source)
 
@@ -209,7 +277,9 @@ class MusicKBRepository:
             )
 
             for tag_data in tags:
-                tag_id, confidence = self._upsert_tag_from_payload(tag_data)
+                tag_id, confidence = self._upsert_tag_from_payload(
+                    tag_data, lookup_cache=_lookup_cache
+                )
                 self.connection.execute(
                     """
                     INSERT OR REPLACE INTO analysis_tag(analysis_id, tag_id, confidence, source)
@@ -322,6 +392,87 @@ class MusicKBRepository:
             "attempt_ids": sorted({entry.attempt_id for entry in entries}),
         }
 
+    def import_analyses(
+        self, payloads: Iterable[Mapping[str, Any]], *, batch_size: int = DEFAULT_IMPORT_BATCH_SIZE
+    ) -> dict[str, Any]:
+        """Import a possibly-streaming generic analysis sequence in bounded batches.
+
+        The old CLI loop rebuilt the FTS projection for every individual input
+        row. At 100k scale that repeatedly scanned FTS5's unindexed
+        ``recording_id`` field. This method holds only one payload batch plus
+        bounded lookup/compatibility-result caches in memory, commits each
+        batch atomically, and rebuilds FTS once at the end.
+
+        A failed later batch intentionally leaves earlier batches durable (the
+        same resume behavior as the prior row-by-row CLI). The persisted search
+        projection state is marked dirty before those writes, so validation
+        blocks snapshot publication until the import is retried or a full
+        rebuild completes.
+        """
+
+        self._require_writer()
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not 1 <= batch_size <= 5_000:
+            raise ValidationError("batch_size must be an integer between 1 and 5000")
+
+        count = 0
+        created_count = 0
+        idempotent_count = 0
+        canonical_count = 0
+        batch_count = 0
+        batch: list[Mapping[str, Any]] = []
+        lookup_cache = _BoundedImportLookupCache()
+        import_results: list[dict[str, Any]] = []
+        imports_truncated = False
+
+        def import_batch(items: list[Mapping[str, Any]]) -> None:
+            nonlocal count, created_count, idempotent_count, canonical_count, batch_count
+            nonlocal imports_truncated
+            with self.connection:
+                self._set_search_projection_state(SEARCH_PROJECTION_DIRTY)
+                for item in items:
+                    result = self.import_analysis(
+                        item,
+                        _transactional=False,
+                        _rebuild_projection=False,
+                        _lookup_cache=lookup_cache,
+                    )
+                    count += 1
+                    idempotent_count += int(bool(result["idempotent"]))
+                    created_count += int(not bool(result["idempotent"]))
+                    canonical_count += int(bool(result["canonical"]))
+                    if len(import_results) < MAX_IMPORT_RESULT_SAMPLE:
+                        import_results.append(result)
+                    else:
+                        imports_truncated = True
+            batch_count += 1
+
+        for payload in payloads:
+            if not isinstance(payload, Mapping):
+                raise ValidationError("Each import record must be a JSON object")
+            batch.append(payload)
+            if len(batch) >= batch_size:
+                import_batch(batch)
+                batch = []
+        if batch:
+            import_batch(batch)
+
+        if count:
+            self.rebuild_all_search_projections()
+        return {
+            "count": count,
+            "created_count": created_count,
+            "idempotent_count": idempotent_count,
+            "canonical_count": canonical_count,
+            "batch_size": batch_size,
+            "batch_count": batch_count,
+            "search_projection_rebuilt": bool(count),
+            # Preserve the original CLI's per-record shape for ordinary small
+            # imports without retaining a 100k-result object in memory.
+            "imports": import_results,
+            "imports_returned": len(import_results),
+            "imports_truncated": imports_truncated,
+        }
+
     def enrich_campaign_tags(
         self, *, dry_run: bool = False, batch_size: int = DEFAULT_ENRICH_BATCH_SIZE
     ) -> dict[str, Any]:
@@ -381,6 +532,7 @@ class MusicKBRepository:
                 # One bounded transaction per batch keeps memory stable at
                 # 100k scale and makes interrupted backfills safely resumable.
                 with self.connection:
+                    self._set_search_projection_state(SEARCH_PROJECTION_DIRTY)
                     for analysis_id, recording_id, tags, numeric_features in derived:
                         tag_count, feature_count = self._replace_parser_metadata(
                             analysis_id, tags=tags, numeric_features=numeric_features
@@ -855,7 +1007,18 @@ class MusicKBRepository:
                     (recording_id, alias, normalized(alias)),
                 )
 
-    def _upsert_artist(self, name: str, aliases: Sequence[str]) -> str:
+    def _upsert_artist(
+        self,
+        name: str,
+        aliases: Sequence[str],
+        *,
+        lookup_cache: _BoundedImportLookupCache | None = None,
+    ) -> str:
+        cache_key = (name, tuple(aliases))
+        if lookup_cache is not None:
+            cached = lookup_cache.artist(cache_key)
+            if cached is not None:
+                return cached
         key = normalized(name)
         artist_id = _stable_id("artist", key)
         self.connection.execute(
@@ -878,6 +1041,8 @@ class MusicKBRepository:
                     """,
                     (artist_id, alias, normalized(alias)),
                 )
+        if lookup_cache is not None:
+            lookup_cache.remember_artist(cache_key, artist_id)
         return artist_id
 
     def _ensure_tag(
@@ -889,6 +1054,7 @@ class MusicKBRepository:
         path: str = "",
         lifecycle_status: str = "candidate",
         suno_safe: bool = False,
+        lookup_cache: _BoundedImportLookupCache | None = None,
     ) -> int:
         namespace = require_text(namespace, "tag.namespace")
         name = require_text(name, "tag.name")
@@ -896,11 +1062,25 @@ class MusicKBRepository:
         lifecycle_status = lifecycle_status or "candidate"
         if lifecycle_status not in {"candidate", "approved", "deprecated"}:
             raise ValidationError("tag.status must be candidate, approved, or deprecated")
-        self.connection.execute(
-            "INSERT OR IGNORE INTO tag_namespace(name) VALUES (?)", (namespace_key,)
+        cache_key = (
+            namespace_key,
+            name,
+            tuple(aliases),
+            path or "",
+            lifecycle_status,
+            bool(suno_safe),
         )
-        self.connection.execute(
-            """
+        if lookup_cache is not None:
+            cached = lookup_cache.tag(cache_key)
+            if cached is not None:
+                return cached
+        if lookup_cache is None or not lookup_cache.has_namespace(namespace_key):
+            self.connection.execute(
+                "INSERT OR IGNORE INTO tag_namespace(name) VALUES (?)", (namespace_key,)
+            )
+            if lookup_cache is not None:
+                lookup_cache.remember_namespace(namespace_key)
+        upsert_sql = """
             INSERT INTO tag(namespace, canonical_name, normalized_name, path, lifecycle_status, suno_safe)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(namespace, normalized_name) DO UPDATE SET
@@ -910,21 +1090,39 @@ class MusicKBRepository:
                     ELSE excluded.lifecycle_status
                 END,
                 suno_safe = MAX(tag.suno_safe, excluded.suno_safe)
-            """,
-            (namespace_key, name, normalized(name), path or "", lifecycle_status, int(bool(suno_safe))),
+        """
+        upsert_params = (
+            namespace_key,
+            name,
+            normalized(name),
+            path or "",
+            lifecycle_status,
+            int(bool(suno_safe)),
         )
-        row = self.connection.execute(
-            "SELECT id FROM tag WHERE namespace = ? AND normalized_name = ?",
-            (namespace_key, normalized(name)),
-        ).fetchone()
+        if self._supports_returning:
+            row = self.connection.execute(
+                upsert_sql + " RETURNING id, canonical_name, normalized_name", upsert_params
+            ).fetchone()
+        else:  # pragma: no cover - Python 3.11 distributions normally bundle newer SQLite.
+            self.connection.execute(upsert_sql, upsert_params)
+            row = self.connection.execute(
+                "SELECT id, canonical_name, normalized_name FROM tag WHERE namespace = ? AND normalized_name = ?",
+                (namespace_key, normalized(name)),
+            ).fetchone()
         assert row is not None
         tag_id = int(row["id"])
-        for alias in [name, *aliases]:
-            if alias:
+        canonical_key = str(row["normalized_name"])
+        for alias in aliases:
+            # The canonical name is already matched through ``tag``. Avoid
+            # duplicating it in ``tag_alias`` for every unique title while
+            # preserving genuinely alternate spellings for exact retrieval.
+            if alias and normalized(alias) != canonical_key:
                 self.connection.execute(
                     "INSERT OR IGNORE INTO tag_alias(tag_id, alias, normalized_alias) VALUES (?, ?, ?)",
                     (tag_id, alias, normalized(alias)),
                 )
+        if lookup_cache is not None:
+            lookup_cache.remember_tag(cache_key, tag_id)
         return tag_id
 
     def _insert_identity_tags(
@@ -933,15 +1131,23 @@ class MusicKBRepository:
         title: str,
         title_aliases: Sequence[str],
         artists: Sequence[Mapping[str, Any]],
+        *,
+        lookup_cache: _BoundedImportLookupCache | None = None,
     ) -> None:
-        title_tag = self._ensure_tag("title", title, title_aliases, lifecycle_status="approved")
+        title_tag = self._ensure_tag(
+            "title", title, title_aliases, lifecycle_status="approved", lookup_cache=lookup_cache
+        )
         self.connection.execute(
             "INSERT OR IGNORE INTO recording_tag(recording_id, tag_id, role) VALUES (?, ?, 'title')",
             (recording_id, title_tag),
         )
         for artist in artists:
             artist_tag = self._ensure_tag(
-                "artist", str(artist["name"]), artist["aliases"], lifecycle_status="approved"
+                "artist",
+                str(artist["name"]),
+                artist["aliases"],
+                lifecycle_status="approved",
+                lookup_cache=lookup_cache,
             )
             self.connection.execute(
                 "INSERT OR IGNORE INTO recording_tag(recording_id, tag_id, role) VALUES (?, ?, 'artist')",
@@ -1023,7 +1229,9 @@ class MusicKBRepository:
             ),
         )
 
-    def _upsert_tag_from_payload(self, tag: Any) -> tuple[int, float | None]:
+    def _upsert_tag_from_payload(
+        self, tag: Any, *, lookup_cache: _BoundedImportLookupCache | None = None
+    ) -> tuple[int, float | None]:
         if not isinstance(tag, Mapping):
             raise ValidationError("Each tag must be an object")
         self._validate_tag_boundary(tag)
@@ -1044,6 +1252,7 @@ class MusicKBRepository:
             path=path.strip(),
             lifecycle_status=str(tag.get("status") or "candidate").strip(),
             suno_safe=bool(tag.get("suno_safe", False)),
+            lookup_cache=lookup_cache,
         )
         return tag_id, confidence
 
@@ -1126,6 +1335,15 @@ class MusicKBRepository:
         self.connection.execute("DELETE FROM search_fts WHERE recording_id = ?", (recording_id,))
         self._insert_search_projection(recording_id)
 
+    def _set_search_projection_state(self, state: str) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO meta(key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (SEARCH_PROJECTION_STATE_KEY, state),
+        )
+
     def _insert_search_projection(self, recording_id: str) -> None:
         """Insert one projection row when any prior row is already removed."""
 
@@ -1177,6 +1395,7 @@ class MusicKBRepository:
         self.connection.execute("DELETE FROM search_fts")
         for recording_id in recording_ids:
             self._insert_search_projection(recording_id)
+        self._set_search_projection_state(SEARCH_PROJECTION_CURRENT)
         return len(recording_ids)
 
     def _artist_names(self, recording_id: str) -> list[str]:
@@ -1288,39 +1507,35 @@ class MusicKBRepository:
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
-        candidate_ids: set[str] | None = None
+        clauses = ["r.canonical_analysis_id IS NOT NULL"]
+        params: list[Any] = []
         if query.strip():
-            candidate_ids = self._intersect(candidate_ids, self._text_ids(query))
+            candidate_sql, candidate_params = self._text_candidate_sql(query)
+            clauses.append(f"r.id IN ({candidate_sql})")
+            params.extend(candidate_params)
         if title.strip():
-            candidate_ids = self._intersect(candidate_ids, self._title_ids(title))
+            candidate_sql, candidate_params = self._title_candidate_sql(title)
+            clauses.append(f"r.id IN ({candidate_sql})")
+            params.extend(candidate_params)
         if artist.strip():
-            candidate_ids = self._intersect(candidate_ids, self._artist_ids(artist))
+            candidate_sql, candidate_params = self._artist_candidate_sql(artist)
+            clauses.append(f"r.id IN ({candidate_sql})")
+            params.extend(candidate_params)
         for tag in tags:
             if str(tag).strip():
-                candidate_ids = self._intersect(candidate_ids, self._tag_ids(str(tag)))
-        if candidate_ids is not None and not candidate_ids:
-            return []
+                candidate_sql, candidate_params = self._tag_candidate_sql(str(tag))
+                clauses.append(f"r.id IN ({candidate_sql})")
+                params.extend(candidate_params)
 
-        if candidate_ids is None:
-            rows = self.connection.execute(
-                """
-                SELECT r.id, r.canonical_title, r.version_label, ar.summary, ar.created_at
-                FROM recording r JOIN analysis_revision ar ON ar.id = r.canonical_analysis_id
-                ORDER BY r.updated_at DESC, r.id LIMIT ?
-                """,
-                (limit,),
-            )
-        else:
-            placeholders = ",".join("?" for _ in candidate_ids)
-            rows = self.connection.execute(
-                f"""
-                SELECT r.id, r.canonical_title, r.version_label, ar.summary, ar.created_at
-                FROM recording r JOIN analysis_revision ar ON ar.id = r.canonical_analysis_id
-                WHERE r.id IN ({placeholders})
-                ORDER BY r.updated_at DESC, r.id LIMIT ?
-                """,
-                (*sorted(candidate_ids), limit),
-            )
+        rows = self.connection.execute(
+            f"""
+            SELECT r.id, r.canonical_title, r.version_label, ar.summary, ar.created_at
+            FROM recording r JOIN analysis_revision ar ON ar.id = r.canonical_analysis_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY r.updated_at DESC, r.id LIMIT ?
+            """,
+            (*params, limit),
+        )
         results: list[dict[str, Any]] = []
         for row in rows:
             recording_id = str(row["id"])
@@ -1337,105 +1552,112 @@ class MusicKBRepository:
             )
         return results
 
-    @staticmethod
-    def _intersect(current: set[str] | None, incoming: set[str]) -> set[str]:
-        return incoming if current is None else current.intersection(incoming)
-
-    def _text_ids(self, value: str) -> set[str]:
+    def _text_candidate_sql(self, value: str) -> tuple[str, list[Any]]:
         key = normalized(value)
-        ids: set[str] = set()
+        wildcard = f"%{key}%"
+        fallback_sql = """
+            SELECT DISTINCT r_query.id
+            FROM recording r_query
+            LEFT JOIN title_alias ta_query ON ta_query.recording_id = r_query.id
+            LEFT JOIN recording_artist ra_query ON ra_query.recording_id = r_query.id
+            LEFT JOIN artist a_query ON a_query.id = ra_query.artist_id
+            LEFT JOIN artist_alias aa_query ON aa_query.artist_id = a_query.id
+            WHERE r_query.canonical_analysis_id IS NOT NULL AND (
+                r_query.normalized_title LIKE ? OR ta_query.normalized_alias LIKE ?
+                OR a_query.normalized_name LIKE ? OR aa_query.normalized_alias LIKE ?
+            )
+        """
+        fallback_params: list[Any] = [wildcard, wildcard, wildcard, wildcard]
         query = fts_query(value)
-        if query:
-            try:
-                ids.update(
-                    str(row["recording_id"])
-                    for row in self.connection.execute(
-                        "SELECT recording_id FROM search_fts WHERE search_fts MATCH ?", (query,)
-                    )
-                )
-            except sqlite3.OperationalError:
-                # FTS syntax/tokenizer differences must not make exact alias
-                # search fail. The normalized lookup below remains available.
-                pass
-        wildcard = f"%{key}%"
-        ids.update(
-            str(row["id"])
-            for row in self.connection.execute(
-                """
-                SELECT DISTINCT r.id FROM recording r
-                LEFT JOIN title_alias ta ON ta.recording_id = r.id
-                LEFT JOIN recording_artist ra ON ra.recording_id = r.id
-                LEFT JOIN artist a ON a.id = ra.artist_id
-                LEFT JOIN artist_alias aa ON aa.artist_id = a.id
-                WHERE r.canonical_analysis_id IS NOT NULL AND (
-                    r.normalized_title LIKE ? OR ta.normalized_alias LIKE ?
-                    OR a.normalized_name LIKE ? OR aa.normalized_alias LIKE ?
-                )
-                """,
-                (wildcard, wildcard, wildcard, wildcard),
+        if query and self._fts_query_is_usable(query):
+            # FTS is the scalable full-text path, but it tokenizes ``Rockstar``
+            # separately from ``rock``. The normalized identity fallback must
+            # remain a UNION, not a data-dependent fallback, or a raw-analysis
+            # FTS hit would hide a partial title/artist alias match.
+            return (
+                "SELECT recording_id FROM search_fts WHERE search_fts MATCH ? UNION ALL " + fallback_sql,
+                [query, *fallback_params],
             )
+        return fallback_sql, fallback_params
+
+    def _fts_query_is_usable(self, query: str) -> bool:
+        try:
+            self.connection.execute(
+                "SELECT 1 FROM search_fts WHERE search_fts MATCH ? LIMIT 1", (query,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Preserve normalized title/artist lookup if an SQLite build or
+            # tokenizer rejects an otherwise sanitized FTS expression.
+            return False
+        return True
+
+    @staticmethod
+    def _title_candidate_sql(value: str) -> tuple[str, list[Any]]:
+        key = normalized(value)
+        wildcard = f"%{key}%"
+        return (
+            """
+            SELECT DISTINCT r_title.id
+            FROM recording r_title
+            LEFT JOIN title_alias ta_title ON ta_title.recording_id = r_title.id
+            WHERE r_title.canonical_analysis_id IS NOT NULL
+              AND (r_title.normalized_title LIKE ? OR ta_title.normalized_alias LIKE ?)
+            """,
+            [wildcard, wildcard],
         )
-        return ids
 
-    def _title_ids(self, value: str) -> set[str]:
+    @staticmethod
+    def _artist_candidate_sql(value: str) -> tuple[str, list[Any]]:
         key = normalized(value)
         wildcard = f"%{key}%"
-        return {
-            str(row["id"])
-            for row in self.connection.execute(
-                """
-                SELECT DISTINCT r.id FROM recording r
-                LEFT JOIN title_alias ta ON ta.recording_id = r.id
-                WHERE r.canonical_analysis_id IS NOT NULL
-                  AND (r.normalized_title LIKE ? OR ta.normalized_alias LIKE ?)
-                """,
-                (wildcard, wildcard),
-            )
-        }
+        return (
+            """
+            SELECT DISTINCT r_artist.id
+            FROM recording r_artist
+            JOIN recording_artist ra_artist ON ra_artist.recording_id = r_artist.id
+            JOIN artist a_artist ON a_artist.id = ra_artist.artist_id
+            LEFT JOIN artist_alias aa_artist ON aa_artist.artist_id = a_artist.id
+            WHERE r_artist.canonical_analysis_id IS NOT NULL
+              AND (a_artist.normalized_name LIKE ? OR aa_artist.normalized_alias LIKE ?)
+            """,
+            [wildcard, wildcard],
+        )
 
-    def _artist_ids(self, value: str) -> set[str]:
+    @staticmethod
+    def _tag_candidate_sql(value: str) -> tuple[str, list[Any]]:
         key = normalized(value)
-        wildcard = f"%{key}%"
-        return {
-            str(row["id"])
-            for row in self.connection.execute(
-                """
-                SELECT DISTINCT r.id FROM recording r
-                JOIN recording_artist ra ON ra.recording_id = r.id
-                JOIN artist a ON a.id = ra.artist_id
-                LEFT JOIN artist_alias aa ON aa.artist_id = a.id
-                WHERE r.canonical_analysis_id IS NOT NULL
-                  AND (a.normalized_name LIKE ? OR aa.normalized_alias LIKE ?)
-                """,
-                (wildcard, wildcard),
-            )
-        }
-
-    def _tag_ids(self, value: str) -> set[str]:
-        key = normalized(value)
-        return {
-            str(row["recording_id"])
-            for row in self.connection.execute(
-                """
-                SELECT DISTINCT ar.recording_id
-                FROM analysis_revision ar
-                JOIN analysis_tag at ON at.analysis_id = ar.id
-                JOIN tag t ON t.id = at.tag_id
-                LEFT JOIN tag_alias ta ON ta.tag_id = t.id
-                JOIN recording r ON r.canonical_analysis_id = ar.id
-                WHERE t.normalized_name = ? OR ta.normalized_alias = ?
-                UNION
-                SELECT DISTINCT rt.recording_id
-                FROM recording_tag rt
-                JOIN tag t ON t.id = rt.tag_id
-                LEFT JOIN tag_alias ta ON ta.tag_id = t.id
-                JOIN recording r ON r.id = rt.recording_id
-                WHERE r.canonical_analysis_id IS NOT NULL
-                  AND (t.normalized_name = ? OR ta.normalized_alias = ?)
-                """,
-                (key, key, key, key),
-            )
-        }
+        return (
+            """
+            SELECT ar_direct.recording_id
+            FROM tag t_direct
+            JOIN analysis_tag at_direct ON at_direct.tag_id = t_direct.id
+            JOIN analysis_revision ar_direct ON ar_direct.id = at_direct.analysis_id
+            JOIN recording r_direct ON r_direct.canonical_analysis_id = ar_direct.id
+            WHERE t_direct.normalized_name = ?
+            UNION ALL
+            SELECT ar_alias.recording_id
+            FROM tag_alias ta_analysis
+            JOIN analysis_tag at_alias ON at_alias.tag_id = ta_analysis.tag_id
+            JOIN analysis_revision ar_alias ON ar_alias.id = at_alias.analysis_id
+            JOIN recording r_alias ON r_alias.canonical_analysis_id = ar_alias.id
+            WHERE ta_analysis.normalized_alias = ?
+            UNION ALL
+            SELECT rt_direct.recording_id
+            FROM tag t_identity_direct
+            JOIN recording_tag rt_direct ON rt_direct.tag_id = t_identity_direct.id
+            JOIN recording r_identity_direct ON r_identity_direct.id = rt_direct.recording_id
+            WHERE r_identity_direct.canonical_analysis_id IS NOT NULL
+              AND t_identity_direct.normalized_name = ?
+            UNION ALL
+            SELECT rt_alias.recording_id
+            FROM tag_alias ta_identity
+            JOIN recording_tag rt_alias ON rt_alias.tag_id = ta_identity.tag_id
+            JOIN recording r_identity_alias ON r_identity_alias.id = rt_alias.recording_id
+            WHERE r_identity_alias.canonical_analysis_id IS NOT NULL
+              AND ta_identity.normalized_alias = ?
+            """,
+            [key, key, key, key],
+        )
 
     def get_canonical_analysis(self, recording_id: str, *, max_chars: int = 24_000) -> dict[str, Any]:
         row = self.connection.execute(
@@ -1613,6 +1835,11 @@ class MusicKBRepository:
 
     def validate(self) -> dict[str, Any]:
         issues: list[dict[str, Any]] = []
+        projection_state = self.connection.execute(
+            "SELECT value FROM meta WHERE key = ?", (SEARCH_PROJECTION_STATE_KEY,)
+        ).fetchone()
+        if projection_state is not None and str(projection_state["value"]) != SEARCH_PROJECTION_CURRENT:
+            issues.append({"code": "search_projection_dirty", "state": str(projection_state["value"])})
         foreign_keys = list(self.connection.execute("PRAGMA foreign_key_check"))
         for row in foreign_keys:
             issues.append({"code": "foreign_key", "table": row[0], "rowid": row[1], "parent": row[2]})
@@ -1641,9 +1868,11 @@ class MusicKBRepository:
             (
                 "missing_search_projection",
                 """
-                SELECT r.id FROM recording r
+                SELECT r.id
+                FROM recording r
                 WHERE r.canonical_analysis_id IS NOT NULL
-                  AND NOT EXISTS (SELECT 1 FROM search_fts f WHERE f.recording_id = r.id)
+                EXCEPT
+                SELECT f.recording_id FROM search_fts f
                 """,
             ),
             (
@@ -1701,6 +1930,73 @@ class MusicKBRepository:
             for row in self.connection.execute(sql):
                 issues.append({"code": code, "recording_id": str(row[0])})
         return {"valid": not issues, "issues": issues, "issue_count": len(issues)}
+
+
+def _decode_jsonl_object(raw_line: bytes, line_number: int) -> dict[str, Any]:
+    try:
+        line = raw_line.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValidationError(f"Invalid UTF-8 JSONL at line {line_number}") from exc
+    try:
+        item = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise ValidationError(f"Invalid JSONL at line {line_number}: {exc.msg}") from exc
+    if not isinstance(item, dict):
+        raise ValidationError(f"JSONL line {line_number} must be an object")
+    return item
+
+
+def iter_import_file(path: str | Path) -> Iterable[dict[str, Any]]:
+    """Yield generic import records, streaming physical-LF JSONL by extension.
+
+    A JSON object or array necessarily uses the conventional JSON decoder, but
+    the scalable path is an input named ``.jsonl`` or ``.ndjson``. Those files
+    are decoded one physical LF record at a time, preserving U+2028/U+2029
+    within JSON strings and never materializing the full corpus.
+    """
+
+    source = Path(path)
+    if not source.is_file():
+        raise ValidationError(f"Import input does not exist: {source}")
+    if source.suffix.casefold() not in {".jsonl", ".ndjson"}:
+        yield from load_import_file(source)
+        return
+
+    use_legacy_decoder = False
+    try:
+        with source.open("rb") as handle:
+            lines = enumerate(handle, 1)
+            first: tuple[int, bytes] | None = None
+            for line_number, raw_line in lines:
+                if raw_line.strip():
+                    first = (line_number, raw_line)
+                    break
+            if first is None:
+                return
+            first_line_number, first_raw_line = first
+            # Preserve the old permissive behavior for a JSON array saved
+            # under a .jsonl name. A real JSONL corpus always starts with an
+            # object and remains fully streaming below.
+            if first_raw_line.lstrip().startswith(b"["):
+                use_legacy_decoder = True
+            else:
+                try:
+                    first_item = _decode_jsonl_object(first_raw_line, first_line_number)
+                except ValidationError:
+                    # A pretty-printed single JSON object starts with `{` on
+                    # its own physical line. Let the legacy whole-file parser
+                    # retain that supported input shape without penalizing a
+                    # valid physical-LF JSONL stream.
+                    use_legacy_decoder = True
+                else:
+                    yield first_item
+                    for line_number, raw_line in lines:
+                        if raw_line.strip():
+                            yield _decode_jsonl_object(raw_line, line_number)
+    except OSError as exc:
+        raise ValidationError(f"Unable to read import input: {source}") from exc
+    if use_legacy_decoder:
+        yield from load_import_file(source)
 
 
 def load_import_file(path: str | Path) -> list[dict[str, Any]]:
