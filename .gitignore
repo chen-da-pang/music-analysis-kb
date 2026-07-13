@@ -1,0 +1,22 @@
+.DS_Store
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Databases and release artifacts are local operational data, never source.
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite.partial
+releases/
+incoming/
+.music-kb/
+
+# Do not commit credentials, SSH configuration, or production inputs.
+.env
+.env.*
+*.pem
+*.key
+data/private/
