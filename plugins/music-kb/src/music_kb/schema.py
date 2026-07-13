@@ -6,7 +6,7 @@ from pathlib import Path
 from .errors import DatabaseNotInitializedError, MusicKBError, ReadOnlyError
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 SCHEMA_SQL = """
@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS numeric_feature (
     value REAL NOT NULL,
     unit TEXT NOT NULL DEFAULT '',
     confidence REAL,
+    source TEXT NOT NULL DEFAULT 'model',
     PRIMARY KEY (analysis_id, name),
     CHECK(confidence IS NULL OR (confidence >= 0 AND confidence <= 1))
 );
@@ -319,7 +320,60 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
         # of attempting a second v2 table rename.
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-            (str(SCHEMA_VERSION),),
+            ("3",),
+        )
+
+
+def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
+    """Add provenance ownership to numeric parser features.
+
+    Analysis tags already carry a source label; numeric features need the same
+    distinction so a deterministic BPM backfill can replace its own value
+    without overwriting a manual/editorial measurement.
+    """
+
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(numeric_feature)")
+    }
+    with connection:
+        if "source" not in columns:
+            connection.execute(
+                "ALTER TABLE numeric_feature ADD COLUMN source TEXT NOT NULL DEFAULT 'model'"
+            )
+            # The column default applies to every pre-v4 row at ALTER time.
+            # Mark those rows explicitly as legacy, while retaining the same
+            # `model` default as a fresh v4 database for future generic imports.
+            connection.execute("UPDATE numeric_feature SET source = 'legacy'")
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("4",),
+        )
+
+
+def _migrate_v1_to_v4(connection: sqlite3.Connection) -> None:
+    """Upgrade the original plugin schema without falsely stamping v4.
+
+    Schema v1 predates campaign provenance and has the same old
+    ``numeric_feature`` shape (without ``source``). Current ``SCHEMA_SQL`` can
+    create the missing provenance tables idempotently, but it cannot add a
+    column to an existing numeric table. Perform that explicit alteration
+    before recording v4.
+    """
+
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(numeric_feature)")
+    }
+    with connection:
+        if "source" not in columns:
+            connection.execute(
+                "ALTER TABLE numeric_feature ADD COLUMN source TEXT NOT NULL DEFAULT 'model'"
+            )
+            connection.execute("UPDATE numeric_feature SET source = 'legacy'")
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("4",),
         )
 
 
@@ -347,8 +401,15 @@ def initialize_database(path: str | Path) -> Path:
     try:
         try:
             connection.execute("PRAGMA journal_mode = WAL")
+            if version == 1:
+                _migrate_v1_to_v4(connection)
+                version = 4
             if version == 2:
                 _migrate_v2_to_v3(connection)
+                version = 3
+            if version == 3:
+                _migrate_v3_to_v4(connection)
+                version = 4
             connection.executescript(SCHEMA_SQL)
         except sqlite3.OperationalError as exc:
             if "fts5" in str(exc).casefold():

@@ -17,6 +17,7 @@ from typing import Any
 
 from .errors import ValidationError
 from .normalization import normalized
+from .tagging import extract_music_flamingo_metadata
 
 
 REQUIRED_FIELDS = (
@@ -171,6 +172,7 @@ def to_import_payload(entries: Sequence[CampaignDeliveryEntry]) -> dict[str, Any
         raise ValidationError("Campaign delivery source-audio group cannot be empty")
     group = tuple(sorted(entries, key=lambda entry: (entry.manifest_index, entry.line_number)))
     entry = group[0]
+    tags, numeric_features = extract_music_flamingo_metadata(entry.output_text)
     title_aliases = list(
         dict.fromkeys(candidate.title for candidate in group if candidate.title != entry.title)
     )
@@ -206,6 +208,8 @@ def to_import_payload(entries: Sequence[CampaignDeliveryEntry]) -> dict[str, Any
             "generated_token_count": entry.generated_token_count,
             "quality_state": "passed",
         },
+        "tags": tags,
+        "numeric_features": numeric_features,
         "source_tracks": [
             {
                 "source": "kugou",

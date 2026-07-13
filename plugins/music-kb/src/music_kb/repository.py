@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from pathlib import Path
@@ -12,10 +13,12 @@ from .campaign_delivery import CampaignDeliveryEntry, group_campaign_delivery, t
 from .errors import NotFoundError, ValidationError
 from .normalization import fts_query, normalized, require_text
 from .schema import SCHEMA_VERSION, connect, ensure_initialized
+from .tagging import PARSER_SOURCE, PARSER_SOURCE_PREFIX, extract_music_flamingo_metadata
 
 
 MAX_SEARCH_LIMIT = 50
 MAX_FACET_LIMIT = 100
+DEFAULT_ENRICH_BATCH_SIZE = 500
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -77,6 +80,7 @@ class MusicKBRepository:
         *,
         _transactional: bool = True,
         _promote_existing: bool = True,
+        _rebuild_projection: bool = True,
     ) -> dict[str, Any]:
         """Import one immutable revision and make it canonical when eligible."""
 
@@ -158,7 +162,8 @@ class MusicKBRepository:
                 is_canonical = self._is_canonical(recording_id, existing_id)
                 if canonical_requested and _promote_existing:
                     self._set_canonical(recording_id, existing_id)
-                    self.rebuild_search_projection(recording_id)
+                    if _rebuild_projection:
+                        self.rebuild_search_projection(recording_id)
                     is_canonical = True
                 return {
                     "recording_id": recording_id,
@@ -226,7 +231,8 @@ class MusicKBRepository:
             self.connection.execute(
                 "UPDATE recording SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (recording_id,)
             )
-            self.rebuild_search_projection(recording_id)
+            if _rebuild_projection:
+                self.rebuild_search_projection(recording_id)
 
         return {
             "recording_id": recording_id,
@@ -261,7 +267,10 @@ class MusicKBRepository:
                 # idempotent, not re-promote an older revision over a newer
                 # canonical selection.
                 result = self.import_analysis(
-                    payload, _transactional=False, _promote_existing=False
+                    payload,
+                    _transactional=False,
+                    _promote_existing=False,
+                    _rebuild_projection=False,
                 )
                 recording_id = str(result["recording_id"])
                 analysis_id = str(result["analysis_id"])
@@ -274,8 +283,9 @@ class MusicKBRepository:
                     # seen a newly delivered source alias. Add that identity
                     # metadata explicitly before publishing the provenance.
                     self._ensure_campaign_group_identity_metadata(
-                        recording_id, payload
+                        recording_id, payload, rebuild_projection=False
                     )
+                    self._replace_parser_metadata(analysis_id, primary.output_text)
                 for entry in group:
                     self._assert_campaign_source_identity(recording_id, entry)
                 row = self.connection.execute(
@@ -298,6 +308,11 @@ class MusicKBRepository:
                         "provenance_idempotent": all(provenance_idempotent),
                     }
                 )
+            # Keep business rows and their FTS projection in the same outer
+            # transaction. Per-record deletes are quadratic at 100k scale, but
+            # a single full rebuild here rolls back the delivery as well if
+            # FTS5 rejects an insert.
+            self._rebuild_all_search_projections_in_transaction()
         return {
             "count": len(entries),
             "recording_count": len(imported),
@@ -307,8 +322,173 @@ class MusicKBRepository:
             "attempt_ids": sorted({entry.attempt_id for entry in entries}),
         }
 
+    def enrich_campaign_tags(
+        self, *, dry_run: bool = False, batch_size: int = DEFAULT_ENRICH_BATCH_SIZE
+    ) -> dict[str, Any]:
+        """Derive versioned tags for every current campaign canonical analysis.
+
+        This is a publisher-only, idempotent backfill for deliveries imported
+        before the deterministic parser existed. It never touches historical
+        revisions, manually supplied tag assignments, or client snapshots.
+        """
+
+        self._require_writer()
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not 1 <= batch_size <= 5_000:
+            raise ValidationError("batch_size must be an integer between 1 and 5000")
+
+        analysis_count = 0
+        tag_assignment_count = 0
+        numeric_feature_count = 0
+        inserted_tags = 0
+        inserted_features = 0
+        namespace_counts: Counter[str] = Counter()
+        unique_tags: set[tuple[str, str]] = set()
+        batch_count = 0
+        last_analysis_id = ""
+        while True:
+            rows = list(
+                self.connection.execute(
+                    """
+                    SELECT ar.id AS analysis_id, ar.recording_id, ar.raw_text
+                    FROM analysis_revision ar
+                    JOIN recording r ON r.canonical_analysis_id = ar.id
+                    WHERE ar.id > ?
+                      AND EXISTS (
+                          SELECT 1 FROM campaign_delivery_provenance c
+                          WHERE c.analysis_id = ar.id
+                      )
+                    ORDER BY ar.id LIMIT ?
+                    """,
+                    (last_analysis_id, batch_size),
+                )
+            )
+            if not rows:
+                break
+            batch_count += 1
+
+            derived = []
+            for row in rows:
+                tags, numeric_features = extract_music_flamingo_metadata(str(row["raw_text"]))
+                analysis_count += 1
+                tag_assignment_count += len(tags)
+                numeric_feature_count += len(numeric_features)
+                namespace_counts.update(str(tag["namespace"]) for tag in tags)
+                unique_tags.update((str(tag["namespace"]), str(tag["name"])) for tag in tags)
+                if not dry_run:
+                    derived.append((str(row["analysis_id"]), str(row["recording_id"]), tags, numeric_features))
+
+            if not dry_run:
+                # One bounded transaction per batch keeps memory stable at
+                # 100k scale and makes interrupted backfills safely resumable.
+                with self.connection:
+                    for analysis_id, recording_id, tags, numeric_features in derived:
+                        tag_count, feature_count = self._replace_parser_metadata(
+                            analysis_id, tags=tags, numeric_features=numeric_features
+                        )
+                        inserted_tags += tag_count
+                        inserted_features += feature_count
+            last_analysis_id = str(rows[-1]["analysis_id"])
+
+        summary = {
+            "analysis_count": analysis_count,
+            "tag_assignment_count": tag_assignment_count,
+            "unique_tag_count": len(unique_tags),
+            "namespace_counts": dict(sorted(namespace_counts.items())),
+            "numeric_feature_count": numeric_feature_count,
+            "parser_source": PARSER_SOURCE,
+            "batch_size": batch_size,
+            "batch_count": batch_count,
+        }
+        if dry_run:
+            return {"dry_run": True, **summary}
+        # A full rebuild does one FTS delete then inserts each current
+        # projection. Calling the single-record replace path for every row
+        # repeatedly scans FTS5's unindexed recording_id column at 100k scale.
+        self.rebuild_all_search_projections()
+        return {
+            "dry_run": False,
+            **summary,
+            "inserted_tag_assignment_count": inserted_tags,
+            "inserted_numeric_feature_count": inserted_features,
+        }
+
+    def _replace_parser_metadata(
+        self,
+        analysis_id: str,
+        raw_text: str | None = None,
+        *,
+        tags: Sequence[Mapping[str, Any]] | None = None,
+        numeric_features: Sequence[Mapping[str, Any]] | None = None,
+    ) -> tuple[int, int]:
+        """Replace only this parser version's assignments for one analysis."""
+
+        if tags is None or numeric_features is None:
+            if raw_text is None:
+                raise ValueError("raw_text is required when parser metadata is not supplied")
+            tags, numeric_features = extract_music_flamingo_metadata(raw_text)
+        self.connection.execute(
+            "DELETE FROM analysis_tag WHERE analysis_id = ? AND source = ?",
+            (analysis_id, PARSER_SOURCE),
+        )
+        self.connection.execute(
+            "DELETE FROM numeric_feature WHERE analysis_id = ? AND source = ?",
+            (analysis_id, PARSER_SOURCE),
+        )
+        inserted_tags = 0
+        for tag_data in tags:
+            tag_id, confidence = self._upsert_tag_from_payload(tag_data)
+            cursor = self.connection.execute(
+                """
+                INSERT INTO analysis_tag(analysis_id, tag_id, confidence, source)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(analysis_id, tag_id) DO UPDATE SET
+                    confidence = excluded.confidence,
+                    source = excluded.source
+                WHERE analysis_tag.source = ?
+                """,
+                (analysis_id, tag_id, confidence, PARSER_SOURCE, PARSER_SOURCE),
+            )
+            if cursor.rowcount > 0:
+                inserted_tags += 1
+
+        inserted_features = 0
+        for feature in numeric_features:
+            if not isinstance(feature, Mapping):
+                raise ValidationError("Each numeric feature must be an object")
+            name = require_text(feature.get("name"), "numeric_feature.name")
+            try:
+                value = float(feature.get("value"))
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("numeric_feature.value must be a number") from exc
+            unit = str(feature.get("unit") or "").strip()
+            confidence = feature.get("confidence")
+            if confidence is not None:
+                try:
+                    confidence = float(confidence)
+                except (TypeError, ValueError) as exc:
+                    raise ValidationError("numeric_feature.confidence must be a number") from exc
+            source = str(feature.get("source") or PARSER_SOURCE).strip()
+            if source != PARSER_SOURCE:
+                raise ValidationError("Parser numeric features must use the current parser source")
+            cursor = self.connection.execute(
+                """
+                INSERT INTO numeric_feature(analysis_id, name, value, unit, confidence, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(analysis_id, name) DO UPDATE SET
+                    value = excluded.value,
+                    unit = excluded.unit,
+                    confidence = excluded.confidence,
+                    source = excluded.source
+                WHERE numeric_feature.source = ?
+                """,
+                (analysis_id, normalized(name), value, unit, confidence, source, PARSER_SOURCE),
+            )
+            if cursor.rowcount > 0:
+                inserted_features += 1
+        return inserted_tags, inserted_features
+
     def _ensure_campaign_group_identity_metadata(
-        self, recording_id: str, payload: Mapping[str, Any]
+        self, recording_id: str, payload: Mapping[str, Any], *, rebuild_projection: bool = True
     ) -> None:
         """Attach new source aliases when a campaign import is analysis-idempotent."""
 
@@ -335,7 +515,8 @@ class MusicKBRepository:
         self.connection.execute(
             "UPDATE recording SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (recording_id,)
         )
-        self.rebuild_search_projection(recording_id)
+        if rebuild_projection:
+            self.rebuild_search_projection(recording_id)
 
     def _assert_campaign_source_bytes(self, entry: CampaignDeliveryEntry) -> None:
         """The same content SHA-256 cannot truthfully have different byte sizes."""
@@ -892,12 +1073,27 @@ class MusicKBRepository:
                 raise ValidationError("numeric_feature.confidence must be a number") from exc
             if not 0 <= confidence <= 1:
                 raise ValidationError("numeric_feature.confidence must be between 0 and 1")
+        source = str(feature.get("source") or "model").strip()
+        if not source:
+            raise ValidationError("numeric_feature.source must be a non-empty string")
         self.connection.execute(
             """
-            INSERT OR REPLACE INTO numeric_feature(analysis_id, name, value, unit, confidence)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO numeric_feature(analysis_id, name, value, unit, confidence, source)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(analysis_id, name) DO UPDATE SET
+                value = excluded.value,
+                unit = excluded.unit,
+                confidence = excluded.confidence,
+                source = excluded.source
             """,
-            (analysis_id, normalized(name), value, str(feature.get("unit") or "").strip(), confidence),
+            (
+                analysis_id,
+                normalized(name),
+                value,
+                str(feature.get("unit") or "").strip(),
+                confidence,
+                source,
+            ),
         )
 
     def _set_canonical(self, recording_id: str, analysis_id: str) -> None:
@@ -928,6 +1124,11 @@ class MusicKBRepository:
     def rebuild_search_projection(self, recording_id: str) -> None:
         self._require_writer()
         self.connection.execute("DELETE FROM search_fts WHERE recording_id = ?", (recording_id,))
+        self._insert_search_projection(recording_id)
+
+    def _insert_search_projection(self, recording_id: str) -> None:
+        """Insert one projection row when any prior row is already removed."""
+
         row = self.connection.execute(
             """
             SELECT r.id, r.canonical_title, ar.raw_text, ar.summary
@@ -942,6 +1143,7 @@ class MusicKBRepository:
         artists = self._artist_names(recording_id)
         aliases = self._aliases_for_recording(recording_id)
         tags = self._public_tag_names(recording_id)
+        tag_search_terms = [*tags, *self._public_tag_aliases(recording_id)]
         analysis = "\n".join(value for value in [str(row["summary"]), str(row["raw_text"])] if value)
         self.connection.execute(
             """
@@ -953,23 +1155,28 @@ class MusicKBRepository:
                 str(row["canonical_title"]),
                 " ".join(artists),
                 " ".join(aliases),
-                " ".join(tags),
+                " ".join(dict.fromkeys(tag_search_terms)),
                 analysis,
             ),
         )
 
     def rebuild_all_search_projections(self) -> int:
         self._require_writer()
+        with self.connection:
+            return self._rebuild_all_search_projections_in_transaction()
+
+    def _rebuild_all_search_projections_in_transaction(self) -> int:
+        """Replace every public FTS row within an already-open transaction."""
+
         recording_ids = [
             str(row["id"])
             for row in self.connection.execute(
                 "SELECT id FROM recording WHERE canonical_analysis_id IS NOT NULL"
             )
         ]
-        with self.connection:
-            self.connection.execute("DELETE FROM search_fts")
-            for recording_id in recording_ids:
-                self.rebuild_search_projection(recording_id)
+        self.connection.execute("DELETE FROM search_fts")
+        for recording_id in recording_ids:
+            self._insert_search_projection(recording_id)
         return len(recording_ids)
 
     def _artist_names(self, recording_id: str) -> list[str]:
@@ -1024,6 +1231,26 @@ class MusicKBRepository:
             (recording_id, recording_id),
         )
         return [str(row["canonical_name"]) for row in rows]
+
+    def _public_tag_aliases(self, recording_id: str) -> list[str]:
+        rows = self.connection.execute(
+            """
+            SELECT DISTINCT ta.alias
+            FROM recording r
+            JOIN analysis_revision ar ON ar.id = r.canonical_analysis_id
+            JOIN analysis_tag at ON at.analysis_id = ar.id
+            JOIN tag_alias ta ON ta.tag_id = at.tag_id
+            WHERE r.id = ?
+            UNION
+            SELECT DISTINCT ta.alias
+            FROM recording_tag rt
+            JOIN tag_alias ta ON ta.tag_id = rt.tag_id
+            WHERE rt.recording_id = ?
+            ORDER BY 1
+            """,
+            (recording_id, recording_id),
+        )
+        return [str(row["alias"]) for row in rows]
 
     # -- reads ------------------------------------------------------------
 
@@ -1237,7 +1464,7 @@ class MusicKBRepository:
             (analysis_id,),
         )
         numeric_rows = self.connection.execute(
-            "SELECT name, value, unit, confidence FROM numeric_feature WHERE analysis_id = ? ORDER BY name",
+            "SELECT name, value, unit, confidence, source FROM numeric_feature WHERE analysis_id = ? ORDER BY name",
             (analysis_id,),
         )
         provenance_rows = self.connection.execute(
@@ -1328,7 +1555,12 @@ class MusicKBRepository:
         selected_tags: Sequence[str] = (),
         max_tags: int = 24,
     ) -> dict[str, Any]:
-        """Compile only approved audible descriptors; never expose identity text."""
+        """Compile only approved audible descriptors; never expose identity text.
+
+        This legacy optional surface must not consume the retrieval-only Music
+        Flamingo parser assignments. The current database workflow stops at
+        retrieval; any future prompt workflow needs its own explicit approval.
+        """
 
         max_tags = max(1, min(int(max_tags), 48))
         safe_tags: dict[int, dict[str, Any]] = {}
@@ -1340,9 +1572,11 @@ class MusicKBRepository:
                 JOIN analysis_revision ar ON ar.id = r.canonical_analysis_id
                 JOIN analysis_tag at ON at.analysis_id = ar.id
                 JOIN tag t ON t.id = at.tag_id
-                WHERE r.id = ? AND t.suno_safe = 1
+                WHERE r.id = ?
+                  AND t.suno_safe = 1
+                  AND at.source NOT GLOB ?
                 """,
-                (recording_id,),
+                (recording_id, f"{PARSER_SOURCE_PREFIX}*"),
             )
             for row in rows:
                 safe_tags[int(row["id"])] = dict(row)

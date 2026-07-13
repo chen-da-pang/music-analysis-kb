@@ -15,7 +15,7 @@ at 100k-recording scale.
 | `campaign_delivery_provenance` | Immutable KuGou canonical-delivery evidence: delivery schema/campaign IDs, source title/artist, source/output hashes, bytes, manifest index, contract, attempt, canonical source, plus canonicalized model/runner/prompt/generation metadata. |
 | `tag_namespace`, `tag`, `tag_alias` | Namespaced, hierarchical tags and aliases without an arbitrary quantity cap. |
 | `analysis_tag`, `recording_tag` | Analysis-derived tags plus first-class title/artist identity tags. |
-| `numeric_feature` | BPM, duration, energy, and other numeric values. |
+| `numeric_feature` | BPM, duration, energy, and other numeric values, including a source label so parser backfills cannot overwrite manual/editorial measurements. |
 | `search_fts` | FTS5 projection of only the canonical public analysis. |
 
 ## Search order
@@ -37,3 +37,10 @@ tag retrieval and is not part of this first release.
   used on the master; release files are copied with the SQLite backup API.
 - Benchmark with a 100k-recording synthetic data set before adding
   `sqlite-vec`, splitting a database, or introducing a server database.
+- The deterministic `music_flamingo_parser_v1` source can backfill rich
+  analysis tags without changing canonical raw text. It replaces only its own
+  assignments, so manual editorial tags remain durable across parser reruns.
+- Schema v4 accepts publisher databases created by every released prior schema
+  (v1, v2, and v3). Existing numeric measurements are labelled `legacy` during
+  migration; new generic imports default to `model` and parser BPM values carry
+  their parser version, so ownership remains explicit.

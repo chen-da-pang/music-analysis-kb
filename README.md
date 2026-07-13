@@ -37,7 +37,7 @@ audit but are removed from client snapshots and never appear in MCP search.
 | --- | --- |
 | `music-kb` CLI | Publisher lifecycle: initialize, import, validate, create/verify/install snapshots, and local search. |
 | `music-kb-mcp` | Bounded, read-only local MCP interface for agents. |
-| `plugins/music-kb/skills/music-kb` | Retrieval and Suno-safe prompting workflow. |
+| `plugins/music-kb/skills/music-kb` | Retrieval workflow for canonical analyses and granular tags. |
 | Codex plugin | Packaging layer that ships the CLI/MCP/Skill together. It does not contain the database. |
 
 ## Quick start (publisher)
@@ -60,6 +60,11 @@ uv run music-kb import-campaign-delivery \
   --db "$HOME/.music-kb/music-master.sqlite" \
   --input /secure/path/kugou-canonical-delivery.jsonl \
   --expected-count 927
+
+# Derive versioned, fine-grained Music Flamingo tags from the canonical prose.
+# Run a coverage check first; the write command is publisher-only and idempotent.
+uv run music-kb enrich-campaign-tags --db "$HOME/.music-kb/music-master.sqlite" --dry-run
+uv run music-kb enrich-campaign-tags --db "$HOME/.music-kb/music-master.sqlite" --batch-size 500
 
 uv run music-kb validate --db "$HOME/.music-kb/music-master.sqlite"
 uv run music-kb snapshot create \
@@ -93,8 +98,14 @@ uv run music-kb search --tag "granular vocal chop" --limit 10
 uv run music-kb get rec_example
 ```
 
-MCP exposes only read tools: status, search, resolve title/artist, canonical
-analysis retrieval, tag facets, and a Suno-safe style compiler.
+The current MCP workflow uses read tools for status, search, title/artist
+resolution, canonical analysis retrieval, and tag facets.
+
+Campaign analyses receive deterministic, versioned tags for title, artist,
+section, genre, tempo/meter, rhythm, instrumentation, production/mix, harmony,
+vocal style, mood, structure, and lyric/theme retrieval. The raw model output
+is never rewritten. This release creates no model-output-to-Suno conversion:
+all of these tags exist to improve local retrieval.
 
 ## Documentation
 
