@@ -145,3 +145,39 @@ rejected.
 
 Real delivery JSONL, audio, lyrics, production SQLite files, and private paths
 must remain outside Git.
+
+## Deterministic campaign tag enrichment
+
+`music-kb enrich-campaign-tags` derives a versioned retrieval layer from the
+canonical Music Flamingo prose. It recognizes structured sections and explicit
+musical terms for genre, tempo/meter, rhythm, instruments, production/mix,
+harmony, vocal treatment, mood, and form; it also records an explicit BPM when
+the analysis states exactly one plausible value. It does **not** rewrite the
+raw analysis or make a second model/API call.
+
+```bash
+music-kb enrich-campaign-tags --db "$HOME/.music-kb/music-master.sqlite" --dry-run
+music-kb enrich-campaign-tags --db "$HOME/.music-kb/music-master.sqlite" --batch-size 500
+```
+
+The command is publisher-only, idempotent, and works only on current canonical
+campaign analyses. It replaces only its own parser-version assignments, keeps
+manual/other-source tags intact, and rejects client snapshot write targets.
+New campaign imports use the same parser automatically.
+
+Backfill processes bounded transactions (`--batch-size`, 1–5000, default 500)
+rather than materializing the corpus in memory, so a 100k-scale master can be
+resumed safely after an interruption.
+
+All tag families remain searchable. This stage has no model-output-to-Suno
+conversion: parser-derived tags are stored as retrieval candidates, including
+lyric/theme and structural labels. Song-title and artist identity tags are
+stored separately by the importer and remain available to exact-tag, title,
+and artist retrieval. The parser avoids treating an identity field such as
+`Title: Rock` as a genre, or a quoted lyric word such as `drop` as production,
+because those are false retrieval classifications rather than usable music
+descriptors.
+
+Each numeric feature records a `source`. Campaign BPM values use
+`music_flamingo_parser_v1`; a parser rerun replaces only that source and never
+overwrites `manual`, `model`, or migrated `legacy` measurements.

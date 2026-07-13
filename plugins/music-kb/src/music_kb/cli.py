@@ -61,6 +61,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optionally require an exact entry count (use 927 for the full campaign)",
     )
 
+    enricher = commands.add_parser(
+        "enrich-campaign-tags",
+        help="Derive fine-grained deterministic tags for current campaign canonical analyses",
+    )
+    _add_database_argument(enricher, required=True)
+    enricher.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report tag/feature coverage without changing the publisher database",
+    )
+    enricher.add_argument(
+        "--batch-size",
+        type=int,
+        default=500,
+        help="Bounded publisher backfill transaction size (1-5000; default: 500)",
+    )
+
     validator = commands.add_parser("validate", help="Validate canonical and search invariants")
     _add_database_argument(validator, required=True)
 
@@ -143,6 +160,14 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             args.db,
             read_only=False,
             operation=lambda repo: repo.import_campaign_delivery(entries),
+        )
+    if args.command == "enrich-campaign-tags":
+        return 0, _with_repository(
+            args.db,
+            read_only=False,
+            operation=lambda repo: repo.enrich_campaign_tags(
+                dry_run=args.dry_run, batch_size=args.batch_size
+            ),
         )
     if args.command == "validate":
         result = _with_repository(args.db, read_only=True, operation=lambda repo: repo.validate())
