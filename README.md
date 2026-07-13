@@ -54,6 +54,13 @@ uv run music-kb import-analysis \
   --db "$HOME/.music-kb/music-master.sqlite" \
   --input tests/fixtures/analysis.json
 
+# The CNB KuGou campaign uses its own strict, hash-verified JSONL adapter.
+# Keep the real delivery outside this repository; the full corpus should be 927.
+uv run music-kb import-campaign-delivery \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --input /secure/path/kugou-canonical-delivery.jsonl \
+  --expected-count 927
+
 uv run music-kb validate --db "$HOME/.music-kb/music-master.sqlite"
 uv run music-kb snapshot create \
   --db "$HOME/.music-kb/music-master.sqlite" \

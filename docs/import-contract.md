@@ -75,3 +75,73 @@ The importer never overwrites a revision. If a new passed import targets the
 same recording, the old canonical revision becomes `superseded` and the new
 revision becomes the sole canonical analysis. A duplicate output hash for the
 same recording is idempotent.
+
+## KuGou canonical campaign delivery
+
+Use `music-kb import-campaign-delivery` for the signed-off CNB/Music Flamingo
+campaign export. It is deliberately **not** a permissive variant of
+`import-analysis`: it accepts UTF-8 **LF JSONL only** (one object per physical
+line, no CRLF/blank lines, final LF required), validates the entire delivery
+before database writes, then imports it as one transaction.
+
+```bash
+music-kb import-campaign-delivery \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --input /secure/path/kugou-canonical-delivery.jsonl \
+  --expected-count 927
+```
+
+`--expected-count` is optional so that a small verified subset can be imported
+in development; use `927` when publishing the complete original campaign.
+The command never expects or stores audio bytes—`relative_audio_path` is audit
+metadata only.
+
+Each JSONL object requires at least these fields:
+
+```json
+{
+  "schema_version": 1,
+  "campaign_id": "kugou-20260706",
+  "id": "kugou-source-id",
+  "manifest_index": 0,
+  "title": "Example title",
+  "artist": "Example artist",
+  "relative_audio_path": "audio/0000-example.mp3",
+  "source_sha256": "64 lowercase hex characters",
+  "source_bytes": 1234567,
+  "output_text": "Exact Music Flamingo output text",
+  "output_text_sha256": "SHA-256 of UTF-8 output_text",
+  "generated_token_count": 993,
+  "max_new_tokens": 1400,
+  "contract": "generation-contract identifier",
+  "attempt_id": "CNB attempt identifier",
+  "canonical_source": "canonical delivery source identifier",
+  "provenance": {"optional": "additional immutable audit metadata"}
+}
+```
+
+The adapter verifies the output hash, `generated_token_count <= max_new_tokens`,
+safe relative paths, and unique `id`, `manifest_index`, and relative audio path
+throughout the delivery. It rejects Feigua names, tags, or metadata anywhere in
+the envelope. A repeated source SHA-256 is accepted only as a source alias: all
+of its rows must have identical bytes and exact output. They are aggregated
+into one stable recording/canonical analysis, with every source row retained as
+a source track, alternate titles retained as title aliases, and alternate
+artist credits retained as artist identities. A source SHA-256 becomes the
+stable recording identity; the KuGou ID remains a source-track ID. The
+resulting canonical analysis keeps immutable provenance for all delivery fields in
+`campaign_delivery_provenance`, including the delivery schema/campaign IDs,
+source title/artist, runner contract, attempt ID, and canonicalized producer
+metadata. Non-core producer fields (for example model/runtime/prompt hashes,
+generation controls, clip duration, and truncation status) are preserved inside
+that immutable provenance JSON even when the producer did not wrap them in a
+`provenance` object.
+
+`manifest_index` is a per-campaign, per-attempt delivery coordinate: a later
+campaign or a corrected later attempt may reuse the same index and
+canonical-source label without colliding with earlier provenance, while two
+contradictory rows that claim the same campaign/source/index/attempt are
+rejected.
+
+Real delivery JSONL, audio, lyrics, production SQLite files, and private paths
+must remain outside Git.

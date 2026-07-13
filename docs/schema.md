@@ -12,6 +12,7 @@ at 100k-recording scale.
 | `artist`, `artist_alias`, `recording_artist` | Canonical artist identities, aliases/pinyin/initials supplied by the importer, and roles. |
 | `title_alias` | Title variants, subtitle forms, punctuation-normalized forms, and supplied transliterations. |
 | `analysis_revision` | Immutable Music Flamingo output, model/prompt provenance, quality state, and output hash. |
+| `campaign_delivery_provenance` | Immutable KuGou canonical-delivery evidence: delivery schema/campaign IDs, source title/artist, source/output hashes, bytes, manifest index, contract, attempt, canonical source, plus canonicalized model/runner/prompt/generation metadata. |
 | `tag_namespace`, `tag`, `tag_alias` | Namespaced, hierarchical tags and aliases without an arbitrary quantity cap. |
 | `analysis_tag`, `recording_tag` | Analysis-derived tags plus first-class title/artist identity tags. |
 | `numeric_feature` | BPM, duration, energy, and other numeric values. |
