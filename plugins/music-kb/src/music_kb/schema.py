@@ -351,6 +351,32 @@ def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v1_to_v4(connection: sqlite3.Connection) -> None:
+    """Upgrade the original plugin schema without falsely stamping v4.
+
+    Schema v1 predates campaign provenance and has the same old
+    ``numeric_feature`` shape (without ``source``). Current ``SCHEMA_SQL`` can
+    create the missing provenance tables idempotently, but it cannot add a
+    column to an existing numeric table. Perform that explicit alteration
+    before recording v4.
+    """
+
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(numeric_feature)")
+    }
+    with connection:
+        if "source" not in columns:
+            connection.execute(
+                "ALTER TABLE numeric_feature ADD COLUMN source TEXT NOT NULL DEFAULT 'model'"
+            )
+            connection.execute("UPDATE numeric_feature SET source = 'legacy'")
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("4",),
+        )
+
+
 def initialize_database(path: str | Path) -> Path:
     database = _path(path)
     version: int | None = None
@@ -375,6 +401,9 @@ def initialize_database(path: str | Path) -> Path:
     try:
         try:
             connection.execute("PRAGMA journal_mode = WAL")
+            if version == 1:
+                _migrate_v1_to_v4(connection)
+                version = 4
             if version == 2:
                 _migrate_v2_to_v3(connection)
                 version = 3

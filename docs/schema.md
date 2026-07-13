@@ -40,3 +40,7 @@ tag retrieval and is not part of this first release.
 - The deterministic `music_flamingo_parser_v1` source can backfill rich
   analysis tags without changing canonical raw text. It replaces only its own
   assignments, so manual editorial tags remain durable across parser reruns.
+- Schema v4 accepts publisher databases created by every released prior schema
+  (v1, v2, and v3). Existing numeric measurements are labelled `legacy` during
+  migration; new generic imports default to `model` and parser BPM values carry
+  their parser version, so ownership remains explicit.

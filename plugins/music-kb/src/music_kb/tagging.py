@@ -15,7 +15,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
-PARSER_SOURCE = "music_flamingo_parser_v1"
+PARSER_SOURCE_PREFIX = "music_flamingo_parser_"
+PARSER_SOURCE = f"{PARSER_SOURCE_PREFIX}v1"
 
 
 @dataclass(frozen=True)
@@ -233,15 +234,17 @@ _INLINE_LYRIC_LABEL = re.compile(
     r"^\s*(?:[-*]|\d+[.)])?\s*(?:lyrics?|lyrical themes?|themes?|歌词|主题)\s*[-–—:]",
     re.IGNORECASE,
 )
-_IDENTITY_HEADING_TERM = (
-    r"title|track(?:\s+title)?|song(?:\s+title)?|artist(?:\s+name)?|"
-    r"performer|singer|album|composer|writer|lyricist|"
-    r"歌名|歌曲名|曲名|标题|歌手|艺人|艺术家|演唱者|专辑|作曲|作词"
-)
-_IDENTITY_HEADING = re.compile(
-    rf"^\s*{_IDENTITY_HEADING_TERM}(?:\s*(?:/|\\||&|and|与|和)\s*{_IDENTITY_HEADING_TERM})*\s*$",
+_IDENTITY_HEADING_TERM = re.compile(
+    r"^(?:"
+    r"(?:source\s+)?(?:title|titles|track(?:\s+(?:title|name))?|song(?:\s+(?:title|name))?)|"
+    r"(?:source\s+)?artists?(?:\s+(?:name|credit))?|"
+    r"performers?|singers?|albums?(?:\s+title)?|composers?|writers?|lyricists?|"
+    r"歌名|歌曲名|曲名|标题|歌手|艺人|艺术家|演唱者|专辑(?:名)?|作曲|作词"
+    r")$",
     re.IGNORECASE,
 )
+_IDENTITY_HEADING_JOINER = re.compile(r"\s*(?:/|\||&|\band\b|与|和)\s*", re.IGNORECASE)
+_HEADING_MARKDOWN_DECORATION = re.compile(r"^[\s#>*_`~]+|[\s*_`~]+$")
 
 
 def _corpus(raw_text: str) -> str:
@@ -275,7 +278,7 @@ def _add_tag(tags: dict[tuple[str, str], dict[str, Any]], payload: dict[str, Any
 
 def _extract_sections(corpus: str, tags: dict[tuple[str, str], dict[str, Any]]) -> None:
     for match in _HEADING.finditer(corpus):
-        heading = match.group(1).strip()
+        heading = _clean_heading(match.group(1))
         for name, terms in _SECTION_RULES:
             if any(term in heading for term in terms):
                 _add_tag(
@@ -293,6 +296,19 @@ def _extract_sections(corpus: str, tags: dict[tuple[str, str], dict[str, Any]]) 
                 )
 
 
+def _clean_heading(heading: str) -> str:
+    """Normalize Markdown wrappers before classifying a structured heading."""
+
+    return re.sub(r"\s+", " ", _HEADING_MARKDOWN_DECORATION.sub("", heading)).strip()
+
+
+def _is_identity_heading(heading: str) -> bool:
+    """Recognize identity labels without treating source metadata as music style."""
+
+    parts = [part.strip() for part in _IDENTITY_HEADING_JOINER.split(_clean_heading(heading)) if part.strip()]
+    return bool(parts) and all(_IDENTITY_HEADING_TERM.fullmatch(part) for part in parts)
+
+
 def _is_lyric_heading(heading: str) -> bool:
     """Return true only for an explicit lyric/theme section heading.
 
@@ -302,7 +318,7 @@ def _is_lyric_heading(heading: str) -> bool:
     not incidental prose, when it separates retained lyric material.
     """
 
-    return any(marker in heading for marker in _LYRIC_MARKERS)
+    return any(marker in _clean_heading(heading) for marker in _LYRIC_MARKERS)
 
 
 def _split_descriptor_and_lyric_corpora(corpus: str) -> tuple[str, str]:
@@ -325,7 +341,7 @@ def _split_descriptor_and_lyric_corpora(corpus: str) -> tuple[str, str]:
         heading_match = _LINE_HEADING.match(line)
         if heading_match:
             heading = heading_match.group(1)
-            if _IDENTITY_HEADING.fullmatch(heading):
+            if _is_identity_heading(heading):
                 section_kind = "identity"
             elif _is_lyric_heading(heading):
                 section_kind = "lyric"

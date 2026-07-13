@@ -13,7 +13,7 @@ from .campaign_delivery import CampaignDeliveryEntry, group_campaign_delivery, t
 from .errors import NotFoundError, ValidationError
 from .normalization import fts_query, normalized, require_text
 from .schema import SCHEMA_VERSION, connect, ensure_initialized
-from .tagging import PARSER_SOURCE, extract_music_flamingo_metadata
+from .tagging import PARSER_SOURCE, PARSER_SOURCE_PREFIX, extract_music_flamingo_metadata
 
 
 MAX_SEARCH_LIMIT = 50
@@ -308,9 +308,11 @@ class MusicKBRepository:
                         "provenance_idempotent": all(provenance_idempotent),
                     }
                 )
-        # Rebuild the FTS table once after the delivery transaction commits;
-        # per-record FTS deletes are quadratic at a 100k-scale publisher.
-        self.rebuild_all_search_projections()
+            # Keep business rows and their FTS projection in the same outer
+            # transaction. Per-record deletes are quadratic at 100k scale, but
+            # a single full rebuild here rolls back the delivery as well if
+            # FTS5 rejects an insert.
+            self._rebuild_all_search_projections_in_transaction()
         return {
             "count": len(entries),
             "recording_count": len(imported),
@@ -1160,16 +1162,21 @@ class MusicKBRepository:
 
     def rebuild_all_search_projections(self) -> int:
         self._require_writer()
+        with self.connection:
+            return self._rebuild_all_search_projections_in_transaction()
+
+    def _rebuild_all_search_projections_in_transaction(self) -> int:
+        """Replace every public FTS row within an already-open transaction."""
+
         recording_ids = [
             str(row["id"])
             for row in self.connection.execute(
                 "SELECT id FROM recording WHERE canonical_analysis_id IS NOT NULL"
             )
         ]
-        with self.connection:
-            self.connection.execute("DELETE FROM search_fts")
-            for recording_id in recording_ids:
-                self._insert_search_projection(recording_id)
+        self.connection.execute("DELETE FROM search_fts")
+        for recording_id in recording_ids:
+            self._insert_search_projection(recording_id)
         return len(recording_ids)
 
     def _artist_names(self, recording_id: str) -> list[str]:
@@ -1548,7 +1555,12 @@ class MusicKBRepository:
         selected_tags: Sequence[str] = (),
         max_tags: int = 24,
     ) -> dict[str, Any]:
-        """Compile only approved audible descriptors; never expose identity text."""
+        """Compile only approved audible descriptors; never expose identity text.
+
+        This legacy optional surface must not consume the retrieval-only Music
+        Flamingo parser assignments. The current database workflow stops at
+        retrieval; any future prompt workflow needs its own explicit approval.
+        """
 
         max_tags = max(1, min(int(max_tags), 48))
         safe_tags: dict[int, dict[str, Any]] = {}
@@ -1560,9 +1572,11 @@ class MusicKBRepository:
                 JOIN analysis_revision ar ON ar.id = r.canonical_analysis_id
                 JOIN analysis_tag at ON at.analysis_id = ar.id
                 JOIN tag t ON t.id = at.tag_id
-                WHERE r.id = ? AND t.suno_safe = 1
+                WHERE r.id = ?
+                  AND t.suno_safe = 1
+                  AND at.source NOT GLOB ?
                 """,
-                (recording_id,),
+                (recording_id, f"{PARSER_SOURCE_PREFIX}*"),
             )
             for row in rows:
                 safe_tags[int(row["id"])] = dict(row)

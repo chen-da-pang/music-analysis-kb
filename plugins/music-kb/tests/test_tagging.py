@@ -132,6 +132,22 @@ Production: sidechain compression and controlled reverb create the pulse.
     assert ("genre", "house") not in names
 
 
+@pytest.mark.parametrize(
+    "raw_text",
+    (
+        "**Title:** Rock\n**Artist:** The Trap House\nProduction: piano.",
+        "### Title: Rock\n### Artists: The Trap House\nProduction: piano.",
+        "Track Name: Rock\nSource Artist: The Trap House\nProduction: piano.",
+        "Source Title: Rock\nArtist Credit: The Trap House\nProduction: piano.",
+    ),
+)
+def test_extractor_excludes_markdown_and_source_identity_labels(raw_text: str) -> None:
+    tags, _ = extract_music_flamingo_metadata(raw_text)
+    names = tag_names(tags)
+    assert ("instrument", "piano") in names
+    assert not {"rock", "trap", "house"}.intersection({name for _, name in names})
+
+
 def test_campaign_import_indexes_parser_tags_for_retrieval(tmp_path: Path) -> None:
     record = fixture_record()
     record["output_text"] = SYNTHETIC_ANALYSIS
@@ -212,6 +228,37 @@ def test_publisher_backfill_is_idempotent_and_preserves_manual_assignments(tmp_p
         assert repository.validate()["valid"] is True
 
 
+def test_retrieval_parser_tags_do_not_feed_the_optional_legacy_style_compiler(tmp_path: Path) -> None:
+    record = fixture_record()
+    record["output_text"] = SYNTHETIC_ANALYSIS
+    record["output_text_sha256"] = hashlib.sha256(SYNTHETIC_ANALYSIS.encode("utf-8")).hexdigest()
+    path = write_jsonl(tmp_path / "campaign.jsonl", record)
+    database = tmp_path / "master.sqlite"
+    initialize_database(database)
+    with MusicKBRepository(database) as repository:
+        # Simulate a pre-existing global tag that was approved/safe before the
+        # retrieval parser began assigning the same namespace/name.
+        repository.import_analysis(
+            {
+                "recording": {"id": "rec_safe_seed", "title": "safe seed"},
+                "artists": [{"name": "safe seed artist"}],
+                "analysis": {"raw_text": "seed", "quality_state": "passed"},
+                "tags": [{"namespace": "genre", "name": "trap", "status": "approved", "suno_safe": True}],
+                "numeric_features": [],
+                "source_tracks": [],
+            }
+        )
+        imported = repository.import_campaign_delivery(load_campaign_delivery_file(path))
+        recording_id = imported["imports"][0]["recording_id"]
+        canonical = repository.get_canonical_analysis(recording_id)
+        parser_trap = next(
+            tag for tag in canonical["tags"] if tag["namespace"] == "genre" and tag["canonical_name"] == "trap"
+        )
+        assert parser_trap["source"] == PARSER_SOURCE
+        assert parser_trap["suno_safe"] == 1  # global tag state remains intentionally shared
+        assert repository.compile_suno_style(recording_ids=[recording_id])["style_prompt"] == ""
+
+
 def test_backfill_cli_dry_run_and_snapshot_write_rejection(tmp_path: Path) -> None:
     record = fixture_record()
     record["output_text"] = SYNTHETIC_ANALYSIS
@@ -278,6 +325,23 @@ def test_campaign_import_defers_fts_rebuild_until_the_full_delivery(tmp_path: Pa
         assert len(repository.search(query="music")) == 2
 
 
+def test_campaign_import_rolls_back_when_the_final_fts_rebuild_fails(tmp_path: Path) -> None:
+    path = write_jsonl(tmp_path / "campaign.jsonl", fixture_record())
+    database = tmp_path / "master.sqlite"
+    initialize_database(database)
+    with MusicKBRepository(database) as repository:
+        with patch.object(
+            repository,
+            "_insert_search_projection",
+            side_effect=sqlite3.OperationalError("forced FTS failure"),
+        ):
+            with pytest.raises(sqlite3.OperationalError, match="forced FTS failure"):
+                repository.import_campaign_delivery(load_campaign_delivery_file(path))
+        assert repository.status()["counts"]["recordings"] == 0
+        assert repository.status()["counts"]["campaign_delivery_provenance"] == 0
+        assert repository.connection.execute("SELECT COUNT(*) FROM search_fts").fetchone()[0] == 0
+
+
 def test_init_migrates_v3_numeric_feature_source_and_preserves_legacy_value(tmp_path: Path) -> None:
     record = fixture_record()
     record["output_text"] = SYNTHETIC_ANALYSIS
@@ -333,5 +397,80 @@ def test_init_migrates_v3_numeric_feature_source_and_preserves_legacy_value(tmp_
             (analysis_id,),
         ).fetchone()
         assert dict(preserved) == {"value": 130.43, "source": "legacy"}
+        assert repository.status()["schema_version"] == 4
+        assert repository.validate()["valid"] is True
+
+
+def test_init_migrates_real_v1_shape_before_marking_schema_v4(tmp_path: Path) -> None:
+    database = tmp_path / "master.sqlite"
+    initialize_database(database)
+    legacy_payload = {
+        "recording": {"id": "rec_v1_legacy", "title": "legacy record"},
+        "artists": [{"name": "legacy artist"}],
+        "analysis": {"raw_text": "legacy analysis", "quality_state": "passed"},
+        "tags": [],
+        "numeric_features": [{"name": "bpm", "value": 99, "unit": "bpm"}],
+        "source_tracks": [],
+    }
+    with MusicKBRepository(database) as repository:
+        repository.import_analysis(legacy_payload)
+
+    # v1 had no campaign provenance table and no numeric_feature.source.
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE campaign_delivery_provenance")
+        connection.execute("ALTER TABLE numeric_feature RENAME TO numeric_feature_v4")
+        connection.execute(
+            """
+            CREATE TABLE numeric_feature (
+                analysis_id TEXT NOT NULL REFERENCES analysis_revision(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                value REAL NOT NULL,
+                unit TEXT NOT NULL DEFAULT '',
+                confidence REAL,
+                PRIMARY KEY (analysis_id, name),
+                CHECK(confidence IS NULL OR (confidence >= 0 AND confidence <= 1))
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO numeric_feature(analysis_id, name, value, unit, confidence)
+            SELECT analysis_id, name, value, unit, confidence FROM numeric_feature_v4
+            """
+        )
+        connection.execute("DROP TABLE numeric_feature_v4")
+        connection.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+
+    initialize_database(database)
+    with MusicKBRepository(database) as repository:
+        legacy = repository.connection.execute(
+            """
+            SELECT nf.source FROM numeric_feature nf
+            JOIN analysis_revision ar ON ar.id = nf.analysis_id
+            WHERE ar.recording_id = 'rec_v1_legacy' AND nf.name = 'bpm'
+            """
+        ).fetchone()
+        assert legacy["source"] == "legacy"
+        assert repository.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'campaign_delivery_provenance'"
+        ).fetchone()
+        repository.import_analysis(
+            {
+                "recording": {"id": "rec_v4_new", "title": "new record"},
+                "artists": [{"name": "new artist"}],
+                "analysis": {"raw_text": "new analysis", "quality_state": "passed"},
+                "tags": [],
+                "numeric_features": [{"name": "bpm", "value": 120, "unit": "bpm"}],
+                "source_tracks": [],
+            }
+        )
+        created = repository.connection.execute(
+            """
+            SELECT nf.source FROM numeric_feature nf
+            JOIN analysis_revision ar ON ar.id = nf.analysis_id
+            WHERE ar.recording_id = 'rec_v4_new' AND nf.name = 'bpm'
+            """
+        ).fetchone()
+        assert created["source"] == "model"
         assert repository.status()["schema_version"] == 4
         assert repository.validate()["valid"] is True

@@ -169,6 +169,13 @@ Backfill processes bounded transactions (`--batch-size`, 1–5000, default 500)
 rather than materializing the corpus in memory, so a 100k-scale master can be
 resumed safely after an interruption.
 
+A campaign delivery rebuilds its FTS projection once, inside the same SQLite
+transaction as the immutable delivery rows: an FTS failure rolls back the
+delivery rather than publishing a partially searchable campaign. Backfill
+batches are intentionally resumable; rerunning `enrich-campaign-tags` after an
+interruption refreshes its parser assignments and performs the final full FTS
+rebuild again.
+
 All tag families remain searchable. This stage has no model-output-to-Suno
 conversion: parser-derived tags are stored as retrieval candidates, including
 lyric/theme and structural labels. Song-title and artist identity tags are
