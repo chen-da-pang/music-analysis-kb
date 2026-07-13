@@ -18,6 +18,21 @@
 Never rsync `music-master.sqlite` while it is writable. Never grant client
 agents write access to a snapshot.
 
+## Schema v5 publisher upgrade
+
+Before using the 100k generic-import path against a pre-existing schema-v4
+master, run the one-time local migration on the publisher machine:
+
+```bash
+music-kb init --db "$HOME/.music-kb/music-master.sqlite"
+music-kb validate --db "$HOME/.music-kb/music-master.sqlite"
+```
+
+This installs the canonical-switch and exact-tag indexes and records the FTS
+projection state. It never rewrites Music Flamingo raw text or uploads data.
+Create and distribute a fresh snapshot after the migration; do not try to
+initialize a client snapshot directly.
+
 ## Client update
 
 The supplied `plugins/music-kb/scripts/pull-release.sh` stages an rsync release

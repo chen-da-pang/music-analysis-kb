@@ -33,14 +33,30 @@ tag retrieval and is not part of this first release.
 
 - Keep direct lookup indexes on normalized tag names/aliases, title aliases,
   artist aliases, canonical pointers, and tag assignments.
+- Canonical promotion uses a `(recording_id, status)` revision index. This
+  avoids scanning every canonical revision as a generic importer grows from
+  10k toward 100k records.
+- `meta.search_projection_state` is `current` only after the full public FTS5
+  projection is complete. Interrupted resumable generic/backfill batches mark
+  it `dirty`; validation blocks snapshot publishing until `rebuild-search` or
+  the completing importer restores it.
+- Projection validation compares the canonical recording IDs with the FTS IDs
+  as two sets, rather than performing a correlated scan of FTS5's deliberately
+  unindexed `recording_id` column.
 - Keep client databases read-only and use one publisher writer. SQLite WAL is
   used on the master; release files are copied with the SQLite backup API.
 - Benchmark with a 100k-recording synthetic data set before adding
   `sqlite-vec`, splitting a database, or introducing a server database.
+- Run `uv run python scripts/benchmark_100k.py` from `plugins/music-kb` for a
+  reproducible physical-LF JSONL import/read benchmark. It generates only
+  synthetic data in a temporary directory by default.
 - The deterministic `music_flamingo_parser_v1` source can backfill rich
   analysis tags without changing canonical raw text. It replaces only its own
   assignments, so manual editorial tags remain durable across parser reruns.
-- Schema v4 accepts publisher databases created by every released prior schema
-  (v1, v2, and v3). Existing numeric measurements are labelled `legacy` during
-  migration; new generic imports default to `model` and parser BPM values carry
-  their parser version, so ownership remains explicit.
+- Schema v5 accepts publisher databases created by every released prior schema
+  (v1–v4). Upgrading a v4 publisher master with `music-kb init --db ...` is a
+  required one-time gate before the new 100k paths are used: it installs the
+  canonical-switch and exact-tag indexes and records the FTS projection state.
+  Existing numeric measurements are labelled `legacy` during migration; new
+  generic imports default to `model` and parser BPM values carry their parser
+  version, so ownership remains explicit.

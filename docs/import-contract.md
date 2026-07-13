@@ -5,6 +5,14 @@ record is an approved Music Flamingo analysis for one recording. The importer
 creates an immutable revision, runs the canonical switch inside a transaction,
 and rebuilds the search projection.
 
+For a large generic update, use a file named `.jsonl` or `.ndjson`: it is read
+one **physical LF** line at a time and is never loaded as a 100k-record Python
+list. JSON object and JSON-array inputs remain supported for small/manual
+imports, but they intentionally use the normal whole-file JSON decoder. For
+backward compatibility, a JSON array or pretty-printed JSON object saved with
+a `.jsonl`/`.ndjson` suffix also uses that legacy whole-file decoder; only
+one-object-per-physical-LF files take the streaming path.
+
 ```json
 {
   "recording": {
@@ -75,6 +83,40 @@ The importer never overwrites a revision. If a new passed import targets the
 same recording, the old canonical revision becomes `superseded` and the new
 revision becomes the sole canonical analysis. A duplicate output hash for the
 same recording is idempotent.
+
+## Generic 100k-scale import and recovery
+
+Use the generic importer only for normal Music Flamingo records. Its default
+`--batch-size 500` keeps importer memory bounded and commits one durable batch
+at a time; valid values are 1–5000.
+
+```bash
+music-kb import-analysis \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --input /secure/path/new-analyses.jsonl \
+  --batch-size 500
+```
+
+The final FTS5 projection is rebuilt once after all generic batches rather
+than once per song. If a later input row or final rebuild fails, earlier
+committed batches remain durable and their revisions are safely idempotent on
+retry. The database records `search_projection_state=dirty`; `music-kb
+validate` and snapshot creation then fail closed until either the corrected
+import finishes or the publisher explicitly restores the projection:
+
+```bash
+music-kb rebuild-search --db "$HOME/.music-kb/music-master.sqlite"
+music-kb validate --db "$HOME/.music-kb/music-master.sqlite"
+```
+
+Do not create or sync a release while validation reports
+`search_projection_dirty`. The JSON result from a large generic import is a
+bounded count summary (`created_count`, `idempotent_count`, `batch_count`), not
+a 100k-element list of individual rows. For compatibility with the original
+small-import CLI shape it also includes `imports`, but only the first 1000
+per-record results. Callers must check `imports_truncated`; when it is `true`,
+the count fields are authoritative and the omitted result rows were still
+committed normally.
 
 ## KuGou canonical campaign delivery
 
