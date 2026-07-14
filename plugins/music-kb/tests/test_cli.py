@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import music_kb.cli as cli
+
 
 FIXTURE = Path(__file__).parent / "fixtures" / "analysis.json"
 
@@ -136,3 +138,101 @@ def test_doctor_reports_missing_default_database(tmp_path: Path, monkeypatch) ->
     parsed = json.loads(result.stdout)
     assert parsed["ok"] is False
     assert parsed["result"]["ready"] is False
+
+
+def test_cli_publish_push_dry_run_has_a_machine_readable_plan(tmp_path: Path) -> None:
+    database = tmp_path / "master.sqlite"
+    assert run_cli("--json", "init", "--db", str(database)).returncode == 0
+    assert run_cli("--json", "import-analysis", "--db", str(database), "--input", str(FIXTURE)).returncode == 0
+    created = run_cli(
+        "--json",
+        "snapshot",
+        "create",
+        "--db",
+        str(database),
+        "--output-dir",
+        str(tmp_path / "releases"),
+        "--name",
+        "cli-distribution-fixture",
+    )
+    assert created.returncode == 0, created.stderr
+    release_dir = json.loads(created.stdout)["result"]["release_dir"]
+
+    key = tmp_path / "id_ed25519"
+    key.write_text("fixture key", encoding="utf-8")
+    peers = tmp_path / "peers.toml"
+    peers.write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[defaults]",
+                f'identity_file = "{key}"',
+                "",
+                "[[peers]]",
+                'name = "cli-peer"',
+                'host = "cli.example.test"',
+                'user = "music-user"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pushed = run_cli(
+        "--json",
+        "publish",
+        "push",
+        "--release-dir",
+        release_dir,
+        "--peers-file",
+        str(peers),
+        "--dry-run",
+    )
+
+    assert pushed.returncode == 0, pushed.stderr
+    parsed = json.loads(pushed.stdout)
+    assert parsed["ok"] is True
+    assert parsed["result"]["release_name"] == "cli-distribution-fixture"
+    assert parsed["result"]["peers"][0]["status"] == "planned"
+
+
+def test_cli_publish_partial_failure_exits_one_with_json_result(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        cli,
+        "publish_snapshot",
+        lambda *args, **kwargs: {
+            "release_name": "fixture-release",
+            "release_dir": "/private/release",
+            "dry_run": False,
+            "peer_count": 2,
+            "succeeded_count": 1,
+            "failed_count": 1,
+            "peers": [],
+        },
+    )
+
+    exit_code = cli.main(
+        [
+            "--json",
+            "publish",
+            "push",
+            "--release-dir",
+            "/private/release",
+            "--peers-file",
+            "/private/peers.toml",
+        ]
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False,
+        "result": {
+            "dry_run": False,
+            "failed_count": 1,
+            "peer_count": 2,
+            "peers": [],
+            "release_dir": "/private/release",
+            "release_name": "fixture-release",
+            "succeeded_count": 1,
+        },
+    }

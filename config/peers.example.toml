@@ -1,0 +1,22 @@
+# Copy this file outside the repository, for example to:
+#   ~/.config/music-kb/peers.toml
+# Then replace every placeholder. Do not commit the copied file.
+
+version = 1
+
+[defaults]
+# The installed CLI is required on each colleague computer. The publisher uses
+# it remotely to verify and atomically switch the local snapshot.
+target_dir = "~/.music-kb"
+# `install-local.sh` installs this executable by default. Set an explicit
+# alternative here if the colleague uses UV_TOOL_BIN_DIR or a wrapper path.
+cli_path = "~/.local/bin/music-kb"
+port = 22
+connect_timeout_seconds = 10
+command_timeout_seconds = 600
+identity_file = "~/.ssh/music-kb-sync"
+
+[[peers]]
+name = "first-colleague"
+host = "192.0.2.42" # Documentation-only address. Use a private local config.
+user = "macos-user"

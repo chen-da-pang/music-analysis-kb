@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 from pathlib import Path
 
 import pytest
 
-from music_kb.errors import ReadOnlyError, SnapshotVerificationError
+from music_kb.errors import ReadOnlyError, SnapshotVerificationError, ValidationError
 from music_kb.repository import MusicKBRepository
 from music_kb.snapshot import create_snapshot, install_snapshot, verify_snapshot
 
@@ -72,6 +73,24 @@ def test_verify_rejects_tampered_database(master_database, tmp_path: Path) -> No
         handle.write(b"tampered")
     with pytest.raises(SnapshotVerificationError, match="SHA-256 mismatch"):
         verify_snapshot(release["manifest"])
+
+
+@pytest.mark.parametrize("release_name", ["release;id #", "release name", "../outside", ".", "-starts-with-dash"])
+def test_snapshot_release_name_rejects_shell_unsafe_values(master_database, tmp_path: Path, release_name: str) -> None:
+    with pytest.raises(ValidationError, match="release name"):
+        create_snapshot(master_database, tmp_path / "published", release_name=release_name)
+
+
+def test_verify_rejects_shell_unsafe_manifest_release_name(master_database, tmp_path: Path) -> None:
+    release = create_snapshot(master_database, tmp_path / "published", release_name="safe-release")
+    manifest_path = Path(release["manifest"])
+    os.chmod(manifest_path, 0o644)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["release_name"] = "release;id #"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(SnapshotVerificationError, match="release name is unsafe"):
+        verify_snapshot(manifest_path)
 
 
 def test_client_snapshot_rejects_writer_operations_even_if_file_is_made_writable(

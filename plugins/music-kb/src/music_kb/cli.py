@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .campaign_delivery import load_campaign_delivery_file
+from .distribution import publish_snapshot
 from .errors import DatabaseNotInitializedError, MusicKBError
 from .repository import MusicKBRepository, iter_import_file
 from .schema import SCHEMA_VERSION, initialize_database
@@ -118,6 +119,28 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--release-dir", type=Path, required=True)
     install.add_argument("--target-dir", type=Path, default=Path("~/.music-kb").expanduser())
 
+    publish = commands.add_parser(
+        "publish", help="Safely distribute an immutable release to private SSH peers"
+    )
+    publish_commands = publish.add_subparsers(dest="publish_command", required=True)
+    push = publish_commands.add_parser(
+        "push", help="Stage, verify, and atomically install one release on each configured peer"
+    )
+    push.add_argument("--release-dir", type=Path, required=True, help="Verified immutable release directory")
+    push.add_argument(
+        "--peers-file",
+        type=Path,
+        required=True,
+        help="Private TOML peer inventory; do not commit this file",
+    )
+    push.add_argument(
+        "--peer",
+        action="append",
+        default=[],
+        help="Only publish to this peer name; repeat to target multiple peers",
+    )
+    push.add_argument("--dry-run", action="store_true", help="Validate inputs and show the per-peer plan only")
+
     return parser
 
 
@@ -218,6 +241,15 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             return 0, verify_snapshot(args.manifest)
         if args.snapshot_command == "install":
             return 0, install_snapshot(args.release_dir, args.target_dir)
+    if args.command == "publish":
+        if args.publish_command == "push":
+            result = publish_snapshot(
+                args.release_dir,
+                args.peers_file,
+                peer_names=args.peer,
+                dry_run=args.dry_run,
+            )
+            return (0 if result["failed_count"] == 0 else 1), result
     raise AssertionError("unhandled command")
 
 
@@ -226,9 +258,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         code, result = run(args)
-        if args.command == "doctor" and code == 1:
-            # Missing client configuration is a normal doctor result, not an
-            # exception. Keep its JSON shape machine-readable.
+        if args.command in {"doctor", "publish"} and code == 1:
+            # Missing client configuration and per-peer publish failures are
+            # normal result states, not unstructured exceptions. Keep their
+            # JSON shape machine-readable while preserving a non-zero status.
             if args.as_json:
                 print(json.dumps({"ok": False, "result": result}, ensure_ascii=False, sort_keys=True))
             else:

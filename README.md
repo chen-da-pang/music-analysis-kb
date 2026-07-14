@@ -35,7 +35,7 @@ audit but are removed from client snapshots and never appear in MCP search.
 
 | Component | Role |
 | --- | --- |
-| `music-kb` CLI | Publisher lifecycle: initialize, import, validate, create/verify/install snapshots, and local search. |
+| `music-kb` CLI | Publisher lifecycle: initialize, import, validate, create/verify/install snapshots, SSH/rsync fan-out, and local search. |
 | `music-kb-mcp` | Bounded, read-only local MCP interface for agents. |
 | `plugins/music-kb/skills/music-kb` | Retrieval workflow for canonical analyses and granular tags. |
 | Codex plugin | Packaging layer that ships the CLI/MCP/Skill together. It does not contain the database. |
@@ -78,6 +78,12 @@ uv run music-kb snapshot create \
   --db "$HOME/.music-kb/music-master.sqlite" \
   --output-dir "$HOME/.music-kb/releases" \
   --name music-kb-2026w29
+
+# Peer details remain in a private local TOML file, never in this repository.
+uv run music-kb --json publish push \
+  --release-dir "$HOME/.music-kb/releases/music-kb-2026w29" \
+  --peers-file "$HOME/.config/music-kb/peers.toml" \
+  --dry-run
 ```
 
 ## Quick start (colleague)
@@ -93,8 +99,18 @@ uv run music-kb snapshot create \
    path in the first command instead. If its MCP tools do not appear in an
    already-open Codex task, reopen that task so its tool metadata is refreshed.
 
-2. Receive a release folder via `rsync` (never a live master database).
-3. Verify and atomically install it:
+2. Run the one-time local CLI installation so the publisher can call the
+   verified installer over SSH:
+
+   ```bash
+   cd /path/to/the/installed/music-kb/plugin
+   ./scripts/install-local.sh
+   ```
+
+3. Receive a release folder via publisher-managed SSH/rsync (never a live
+   master database). The publisher verifies it remotely and atomically installs
+   it as `~/.music-kb/current.sqlite`.
+4. For a manual fallback, verify and atomically install it:
 
    ```bash
    cd plugins/music-kb
@@ -103,7 +119,7 @@ uv run music-kb snapshot create \
      --release-dir /path/to/release --target-dir "$HOME/.music-kb"
    ```
 
-4. The default MCP path is `~/.music-kb/current.sqlite`; set `MUSIC_KB_DB` to
+5. The default MCP path is `~/.music-kb/current.sqlite`; set `MUSIC_KB_DB` to
    a different local read-only snapshot only when necessary.
 
 ## Read paths

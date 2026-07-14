@@ -20,3 +20,5 @@ incoming/
 *.pem
 *.key
 data/private/
+config/peers*.toml
+!config/peers.example.toml

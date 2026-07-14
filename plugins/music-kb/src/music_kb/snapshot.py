@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -16,11 +17,25 @@ from .schema import SCHEMA_VERSION, connect, ensure_initialized
 
 
 MANIFEST_VERSION = 1
+SAFE_RELEASE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 def default_release_name() -> str:
     year, week, _ = date.today().isocalendar()
     return f"music-kb-{year}w{week:02d}"
+
+
+def validate_release_name(value: object) -> str:
+    """Accept only names that are safe in both filesystem and rsync contexts."""
+
+    if not isinstance(value, str):
+        raise ValidationError("release name must be a string")
+    release_name = value.strip()
+    if not SAFE_RELEASE_NAME.fullmatch(release_name) or release_name in {".", ".."}:
+        raise ValidationError(
+            "release name must start with a letter or number and use only letters, numbers, '.', '_' or '-'"
+        )
+    return release_name
 
 
 def sha256_file(path: str | Path) -> str:
@@ -48,9 +63,7 @@ def create_snapshot(
     """Copy a consistent master state into a client-safe immutable release."""
 
     source_path = Path(master_database).expanduser().resolve()
-    release_name = (release_name or default_release_name()).strip()
-    if not release_name or Path(release_name).name != release_name:
-        raise ValidationError("release name must be a simple directory name")
+    release_name = validate_release_name(release_name or default_release_name())
     destination_root = Path(output_dir).expanduser().resolve()
     release_dir = destination_root / release_name
     if release_dir.exists():
@@ -160,16 +173,18 @@ def verify_snapshot(manifest_path: str | Path) -> dict[str, Any]:
     try:
         if manifest["manifest_version"] != MANIFEST_VERSION:
             raise SnapshotVerificationError("Unsupported manifest version")
-        release_name = str(manifest["release_name"])
+        raw_release_name = manifest["release_name"]
         database = manifest["database"]
         filename = str(database["filename"])
         expected_hash = str(database["sha256"])
     except (KeyError, TypeError) as exc:
         raise SnapshotVerificationError("Manifest is missing required fields") from exc
+    try:
+        release_name = validate_release_name(raw_release_name)
+    except ValidationError as exc:
+        raise SnapshotVerificationError("Manifest release name is unsafe") from exc
     if Path(filename).name != filename or not filename.endswith(".sqlite"):
         raise SnapshotVerificationError("Manifest database filename is unsafe")
-    if Path(release_name).name != release_name:
-        raise SnapshotVerificationError("Manifest release name is unsafe")
     database_path = manifest_file.parent / filename
     if not database_path.is_file():
         raise SnapshotVerificationError(f"Snapshot database does not exist: {database_path}")
