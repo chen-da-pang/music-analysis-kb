@@ -82,7 +82,17 @@ uv run music-kb snapshot create \
 
 ## Quick start (colleague)
 
-1. Install the plugin/runtime from this private repository.
+1. Install the plugin from this private repository (one time):
+
+   ```bash
+   codex plugin marketplace add chen-da-pang/music-analysis-kb --ref main
+   codex plugin add music-kb@music-analysis-kb
+   ```
+
+   For a checked-out local copy during development, use its absolute repository
+   path in the first command instead. If its MCP tools do not appear in an
+   already-open Codex task, reopen that task so its tool metadata is refreshed.
+
 2. Receive a release folder via `rsync` (never a live master database).
 3. Verify and atomically install it:
 
