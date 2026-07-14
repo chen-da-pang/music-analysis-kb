@@ -16,7 +16,7 @@ description: Search the local, read-only Music Flamingo analysis knowledge base.
   descriptors (including Chinese aliases); these are retrieval aids layered on
   top of unchanged raw Music Flamingo text.
 - The current workflow ends at retrieval. Do not transform model output into a
-  Suno prompt or use a tag lifecycle flag to hide a tag from search.
+  generation prompt or use a tag lifecycle flag to hide a tag from search.
 
 ## Start here
 

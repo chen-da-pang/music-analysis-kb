@@ -72,8 +72,8 @@ def test_extractor_emits_detailed_retrieval_tags_and_keeps_lyric_themes() -> Non
     ]
     lyric_tags = [tag for tag in tags if tag["namespace"] == "lyric_theme"]
     assert {tag["name"] for tag in lyric_tags} >= {"love", "heartbreak"}
-    # Tagging is for retrieval; no parser-derived model tag claims prompt use.
-    assert all(tag["suno_safe"] is False for tag in tags)
+    # Tagging is for retrieval; it carries no generation-approval metadata.
+    assert all("suno_safe" not in tag for tag in tags)
 
 
 def test_extractor_maps_chinese_music_flamingo_terms_to_the_same_taxonomy() -> None:
@@ -228,7 +228,7 @@ def test_publisher_backfill_is_idempotent_and_preserves_manual_assignments(tmp_p
         assert repository.validate()["valid"] is True
 
 
-def test_retrieval_parser_tags_do_not_feed_the_optional_legacy_style_compiler(tmp_path: Path) -> None:
+def test_retrieval_parser_tags_ignore_legacy_suno_safe_metadata(tmp_path: Path) -> None:
     record = fixture_record()
     record["output_text"] = SYNTHETIC_ANALYSIS
     record["output_text_sha256"] = hashlib.sha256(SYNTHETIC_ANALYSIS.encode("utf-8")).hexdigest()
@@ -236,8 +236,8 @@ def test_retrieval_parser_tags_do_not_feed_the_optional_legacy_style_compiler(tm
     database = tmp_path / "master.sqlite"
     initialize_database(database)
     with MusicKBRepository(database) as repository:
-        # Simulate a pre-existing global tag that was approved/safe before the
-        # retrieval parser began assigning the same namespace/name.
+        # Simulate a pre-existing global tag carrying a legacy prompt-use flag
+        # before the retrieval parser began assigning the same namespace/name.
         repository.import_analysis(
             {
                 "recording": {"id": "rec_safe_seed", "title": "safe seed"},
@@ -255,8 +255,8 @@ def test_retrieval_parser_tags_do_not_feed_the_optional_legacy_style_compiler(tm
             tag for tag in canonical["tags"] if tag["namespace"] == "genre" and tag["canonical_name"] == "trap"
         )
         assert parser_trap["source"] == PARSER_SOURCE
-        assert parser_trap["suno_safe"] == 1  # global tag state remains intentionally shared
-        assert repository.compile_suno_style(recording_ids=[recording_id])["style_prompt"] == ""
+        assert "suno_safe" not in parser_trap
+        assert repository.search(tags=["trap"])[0]["recording_id"] == recording_id
 
 
 def test_backfill_cli_dry_run_and_snapshot_write_rejection(tmp_path: Path) -> None:

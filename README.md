@@ -111,8 +111,8 @@ resolution, canonical analysis retrieval, and tag facets.
 Campaign analyses receive deterministic, versioned tags for title, artist,
 section, genre, tempo/meter, rhythm, instrumentation, production/mix, harmony,
 vocal style, mood, structure, and lyric/theme retrieval. The raw model output
-is never rewritten. This release creates no model-output-to-Suno conversion:
-all of these tags exist to improve local retrieval.
+is never rewritten. This release creates no model-output-to-generation-prompt
+conversion: all of these tags exist to improve local retrieval.
 
 ## Documentation
 

@@ -141,6 +141,8 @@ CREATE TABLE IF NOT EXISTS tag (
     path TEXT NOT NULL DEFAULT '',
     lifecycle_status TEXT NOT NULL DEFAULT 'candidate'
         CHECK(lifecycle_status IN ('candidate', 'approved', 'deprecated')),
+    -- Retained solely to preserve historical import rows. The current
+    -- retrieval-only plugin neither reads nor exposes this legacy flag.
     suno_safe INTEGER NOT NULL DEFAULT 0 CHECK(suno_safe IN (0, 1)),
     UNIQUE(namespace, normalized_name)
 );

@@ -265,9 +265,8 @@ def _tag_payload(rule: TagRule) -> dict[str, Any]:
         "confidence": 1.0,
         "source": PARSER_SOURCE,
         # The deterministic parser is a search-index producer. It does not
-        # claim that any model-derived tag is ready for a downstream prompt.
+        # assign any generation or downstream-use approval.
         "status": "candidate",
-        "suno_safe": False,
     }
 
 
@@ -291,7 +290,6 @@ def _extract_sections(corpus: str, tags: dict[tuple[str, str], dict[str, Any]]) 
                         "confidence": 1.0,
                         "source": PARSER_SOURCE,
                         "status": "candidate",
-                        "suno_safe": False,
                     },
                 )
 

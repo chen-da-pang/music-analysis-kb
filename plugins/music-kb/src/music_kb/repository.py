@@ -13,7 +13,7 @@ from .campaign_delivery import CampaignDeliveryEntry, group_campaign_delivery, t
 from .errors import NotFoundError, ValidationError
 from .normalization import fts_query, normalized, require_text
 from .schema import SCHEMA_VERSION, connect, ensure_initialized
-from .tagging import PARSER_SOURCE, PARSER_SOURCE_PREFIX, extract_music_flamingo_metadata
+from .tagging import PARSER_SOURCE, extract_music_flamingo_metadata
 
 
 MAX_SEARCH_LIMIT = 50
@@ -1679,7 +1679,7 @@ class MusicKBRepository:
         tag_rows = self.connection.execute(
             """
             SELECT t.namespace, t.canonical_name, t.path, t.lifecycle_status,
-                   t.suno_safe, at.confidence, at.source
+                   at.confidence, at.source
             FROM analysis_tag at JOIN tag t ON t.id = at.tag_id
             WHERE at.analysis_id = ? ORDER BY t.namespace, t.canonical_name
             """,
@@ -1752,7 +1752,7 @@ class MusicKBRepository:
         rows = self.connection.execute(
             f"""
             SELECT DISTINCT t.id, t.namespace, t.canonical_name, t.path,
-                   t.lifecycle_status, t.suno_safe
+                   t.lifecycle_status
             FROM tag t LEFT JOIN tag_alias ta ON ta.tag_id = t.id
             {where}
             ORDER BY t.namespace, t.canonical_name LIMIT ?
@@ -1767,69 +1767,7 @@ class MusicKBRepository:
                     "SELECT alias FROM tag_alias WHERE tag_id = ? ORDER BY alias", (item["id"],)
                 )
             ]
-            item["suno_safe"] = bool(item["suno_safe"])
         return result
-
-    def compile_suno_style(
-        self,
-        *,
-        recording_ids: Sequence[str] = (),
-        selected_tags: Sequence[str] = (),
-        max_tags: int = 24,
-    ) -> dict[str, Any]:
-        """Compile only approved audible descriptors; never expose identity text.
-
-        This legacy optional surface must not consume the retrieval-only Music
-        Flamingo parser assignments. The current database workflow stops at
-        retrieval; any future prompt workflow needs its own explicit approval.
-        """
-
-        max_tags = max(1, min(int(max_tags), 48))
-        safe_tags: dict[int, dict[str, Any]] = {}
-        for recording_id in recording_ids:
-            rows = self.connection.execute(
-                """
-                SELECT DISTINCT t.id, t.namespace, t.canonical_name, t.path
-                FROM recording r
-                JOIN analysis_revision ar ON ar.id = r.canonical_analysis_id
-                JOIN analysis_tag at ON at.analysis_id = ar.id
-                JOIN tag t ON t.id = at.tag_id
-                WHERE r.id = ?
-                  AND t.suno_safe = 1
-                  AND at.source NOT GLOB ?
-                """,
-                (recording_id, f"{PARSER_SOURCE_PREFIX}*"),
-            )
-            for row in rows:
-                safe_tags[int(row["id"])] = dict(row)
-        for tag_name in selected_tags:
-            key = normalized(str(tag_name))
-            rows = self.connection.execute(
-                """
-                SELECT DISTINCT t.id, t.namespace, t.canonical_name, t.path
-                FROM tag t LEFT JOIN tag_alias ta ON ta.tag_id = t.id
-                WHERE t.suno_safe = 1 AND (t.normalized_name = ? OR ta.normalized_alias = ?)
-                """,
-                (key, key),
-            )
-            for row in rows:
-                safe_tags[int(row["id"])] = dict(row)
-        selected = sorted(safe_tags.values(), key=lambda tag: (str(tag["namespace"]), str(tag["canonical_name"])))[:max_tags]
-        descriptors = [str(tag["canonical_name"]) for tag in selected]
-        return {
-            "style_prompt": ", ".join(descriptors),
-            "tags": [
-                {"namespace": tag["namespace"], "name": tag["canonical_name"], "path": tag["path"]}
-                for tag in selected
-            ],
-            "excluded": [
-                "artist names",
-                "song titles",
-                "lyrics",
-                "recoverable melodies",
-                "unapproved candidate tags",
-            ],
-        }
 
     # -- validation -------------------------------------------------------
 

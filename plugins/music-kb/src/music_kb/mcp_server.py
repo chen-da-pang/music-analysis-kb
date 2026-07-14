@@ -59,22 +59,6 @@ class ReadOnlyMusicKB:
         assert isinstance(result, list)
         return {"tags": result, "count": len(result)}
 
-    def compile_suno_style(
-        self,
-        *,
-        recording_ids: list[str] | None = None,
-        selected_tags: list[str] | None = None,
-        max_tags: int = 24,
-    ) -> dict[str, Any]:
-        result = self._call(
-            lambda repository: repository.compile_suno_style(
-                recording_ids=recording_ids or [], selected_tags=selected_tags or [], max_tags=max_tags
-            )
-        )
-        assert isinstance(result, dict)
-        return result
-
-
 def create_server(database: str | Path | None = None) -> Any:
     """Create a stdio server with no mutation-capable tools."""
 
@@ -123,19 +107,6 @@ def create_server(database: str | Path | None = None) -> Any:
     )
     def music_kb_tag_facets(namespace: str = "", prefix: str = "", limit: int = 30) -> dict[str, Any]:
         return api.tag_facets(namespace=namespace, prefix=prefix, limit=limit)
-
-    @server.tool(
-        name="music_kb_compile_suno_style",
-        description="Compile only approved suno_safe audible tags. Artist names, titles, lyrics, and melodies are excluded.",
-    )
-    def music_kb_compile_suno_style(
-        recording_ids: list[str] | None = None,
-        selected_tags: list[str] | None = None,
-        max_tags: int = 24,
-    ) -> dict[str, Any]:
-        return api.compile_suno_style(
-            recording_ids=recording_ids, selected_tags=selected_tags, max_tags=max_tags
-        )
 
     return server
 
