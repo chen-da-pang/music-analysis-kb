@@ -1,0 +1,20 @@
+{
+  "name": "music-analysis-kb",
+  "interface": {
+    "displayName": "Music Analysis Knowledge Base"
+  },
+  "plugins": [
+    {
+      "name": "music-kb",
+      "source": {
+        "source": "local",
+        "path": "./plugins/music-kb"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
