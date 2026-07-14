@@ -1,0 +1,416 @@
+from __future__ import annotations
+
+import shlex
+import subprocess
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Sequence
+
+from .errors import ValidationError
+from .snapshot import validate_release_name, verify_snapshot
+
+
+PEER_CONFIG_VERSION = 1
+DEFAULT_TARGET_DIR = "~/.music-kb"
+DEFAULT_CLI_PATH = "~/.local/bin/music-kb"
+DEFAULT_PORT = 22
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
+MAX_OUTPUT_CHARS = 2_000
+
+CommandRunner = Callable[[Sequence[str], int], subprocess.CompletedProcess[str]]
+
+
+@dataclass(frozen=True)
+class DistributionPeer:
+    """A private, publisher-side SSH destination."""
+
+    name: str
+    host: str
+    user: str
+    port: int
+    identity_file: Path | None
+    target_dir: str
+    cli_path: str
+    connect_timeout_seconds: int
+    command_timeout_seconds: int
+
+    @property
+    def ssh_target(self) -> str:
+        return f"{self.user}@{self.host}"
+
+
+def _require_string(value: object, *, field: str, context: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{context}.{field} must be a non-empty string")
+    if "\x00" in value or "\n" in value or "\r" in value:
+        raise ValidationError(f"{context}.{field} contains an unsafe control character")
+    return value.strip()
+
+
+def _optional_string(value: object, *, field: str, context: str) -> str | None:
+    if value is None:
+        return None
+    return _require_string(value, field=field, context=context)
+
+
+def _positive_int(value: object, *, field: str, context: str, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+        raise ValidationError(f"{context}.{field} must be an integer between 1 and {maximum}")
+    return value
+
+
+def _simple_name(value: str, *, context: str) -> str:
+    if not value[0].isalnum() or any(not (character.isalnum() or character in "._-") for character in value):
+        raise ValidationError(f"{context}.name must use only letters, numbers, '.', '_' or '-'")
+    return value
+
+
+def _host_or_user(value: str, *, field: str, context: str) -> str:
+    if value.startswith("-") or any(character.isspace() or character in "@:/\\" for character in value):
+        raise ValidationError(f"{context}.{field} is not a safe SSH {field}")
+    return value
+
+
+def _remote_path_setting(value: str, *, field: str, context: str) -> str:
+    if not (value == "~" or value.startswith("~/") or value.startswith("/")):
+        raise ValidationError(f"{context}.{field} must be an absolute path or start with '~/'")
+    if any(not (character.isalnum() or character in "._~/-") for character in value):
+        raise ValidationError(f"{context}.{field} contains unsafe characters")
+    normalized = value.rstrip("/") or "/"
+    if any(segment in {".", ".."} for segment in normalized.split("/")):
+        raise ValidationError(f"{context}.{field} must not contain '.' or '..' segments")
+    if normalized in {"~", "/"}:
+        raise ValidationError(f"{context}.{field} must name a directory or executable below a home/root path")
+    return normalized
+
+
+def _identity_file(value: str | None, *, context: str) -> Path | None:
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_file():
+        raise ValidationError(f"{context}.identity_file does not exist or is not a file: {path}")
+    return path.resolve()
+
+
+def _mapping(value: object, *, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValidationError(f"{context} must be a TOML table")
+    return value
+
+
+def _get_setting(peer: dict[str, Any], defaults: dict[str, Any], name: str, default: object) -> object:
+    return peer.get(name, defaults.get(name, default))
+
+
+def load_distribution_peers(config_path: str | Path) -> list[DistributionPeer]:
+    """Load a private TOML inventory without exposing it to the repository."""
+
+    path = Path(config_path).expanduser().resolve()
+    if not path.is_file():
+        raise ValidationError(f"Peer config does not exist: {path}")
+    try:
+        with path.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValidationError(f"Peer config is not valid TOML: {exc}") from exc
+
+    version = raw.get("version")
+    if version != PEER_CONFIG_VERSION:
+        raise ValidationError(
+            f"Peer config version must be {PEER_CONFIG_VERSION}", details={"actual": version}
+        )
+    defaults_value = raw.get("defaults", {})
+    defaults = _mapping(defaults_value, context="defaults")
+    peer_values = raw.get("peers")
+    if not isinstance(peer_values, list) or not peer_values:
+        raise ValidationError("peers must be a non-empty TOML array of tables")
+
+    peers: list[DistributionPeer] = []
+    names: set[str] = set()
+    for index, value in enumerate(peer_values, 1):
+        context = f"peers[{index}]"
+        peer = _mapping(value, context=context)
+        name = _simple_name(_require_string(peer.get("name"), field="name", context=context), context=context)
+        if name in names:
+            raise ValidationError(f"Duplicate peer name: {name}")
+        names.add(name)
+        host = _host_or_user(
+            _require_string(peer.get("host"), field="host", context=context), field="host", context=context
+        )
+        user = _host_or_user(
+            _require_string(peer.get("user"), field="user", context=context), field="user", context=context
+        )
+        target_dir = _remote_path_setting(
+            _require_string(
+                _get_setting(peer, defaults, "target_dir", DEFAULT_TARGET_DIR),
+                field="target_dir",
+                context=context,
+            ),
+            field="target_dir",
+            context=context,
+        )
+        cli_path = _remote_path_setting(
+            _require_string(
+                _get_setting(peer, defaults, "cli_path", DEFAULT_CLI_PATH),
+                field="cli_path",
+                context=context,
+            ),
+            field="cli_path",
+            context=context,
+        )
+        identity = _optional_string(
+            _get_setting(peer, defaults, "identity_file", None), field="identity_file", context=context
+        )
+        peers.append(
+            DistributionPeer(
+                name=name,
+                host=host,
+                user=user,
+                port=_positive_int(
+                    _get_setting(peer, defaults, "port", DEFAULT_PORT),
+                    field="port",
+                    context=context,
+                    maximum=65_535,
+                ),
+                identity_file=_identity_file(identity, context=context),
+                target_dir=target_dir,
+                cli_path=cli_path,
+                connect_timeout_seconds=_positive_int(
+                    _get_setting(
+                        peer, defaults, "connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS
+                    ),
+                    field="connect_timeout_seconds",
+                    context=context,
+                    maximum=3_600,
+                ),
+                command_timeout_seconds=_positive_int(
+                    _get_setting(peer, defaults, "command_timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS),
+                    field="command_timeout_seconds",
+                    context=context,
+                    maximum=86_400,
+                ),
+            )
+        )
+    return peers
+
+
+def _select_peers(peers: list[DistributionPeer], requested_names: Sequence[str]) -> list[DistributionPeer]:
+    if not requested_names:
+        return peers
+    requested = set(requested_names)
+    available = {peer.name for peer in peers}
+    unknown = sorted(requested - available)
+    if unknown:
+        raise ValidationError("Requested peer does not exist in config", details={"unknown_peers": unknown})
+    return [peer for peer in peers if peer.name in requested]
+
+
+def _remote_join(base: str, *parts: str) -> str:
+    suffix = "/".join(parts)
+    if base == "/":
+        return f"/{suffix}"
+    return f"{base.rstrip('/')}/{suffix}"
+
+
+def _remote_shell_path(path: str) -> str:
+    """Return a POSIX-shell-safe remote path while retaining only $HOME expansion."""
+
+    if path == "~":
+        return '"$HOME"'
+    if path.startswith("~/"):
+        return '"$HOME"/' + shlex.quote(path[2:])
+    return shlex.quote(path)
+
+
+def _ssh_transport(peer: DistributionPeer) -> list[str]:
+    command = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"ConnectTimeout={peer.connect_timeout_seconds}",
+        "-p",
+        str(peer.port),
+    ]
+    if peer.identity_file is not None:
+        command.extend(["-i", str(peer.identity_file)])
+    return command
+
+
+def _ssh_command(peer: DistributionPeer, remote_command: str) -> list[str]:
+    return [*_ssh_transport(peer), peer.ssh_target, remote_command]
+
+
+def _rsync_command(peer: DistributionPeer, release_dir: Path, incoming_dir: str) -> list[str]:
+    return [
+        "rsync",
+        "-a",
+        "--partial",
+        "--checksum",
+        "-e",
+        shlex.join(_ssh_transport(peer)),
+        f"{release_dir}/",
+        f"{peer.ssh_target}:{incoming_dir}/",
+    ]
+
+
+def _remote_mkdir_command(incoming_dir: str) -> str:
+    return f"set -eu; mkdir -p {_remote_shell_path(incoming_dir)}"
+
+
+def _remote_preflight_command(cli_path: str) -> str:
+    executable = _remote_shell_path(cli_path)
+    return f"set -eu; test -x {executable}; {executable} --help >/dev/null"
+
+
+def _remote_verify_command(incoming_dir: str, cli_path: str) -> str:
+    manifest = _remote_join(incoming_dir, "manifest.json")
+    executable = _remote_shell_path(cli_path)
+    return (
+        "set -eu; "
+        f"{executable} snapshot verify --manifest {_remote_shell_path(manifest)}"
+    )
+
+
+def _remote_install_command(incoming_dir: str, target_dir: str, cli_path: str) -> str:
+    executable = _remote_shell_path(cli_path)
+    return (
+        "set -eu; "
+        f"{executable} snapshot install --release-dir {_remote_shell_path(incoming_dir)} "
+        f"--target-dir {_remote_shell_path(target_dir)}"
+    )
+
+
+def _default_runner(command: Sequence[str], timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        list(command),
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=timeout_seconds,
+    )
+
+
+def _excerpt(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    value = value.strip()
+    if len(value) <= MAX_OUTPUT_CHARS:
+        return value
+    return f"{value[:MAX_OUTPUT_CHARS]}… [truncated]"
+
+
+def _run_stage(
+    *,
+    name: str,
+    command: Sequence[str],
+    timeout_seconds: int,
+    runner: CommandRunner,
+) -> dict[str, Any]:
+    try:
+        completed = runner(command, timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "name": name,
+            "ok": False,
+            "error": "timeout",
+            "stdout": _excerpt(exc.stdout),
+            "stderr": _excerpt(exc.stderr),
+        }
+    except OSError as exc:
+        return {"name": name, "ok": False, "error": type(exc).__name__, "stderr": str(exc)}
+
+    result: dict[str, Any] = {
+        "name": name,
+        "ok": completed.returncode == 0,
+        "returncode": completed.returncode,
+    }
+    stdout = _excerpt(completed.stdout)
+    stderr = _excerpt(completed.stderr)
+    if stdout:
+        result["stdout"] = stdout
+    if stderr:
+        result["stderr"] = stderr
+    return result
+
+
+def _peer_plan(peer: DistributionPeer, release_name: str) -> dict[str, str]:
+    incoming_dir = _remote_join(peer.target_dir, "incoming", release_name)
+    return {
+        "incoming_dir": incoming_dir,
+        "target_dir": peer.target_dir,
+    }
+
+
+def publish_snapshot(
+    release_dir: str | Path,
+    peers_file: str | Path,
+    *,
+    peer_names: Sequence[str] = (),
+    dry_run: bool = False,
+    runner: CommandRunner = _default_runner,
+) -> dict[str, Any]:
+    """Fan out one verified release without ever copying a writable master DB."""
+
+    source = Path(release_dir).expanduser().resolve()
+    verified = verify_snapshot(source / "manifest.json")
+    # verify_snapshot already validates the manifest, but retain the boundary
+    # here because this name is later embedded in an rsync remote path.
+    release_name = validate_release_name(verified["release_name"])
+    peers = _select_peers(load_distribution_peers(peers_file), peer_names)
+    peer_results: list[dict[str, Any]] = []
+
+    for peer in peers:
+        plan = _peer_plan(peer, release_name)
+        result: dict[str, Any] = {"name": peer.name, "host": peer.host, **plan, "stages": []}
+        if dry_run:
+            result["status"] = "planned"
+            peer_results.append(result)
+            continue
+
+        stages: list[tuple[str, Sequence[str]]] = [
+            ("preflight", _ssh_command(peer, _remote_preflight_command(peer.cli_path))),
+            ("mkdir", _ssh_command(peer, _remote_mkdir_command(plan["incoming_dir"]))),
+            ("rsync", _rsync_command(peer, source, plan["incoming_dir"])),
+            ("verify", _ssh_command(peer, _remote_verify_command(plan["incoming_dir"], peer.cli_path))),
+            (
+                "install",
+                _ssh_command(
+                    peer,
+                    _remote_install_command(plan["incoming_dir"], plan["target_dir"], peer.cli_path),
+                ),
+            ),
+        ]
+        for stage_name, command in stages:
+            stage = _run_stage(
+                name=stage_name,
+                command=command,
+                timeout_seconds=peer.command_timeout_seconds,
+                runner=runner,
+            )
+            result["stages"].append(stage)
+            if not stage["ok"]:
+                result["status"] = "failed"
+                break
+        else:
+            result["status"] = "succeeded"
+        peer_results.append(result)
+
+    succeeded = sum(result["status"] == "succeeded" for result in peer_results)
+    failed = sum(result["status"] == "failed" for result in peer_results)
+    return {
+        "release_name": release_name,
+        "release_dir": str(source),
+        "dry_run": dry_run,
+        "peer_count": len(peer_results),
+        "succeeded_count": succeeded,
+        "failed_count": failed,
+        "peers": peer_results,
+    }
