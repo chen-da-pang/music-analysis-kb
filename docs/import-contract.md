@@ -44,8 +44,7 @@ one-object-per-physical-LF files take the streaming path.
       "path": "production/vocal/granular-chop",
       "aliases": ["颗粒人声切片"],
       "confidence": 0.91,
-      "status": "approved",
-      "suno_safe": true
+      "status": "approved"
     }
   ],
   "numeric_features": [
@@ -68,10 +67,11 @@ one-object-per-physical-LF files take the streaming path.
 
 - `namespace` and `name` are mandatory. Tags are normalized and de-duplicated
   by namespace + normalized name, but all supplied aliases are preserved.
-- `suno_safe: true` means that the tag is approved for the Suno compiler. It
-  does **not** approve an artist name, title, lyric, melody, or imitation.
 - Unknown/rare tags may use `status: "candidate"`; they remain searchable but
-  are not automatically emitted in a Suno style prompt.
+  remain first-class retrieval terms.
+- Historical records may contain `suno_safe`. The retrieval-only plugin accepts
+  it for backward-compatible import, but ignores it in MCP/CLI retrieval
+  output and exposes no prompt compiler.
 - Numeric values belong in `numeric_features`, not fake text tags.
 - The importer rejects explicit Feigua fields and Feigua-marked tag
   namespaces/paths/sources. This database contains Music Flamingo analysis
@@ -218,7 +218,7 @@ batches are intentionally resumable; rerunning `enrich-campaign-tags` after an
 interruption refreshes its parser assignments and performs the final full FTS
 rebuild again.
 
-All tag families remain searchable. This stage has no model-output-to-Suno
+All tag families remain searchable. This stage has no model-output-to-generation-prompt
 conversion: parser-derived tags are stored as retrieval candidates, including
 lyric/theme and structural labels. Song-title and artist identity tags are
 stored separately by the importer and remain available to exact-tag, title,

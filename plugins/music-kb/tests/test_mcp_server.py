@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from music_kb.mcp_server import ReadOnlyMusicKB, create_server
 
 
@@ -8,10 +10,19 @@ def test_read_only_mcp_facade_searches_canonical_data(master_database) -> None:
     result = api.search(tags=["granular vocal chop"])
     assert result["count"] == 1
     assert result["results"][0]["recording_id"] == "rec_neon_night_studio"
-    compiled = api.compile_suno_style(recording_ids=["rec_neon_night_studio"])
-    assert "granular vocal chop" in compiled["style_prompt"]
+    assert not hasattr(api, "compile_suno_style")
+    canonical = api.get_canonical_analysis(recording_id="rec_neon_night_studio")
+    assert all("suno_safe" not in tag for tag in canonical["tags"])
+    facets = api.tag_facets(prefix="granular")
+    assert all("suno_safe" not in tag for tag in facets["tags"])
 
 
-def test_mcp_server_can_be_constructed(master_database) -> None:
+def test_mcp_server_exposes_only_retrieval_tools(master_database) -> None:
     server = create_server(master_database)
-    assert server is not None
+    assert [tool.name for tool in asyncio.run(server.list_tools())] == [
+        "music_kb_status",
+        "music_kb_search",
+        "music_kb_resolve_title_artist",
+        "music_kb_get_canonical_analysis",
+        "music_kb_tag_facets",
+    ]

@@ -58,15 +58,6 @@ def test_read_only_repository_cannot_mutate(master_database) -> None:
             repository.connection.execute("INSERT INTO meta(key, value) VALUES ('bad', 'write')")
 
 
-def test_suno_compiler_uses_only_approved_safe_tags(master_database) -> None:
-    with MusicKBRepository(master_database, read_only=True) as repository:
-        compiled = repository.compile_suno_style(recording_ids=["rec_neon_night_studio"])
-    assert "electronic pop" in compiled["style_prompt"]
-    assert "granular vocal chop" in compiled["style_prompt"]
-    assert "syncopated rimshot" not in compiled["style_prompt"]
-    assert "示例乐队" not in compiled["style_prompt"]
-
-
 def test_importer_rejects_feigua_workflow_tags(master_database, fixture_payload) -> None:
     forbidden = copy.deepcopy(fixture_payload)
     forbidden["recording"]["id"] = "rec_should_not_import"
