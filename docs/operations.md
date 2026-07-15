@@ -11,12 +11,13 @@ storage at runtime.
 
 For every colleague computer:
 
-1. Install the private Codex plugin and then make the CLI available on `PATH`:
+1. Install the Codex plugin yourself. The SSH publisher does not install or
+   modify the plugin and does not require a globally registered `music-kb`
+   executable on the peer:
 
    ```bash
-   cd /path/to/the/installed/music-kb/plugin
-   ./scripts/install-local.sh
-   music-kb --help
+   codex plugin marketplace add chen-da-pang/music-analysis-kb --ref main
+   codex plugin add music-kb@music-analysis-kb
    ```
 
 2. Enable macOS **Remote Login**, keep the machine reachable on the company
@@ -36,13 +37,12 @@ chmod 600 "$HOME/.config/music-kb/peers.toml"
 ```
 
 The peer file has a `[[peers]]` entry per colleague. It controls only a peer's
-SSH identity, target directory, and the absolute/home-relative CLI path; it
-never contains a database or raw model output. Set `enabled = false` to keep a
-peer in the inventory without including it in an all-peer publish. An explicit
+SSH identity, target directory, and remote Python executable; it never contains
+a database or raw model output. Set `enabled = false` to keep a peer in the
+inventory without including it in an all-peer publish. An explicit
 `--peer <name>` retry still targets that named peer, even when it is disabled.
-The default `cli_path` is
-`~/.local/bin/music-kb`, the normal destination of `install-local.sh`. Set it
-explicitly if the colleague uses `UV_TOOL_BIN_DIR` or a wrapper location.
+The default `python_path` is `python3`; set an absolute or home-relative path
+when a colleague uses a nonstandard Python installation.
 
 ### Weekly release flow
 
@@ -69,12 +69,13 @@ explicitly if the colleague uses `UV_TOOL_BIN_DIR` or a wrapper location.
 
 For each peer, the command performs five bounded stages:
 
-1. preflights the configured absolute CLI path over non-interactive SSH;
+1. preflights the configured Python executable over non-interactive SSH;
 2. creates `~/.music-kb/incoming/<release-name>/`;
 3. runs `rsync -a --partial --checksum` into that incoming directory;
-4. remotely runs `music-kb snapshot verify` against `manifest.json`;
-5. remotely runs `music-kb snapshot install`, which atomically changes only
-   `~/.music-kb/current.sqlite` after a successful verification.
+4. remotely runs an embedded `hashlib`/`sqlite3` verification against
+   `manifest.json`;
+5. remotely copies the verified release into the peer's release directory and
+   atomically changes only `~/.music-kb/current.sqlite`.
 
 It never syncs `music-master.sqlite`, never uses `rsync --inplace`, and does
 not stop the other peers if one peer is offline. Retry one failed colleague

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from typing import Sequence
 
 import pytest
 
-from music_kb.distribution import load_distribution_peers, publish_snapshot
+from music_kb.distribution import (
+    _REMOTE_INSTALL_CODE,
+    _REMOTE_VERIFY_CODE,
+    load_distribution_peers,
+    publish_snapshot,
+)
 from music_kb.errors import ValidationError
-from music_kb.snapshot import create_snapshot
+from music_kb.snapshot import create_snapshot, verify_snapshot
 
 
 def _write_peers(
@@ -70,13 +76,13 @@ class RecordingRunner:
         if command[0] == "rsync":
             return "rsync"
         remote = command[-1]
-        if " --help >/dev/null" in remote:
+        if "import hashlib, json, sqlite3" in remote:
             return "preflight"
         if "mkdir -p" in remote:
             return "mkdir"
-        if "snapshot verify" in remote:
+        if "PRAGMA integrity_check" in remote and "current.sqlite" not in remote:
             return "verify"
-        if "snapshot install" in remote:
+        if "current.sqlite" in remote:
             return "install"
         raise AssertionError(f"Unknown command stage: {command}")
 
@@ -144,24 +150,21 @@ def test_publish_stages_then_verifies_and_installs_without_inplace(master_databa
     assert "StrictHostKeyChecking=yes" in mkdir
     assert "ConnectTimeout=7" in mkdir
     assert "-i" in mkdir and str(key.resolve()) in mkdir
-    assert preflight[-1] == (
-        'set -eu; test -x "$HOME"/.local/bin/music-kb; '
-        '"$HOME"/.local/bin/music-kb --help >/dev/null'
-    )
+    assert preflight[-1] == "set -eu; python3 -c 'import hashlib, json, sqlite3'"
     assert mkdir[-1] == 'set -eu; mkdir -p "$HOME"/.music-kb/incoming/distribution-fixture'
     assert "--inplace" not in rsync
     assert "--partial" in rsync
     assert "--checksum" in rsync
     assert rsync[-1] == "music-user@first.example.test:~/.music-kb/incoming/distribution-fixture/"
     assert "music-master.sqlite" not in " ".join(rsync)
-    assert verify[-1] == (
-        'set -eu; "$HOME"/.local/bin/music-kb snapshot verify '
-        '--manifest "$HOME"/.music-kb/incoming/distribution-fixture/manifest.json'
-    )
-    assert install[-1] == (
-        'set -eu; "$HOME"/.local/bin/music-kb snapshot install --release-dir '
-        '"$HOME"/.music-kb/incoming/distribution-fixture --target-dir "$HOME"/.music-kb'
-    )
+    assert "PRAGMA integrity_check" in verify[-1]
+    assert "manifest.json" in verify[-1]
+    assert "current.sqlite" in install[-1]
+    assert "snapshot install" not in install[-1]
+    rendered_commands = " ".join(" ".join(command) for command in commands)
+    assert "music-kb --help" not in rendered_commands
+    assert "snapshot verify" not in rendered_commands
+    assert "snapshot install" not in rendered_commands
     assert [stage["name"] for stage in result["peers"][0]["stages"]] == [
         "preflight",
         "mkdir",
@@ -293,3 +296,23 @@ def test_peer_config_rejects_non_boolean_enabled(master_database, tmp_path: Path
 
     with pytest.raises(ValidationError, match="enabled must be a boolean"):
         load_distribution_peers(peers)
+
+
+def test_self_contained_remote_scripts_verify_and_atomically_install_snapshot(master_database, tmp_path: Path) -> None:
+    release = _release(master_database, tmp_path)
+    client = tmp_path / "client"
+
+    subprocess.run(
+        [sys.executable, "-c", _REMOTE_VERIFY_CODE, str(release / "manifest.json")],
+        check=True,
+    )
+    subprocess.run(
+        [sys.executable, "-c", _REMOTE_INSTALL_CODE, str(release), str(client)],
+        check=True,
+    )
+
+    current = client / "current.sqlite"
+    installed_manifest = client / "releases" / "distribution-fixture.manifest.json"
+    assert current.is_symlink()
+    assert current.resolve().name == "distribution-fixture.sqlite"
+    assert verify_snapshot(installed_manifest)["valid"] is True
