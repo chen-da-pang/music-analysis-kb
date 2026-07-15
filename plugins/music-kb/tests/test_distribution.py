@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from typing import Sequence
 
 import pytest
 
-from music_kb.distribution import load_distribution_peers, publish_snapshot
+from music_kb.distribution import (
+    _REMOTE_INSTALL_CODE,
+    _REMOTE_VERIFY_CODE,
+    load_distribution_peers,
+    publish_snapshot,
+)
 from music_kb.errors import ValidationError
-from music_kb.snapshot import create_snapshot
+from music_kb.snapshot import create_snapshot, verify_snapshot
 
 
 def _write_peers(
@@ -17,9 +23,11 @@ def _write_peers(
     key: Path,
     peers: tuple[tuple[str, str], ...] = (("first-mac", "first.example.test"),),
     target_dir: str = "~/.music-kb",
+    enabled: tuple[bool, ...] | None = None,
+    version: int = 1,
 ) -> Path:
     rows = [
-        "version = 1",
+        f"version = {version}",
         "",
         "[defaults]",
         f'identity_file = "{key}"',
@@ -28,12 +36,13 @@ def _write_peers(
         "connect_timeout_seconds = 7",
         "command_timeout_seconds = 33",
     ]
-    for name, host in peers:
+    for index, (name, host) in enumerate(peers):
         rows.extend(
             [
                 "",
                 "[[peers]]",
                 f'name = "{name}"',
+                f"enabled = {str(enabled[index] if enabled is not None else True).lower()}",
                 f'host = "{host}"',
                 'user = "music-user"',
             ]
@@ -67,13 +76,13 @@ class RecordingRunner:
         if command[0] == "rsync":
             return "rsync"
         remote = command[-1]
-        if " --help >/dev/null" in remote:
+        if "import hashlib, json, sqlite3" in remote:
             return "preflight"
         if "mkdir -p" in remote:
             return "mkdir"
-        if "snapshot verify" in remote:
+        if "PRAGMA integrity_check" in remote and "current.sqlite" not in remote:
             return "verify"
-        if "snapshot install" in remote:
+        if "current.sqlite" in remote:
             return "install"
         raise AssertionError(f"Unknown command stage: {command}")
 
@@ -141,24 +150,21 @@ def test_publish_stages_then_verifies_and_installs_without_inplace(master_databa
     assert "StrictHostKeyChecking=yes" in mkdir
     assert "ConnectTimeout=7" in mkdir
     assert "-i" in mkdir and str(key.resolve()) in mkdir
-    assert preflight[-1] == (
-        'set -eu; test -x "$HOME"/.local/bin/music-kb; '
-        '"$HOME"/.local/bin/music-kb --help >/dev/null'
-    )
+    assert preflight[-1] == "set -eu; python3 -c 'import hashlib, json, sqlite3'"
     assert mkdir[-1] == 'set -eu; mkdir -p "$HOME"/.music-kb/incoming/distribution-fixture'
     assert "--inplace" not in rsync
     assert "--partial" in rsync
     assert "--checksum" in rsync
     assert rsync[-1] == "music-user@first.example.test:~/.music-kb/incoming/distribution-fixture/"
     assert "music-master.sqlite" not in " ".join(rsync)
-    assert verify[-1] == (
-        'set -eu; "$HOME"/.local/bin/music-kb snapshot verify '
-        '--manifest "$HOME"/.music-kb/incoming/distribution-fixture/manifest.json'
-    )
-    assert install[-1] == (
-        'set -eu; "$HOME"/.local/bin/music-kb snapshot install --release-dir '
-        '"$HOME"/.music-kb/incoming/distribution-fixture --target-dir "$HOME"/.music-kb'
-    )
+    assert "PRAGMA integrity_check" in verify[-1]
+    assert "manifest.json" in verify[-1]
+    assert "current.sqlite" in install[-1]
+    assert "snapshot install" not in install[-1]
+    rendered_commands = " ".join(" ".join(command) for command in commands)
+    assert "music-kb --help" not in rendered_commands
+    assert "snapshot verify" not in rendered_commands
+    assert "snapshot install" not in rendered_commands
     assert [stage["name"] for stage in result["peers"][0]["stages"]] == [
         "preflight",
         "mkdir",
@@ -248,3 +254,65 @@ def test_private_peer_config_rejects_unsafe_rsync_path_and_unknown_selection(mas
     release = _release(master_database, tmp_path)
     with pytest.raises(ValidationError, match="Requested peer"):
         publish_snapshot(release, valid, peer_names=["missing"])
+
+
+def test_disabled_peers_are_excluded_from_all_peer_publish_but_explicit_retry_can_target_them(
+    master_database, tmp_path: Path
+) -> None:
+    key = tmp_path / "id_ed25519"
+    key.write_text("fixture key", encoding="utf-8")
+    peers = _write_peers(
+        tmp_path,
+        key=key,
+        peers=(("enabled-mac", "enabled.example.test"), ("paused-mac", "paused.example.test")),
+        enabled=(True, False),
+    )
+    release = _release(master_database, tmp_path)
+
+    all_peers = publish_snapshot(release, peers, dry_run=True)
+    assert [peer["name"] for peer in all_peers["peers"]] == ["enabled-mac"]
+
+    explicit = publish_snapshot(release, peers, peer_names=["paused-mac"], dry_run=True)
+    assert [peer["name"] for peer in explicit["peers"]] == ["paused-mac"]
+
+
+def test_peer_config_v1_remains_compatible(master_database, tmp_path: Path) -> None:
+    key = tmp_path / "id_ed25519"
+    key.write_text("fixture key", encoding="utf-8")
+    peers = _write_peers(tmp_path, key=key, version=1)
+    text = peers.read_text(encoding="utf-8").replace("enabled = true\n", "")
+    peers.write_text(text, encoding="utf-8")
+
+    loaded = load_distribution_peers(peers)
+    assert loaded[0].enabled is True
+
+
+def test_peer_config_rejects_non_boolean_enabled(master_database, tmp_path: Path) -> None:
+    key = tmp_path / "id_ed25519"
+    key.write_text("fixture key", encoding="utf-8")
+    peers = _write_peers(tmp_path, key=key, version=2)
+    text = peers.read_text(encoding="utf-8").replace("enabled = true\n", 'enabled = "yes"\n')
+    peers.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="enabled must be a boolean"):
+        load_distribution_peers(peers)
+
+
+def test_self_contained_remote_scripts_verify_and_atomically_install_snapshot(master_database, tmp_path: Path) -> None:
+    release = _release(master_database, tmp_path)
+    client = tmp_path / "client"
+
+    subprocess.run(
+        [sys.executable, "-c", _REMOTE_VERIFY_CODE, str(release / "manifest.json")],
+        check=True,
+    )
+    subprocess.run(
+        [sys.executable, "-c", _REMOTE_INSTALL_CODE, str(release), str(client)],
+        check=True,
+    )
+
+    current = client / "current.sqlite"
+    installed_manifest = client / "releases" / "distribution-fixture.manifest.json"
+    assert current.is_symlink()
+    assert current.resolve().name == "distribution-fixture.sqlite"
+    assert verify_snapshot(installed_manifest)["valid"] is True

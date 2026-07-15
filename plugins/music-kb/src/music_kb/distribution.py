@@ -11,9 +11,10 @@ from .errors import ValidationError
 from .snapshot import validate_release_name, verify_snapshot
 
 
-PEER_CONFIG_VERSION = 1
+PEER_CONFIG_VERSION = 2
+SUPPORTED_PEER_CONFIG_VERSIONS = {1, 2}
 DEFAULT_TARGET_DIR = "~/.music-kb"
-DEFAULT_CLI_PATH = "~/.local/bin/music-kb"
+DEFAULT_PYTHON_PATH = "python3"
 DEFAULT_PORT = 22
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
@@ -32,9 +33,11 @@ class DistributionPeer:
     port: int
     identity_file: Path | None
     target_dir: str
-    cli_path: str
+    cli_path: str | None
+    python_path: str
     connect_timeout_seconds: int
     command_timeout_seconds: int
+    enabled: bool
 
     @property
     def ssh_target(self) -> str:
@@ -61,6 +64,12 @@ def _positive_int(value: object, *, field: str, context: str, maximum: int) -> i
     return value
 
 
+def _boolean(value: object, *, field: str, context: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValidationError(f"{context}.{field} must be a boolean")
+    return value
+
+
 def _simple_name(value: str, *, context: str) -> str:
     if not value[0].isalnum() or any(not (character.isalnum() or character in "._-") for character in value):
         raise ValidationError(f"{context}.name must use only letters, numbers, '.', '_' or '-'")
@@ -84,6 +93,17 @@ def _remote_path_setting(value: str, *, field: str, context: str) -> str:
     if normalized in {"~", "/"}:
         raise ValidationError(f"{context}.{field} must name a directory or executable below a home/root path")
     return normalized
+
+
+def _remote_executable_setting(value: str, *, field: str, context: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{context}.{field} must be a non-empty executable path")
+    value = value.strip()
+    if value.startswith("-") or any(character.isspace() or character in "'\";$`()|&<>\\" for character in value):
+        raise ValidationError(f"{context}.{field} contains unsafe shell characters")
+    if any(not (character.isalnum() or character in "._~/-") for character in value):
+        raise ValidationError(f"{context}.{field} contains unsafe characters")
+    return value
 
 
 def _identity_file(value: str | None, *, context: str) -> Path | None:
@@ -118,9 +138,10 @@ def load_distribution_peers(config_path: str | Path) -> list[DistributionPeer]:
         raise ValidationError(f"Peer config is not valid TOML: {exc}") from exc
 
     version = raw.get("version")
-    if version != PEER_CONFIG_VERSION:
+    if version not in SUPPORTED_PEER_CONFIG_VERSIONS:
         raise ValidationError(
-            f"Peer config version must be {PEER_CONFIG_VERSION}", details={"actual": version}
+            f"Peer config version must be one of {sorted(SUPPORTED_PEER_CONFIG_VERSIONS)}",
+            details={"actual": version},
         )
     defaults_value = raw.get("defaults", {})
     defaults = _mapping(defaults_value, context="defaults")
@@ -152,13 +173,23 @@ def load_distribution_peers(config_path: str | Path) -> list[DistributionPeer]:
             field="target_dir",
             context=context,
         )
-        cli_path = _remote_path_setting(
+        # Keep accepting the v1 field so old inventories remain readable; the
+        # self-contained remote installer deliberately never executes it.
+        raw_cli_path = _optional_string(
+            _get_setting(peer, defaults, "cli_path", None), field="cli_path", context=context
+        )
+        cli_path = (
+            _remote_path_setting(raw_cli_path, field="cli_path", context=context)
+            if raw_cli_path is not None
+            else None
+        )
+        python_path = _remote_executable_setting(
             _require_string(
-                _get_setting(peer, defaults, "cli_path", DEFAULT_CLI_PATH),
-                field="cli_path",
+                _get_setting(peer, defaults, "python_path", DEFAULT_PYTHON_PATH),
+                field="python_path",
                 context=context,
             ),
-            field="cli_path",
+            field="python_path",
             context=context,
         )
         identity = _optional_string(
@@ -178,6 +209,7 @@ def load_distribution_peers(config_path: str | Path) -> list[DistributionPeer]:
                 identity_file=_identity_file(identity, context=context),
                 target_dir=target_dir,
                 cli_path=cli_path,
+                python_path=python_path,
                 connect_timeout_seconds=_positive_int(
                     _get_setting(
                         peer, defaults, "connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS
@@ -192,6 +224,11 @@ def load_distribution_peers(config_path: str | Path) -> list[DistributionPeer]:
                     context=context,
                     maximum=86_400,
                 ),
+                enabled=_boolean(
+                    _get_setting(peer, defaults, "enabled", True),
+                    field="enabled",
+                    context=context,
+                ),
             )
         )
     return peers
@@ -199,7 +236,7 @@ def load_distribution_peers(config_path: str | Path) -> list[DistributionPeer]:
 
 def _select_peers(peers: list[DistributionPeer], requested_names: Sequence[str]) -> list[DistributionPeer]:
     if not requested_names:
-        return peers
+        return [peer for peer in peers if peer.enabled]
     requested = set(requested_names)
     available = {peer.name for peer in peers}
     unknown = sorted(requested - available)
@@ -263,27 +300,148 @@ def _remote_mkdir_command(incoming_dir: str) -> str:
     return f"set -eu; mkdir -p {_remote_shell_path(incoming_dir)}"
 
 
-def _remote_preflight_command(cli_path: str) -> str:
-    executable = _remote_shell_path(cli_path)
-    return f"set -eu; test -x {executable}; {executable} --help >/dev/null"
+_REMOTE_VERIFY_CODE = r"""
+import hashlib
+import json
+import os
+import sqlite3
+import sys
+
+manifest_path = os.path.abspath(os.path.expanduser(sys.argv[1]))
+with open(manifest_path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+release_name = manifest["release_name"]
+if not isinstance(release_name, str) or not release_name or any(
+    character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    for character in release_name
+):
+    raise SystemExit("unsafe release name")
+filename = manifest["database"]["filename"]
+if os.path.basename(filename) != filename or not filename.endswith(".sqlite"):
+    raise SystemExit("unsafe database filename")
+database_path = os.path.join(os.path.dirname(manifest_path), filename)
+expected = manifest["database"]["sha256"]
+digest = hashlib.sha256()
+with open(database_path, "rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+if digest.hexdigest() != expected:
+    raise SystemExit("snapshot SHA-256 mismatch")
+connection = sqlite3.connect("file:" + database_path + "?mode=ro", uri=True)
+try:
+    integrity = connection.execute("PRAGMA integrity_check").fetchone()
+    if integrity != ("ok",):
+        raise SystemExit("SQLite integrity check failed")
+    database_kind = connection.execute(
+        "SELECT value FROM meta WHERE key = 'database_kind'"
+    ).fetchone()
+    stored_release = connection.execute(
+        "SELECT value FROM meta WHERE key = 'release_name'"
+    ).fetchone()
+    if database_kind != ("snapshot",) or stored_release != (release_name,):
+        raise SystemExit("snapshot metadata mismatch")
+finally:
+    connection.close()
+"""
 
 
-def _remote_verify_command(incoming_dir: str, cli_path: str) -> str:
+_REMOTE_INSTALL_CODE = r"""
+import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import sys
+
+incoming_path = os.path.abspath(os.path.expanduser(sys.argv[1]))
+target_path = os.path.abspath(os.path.expanduser(sys.argv[2]))
+source_manifest = os.path.join(incoming_path, "manifest.json")
+with open(source_manifest, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+release_name = manifest["release_name"]
+if not isinstance(release_name, str) or not release_name or any(
+    character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    for character in release_name
+):
+    raise SystemExit("unsafe release name")
+filename = manifest["database"]["filename"]
+if os.path.basename(filename) != filename or not filename.endswith(".sqlite"):
+    raise SystemExit("unsafe database filename")
+expected = manifest["database"]["sha256"]
+source_database = os.path.join(incoming_path, filename)
+digest = hashlib.sha256()
+with open(source_database, "rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+if digest.hexdigest() != expected:
+    raise SystemExit("snapshot SHA-256 mismatch")
+connection = sqlite3.connect("file:" + source_database + "?mode=ro", uri=True)
+try:
+    if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+        raise SystemExit("SQLite integrity check failed")
+    if connection.execute("SELECT value FROM meta WHERE key = 'database_kind'").fetchone() != ("snapshot",):
+        raise SystemExit("snapshot metadata mismatch")
+    if connection.execute("SELECT value FROM meta WHERE key = 'release_name'").fetchone() != (release_name,):
+        raise SystemExit("snapshot release metadata mismatch")
+finally:
+    connection.close()
+
+"""
+_REMOTE_INSTALL_CODE += r"""
+release_dir = os.path.join(target_path, "releases")
+target_incoming = os.path.join(target_path, "incoming")
+os.makedirs(release_dir, exist_ok=True)
+os.makedirs(target_incoming, exist_ok=True)
+destination_database = os.path.join(release_dir, release_name + ".sqlite")
+destination_manifest = os.path.join(release_dir, release_name + ".manifest.json")
+temporary_database = os.path.join(target_incoming, release_name + ".sqlite.partial")
+temporary_manifest = os.path.join(target_incoming, release_name + ".manifest.json.partial")
+for path in (temporary_database, temporary_manifest):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+shutil.copy2(source_database, temporary_database)
+digest = hashlib.sha256()
+with open(temporary_database, "rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+if digest.hexdigest() != expected:
+    os.unlink(temporary_database)
+    raise SystemExit("copied snapshot SHA-256 mismatch")
+shutil.copy2(source_manifest, temporary_manifest)
+os.chmod(temporary_database, 0o444)
+os.chmod(temporary_manifest, 0o444)
+os.replace(temporary_database, destination_database)
+os.replace(temporary_manifest, destination_manifest)
+temporary_link = os.path.join(target_path, ".current.sqlite.next")
+try:
+    os.unlink(temporary_link)
+except FileNotFoundError:
+    pass
+os.symlink(os.path.relpath(destination_database, target_path), temporary_link)
+os.replace(temporary_link, os.path.join(target_path, "current.sqlite"))
+"""
+
+
+def _remote_python_command(python_path: str, code: str, *arguments: str) -> str:
+    executable = _remote_shell_path(python_path) if python_path.startswith(("~/", "/")) else shlex.quote(python_path)
+    rendered_arguments = " ".join(_remote_shell_path(argument) for argument in arguments)
+    suffix = f" {rendered_arguments}" if rendered_arguments else ""
+    return f"set -eu; {executable} -c {shlex.quote(code)}{suffix}"
+
+
+def _remote_preflight_command(python_path: str) -> str:
+    return _remote_python_command(python_path, "import hashlib, json, sqlite3")
+
+
+def _remote_verify_command(incoming_dir: str, python_path: str) -> str:
     manifest = _remote_join(incoming_dir, "manifest.json")
-    executable = _remote_shell_path(cli_path)
-    return (
-        "set -eu; "
-        f"{executable} snapshot verify --manifest {_remote_shell_path(manifest)}"
-    )
+    return _remote_python_command(python_path, _REMOTE_VERIFY_CODE, manifest)
 
 
-def _remote_install_command(incoming_dir: str, target_dir: str, cli_path: str) -> str:
-    executable = _remote_shell_path(cli_path)
-    return (
-        "set -eu; "
-        f"{executable} snapshot install --release-dir {_remote_shell_path(incoming_dir)} "
-        f"--target-dir {_remote_shell_path(target_dir)}"
-    )
+def _remote_install_command(incoming_dir: str, target_dir: str, python_path: str) -> str:
+    return _remote_python_command(python_path, _REMOTE_INSTALL_CODE, incoming_dir, target_dir)
 
 
 def _default_runner(command: Sequence[str], timeout_seconds: int) -> subprocess.CompletedProcess[str]:
@@ -376,15 +534,15 @@ def publish_snapshot(
             continue
 
         stages: list[tuple[str, Sequence[str]]] = [
-            ("preflight", _ssh_command(peer, _remote_preflight_command(peer.cli_path))),
+            ("preflight", _ssh_command(peer, _remote_preflight_command(peer.python_path))),
             ("mkdir", _ssh_command(peer, _remote_mkdir_command(plan["incoming_dir"]))),
             ("rsync", _rsync_command(peer, source, plan["incoming_dir"])),
-            ("verify", _ssh_command(peer, _remote_verify_command(plan["incoming_dir"], peer.cli_path))),
+            ("verify", _ssh_command(peer, _remote_verify_command(plan["incoming_dir"], peer.python_path))),
             (
                 "install",
                 _ssh_command(
                     peer,
-                    _remote_install_command(plan["incoming_dir"], plan["target_dir"], peer.cli_path),
+                    _remote_install_command(plan["incoming_dir"], plan["target_dir"], peer.python_path),
                 ),
             ),
         ]

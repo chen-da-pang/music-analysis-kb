@@ -88,7 +88,7 @@ uv run music-kb --json publish push \
 
 ## Quick start (colleague)
 
-1. Install the plugin from this private repository (one time):
+1. Install the public plugin from GitHub (one time):
 
    ```bash
    codex plugin marketplace add chen-da-pang/music-analysis-kb --ref main
@@ -99,13 +99,9 @@ uv run music-kb --json publish push \
    path in the first command instead. If its MCP tools do not appear in an
    already-open Codex task, reopen that task so its tool metadata is refreshed.
 
-2. Run the one-time local CLI installation so the publisher can call the
-   verified installer over SSH:
-
-   ```bash
-   cd /path/to/the/installed/music-kb/plugin
-   ./scripts/install-local.sh
-   ```
+2. Enable macOS Remote Login and keep the machine reachable on the company
+   network/VPN. The publisher's SSH installer uses the configured remote
+   Python executable and does not require a global `music-kb` CLI on this Mac.
 
 3. Receive a release folder via publisher-managed SSH/rsync (never a live
    master database). The publisher verifies it remotely and atomically installs

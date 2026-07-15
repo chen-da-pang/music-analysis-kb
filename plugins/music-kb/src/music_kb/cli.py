@@ -13,6 +13,7 @@ from .errors import DatabaseNotInitializedError, MusicKBError
 from .repository import MusicKBRepository, iter_import_file
 from .schema import SCHEMA_VERSION, initialize_database
 from .snapshot import create_snapshot, install_snapshot, verify_snapshot
+from .workflow import run_weekly_update
 
 
 def default_client_database() -> Path:
@@ -141,6 +142,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     push.add_argument("--dry-run", action="store_true", help="Validate inputs and show the per-peer plan only")
 
+    weekly = commands.add_parser(
+        "weekly-update", help="Import a completed delivery, build a release, and optionally publish it"
+    )
+    _add_database_argument(weekly, required=True)
+    weekly.add_argument("--input", type=Path, required=True, help="Completed canonical delivery JSON/JSONL")
+    weekly.add_argument(
+        "--input-kind",
+        choices=("campaign", "generic"),
+        default="campaign",
+        help="Input contract (default: campaign)",
+    )
+    weekly.add_argument("--expected-count", type=int, default=None)
+    weekly.add_argument("--batch-size", type=int, default=500)
+    weekly.add_argument("--output-dir", type=Path, required=True)
+    weekly.add_argument("--release-name", default=None)
+    weekly.add_argument("--peers-file", type=Path, required=True)
+    weekly.add_argument("--peer", action="append", default=[])
+    weekly.add_argument(
+        "--publish",
+        action="store_true",
+        help="Actually push the verified release; otherwise only produce a dry-run plan",
+    )
+    weekly.add_argument(
+        "--state-file",
+        type=Path,
+        default=Path("~/.music-kb/state/publish-state.json").expanduser(),
+    )
+
     return parser
 
 
@@ -250,6 +279,21 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 dry_run=args.dry_run,
             )
             return (0 if result["failed_count"] == 0 else 1), result
+    if args.command == "weekly-update":
+        result = run_weekly_update(
+            database=args.db,
+            input_path=args.input,
+            input_kind=args.input_kind,
+            expected_count=args.expected_count,
+            batch_size=args.batch_size,
+            output_dir=args.output_dir,
+            release_name=args.release_name,
+            peers_file=args.peers_file,
+            peer_names=args.peer,
+            publish=args.publish,
+            state_file=args.state_file,
+        )
+        return (0 if result["publish"]["failed_count"] == 0 else 1), result
     raise AssertionError("unhandled command")
 
 
@@ -258,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         code, result = run(args)
-        if args.command in {"doctor", "publish"} and code == 1:
+        if args.command in {"doctor", "publish", "weekly-update"} and code == 1:
             # Missing client configuration and per-peer publish failures are
             # normal result states, not unstructured exceptions. Keep their
             # JSON shape machine-readable while preserving a non-zero status.
