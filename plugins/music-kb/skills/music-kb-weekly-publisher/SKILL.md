@@ -37,6 +37,10 @@ The peer inventory is private and contains connection facts only. The skill
 must load it before planning a fan-out and must not silently invent a host,
 user, key, or target path.
 
+The default path is `~/.config/music-kb/peers.toml`. Use
+`MUSIC_KB_PEERS_FILE` or `--peers-file` only when the inventory is stored
+elsewhere.
+
 ## Canonical workflow
 
 Run the CLI workflow from the installed plugin project:
@@ -49,7 +53,6 @@ music-kb weekly-update \
   --expected-count 232 \
   --output-dir "$HOME/.music-kb/releases" \
   --release-name music-kb-2026w30 \
-  --peers-file "$HOME/.config/music-kb/peers.toml" \
   --state-file "$HOME/.music-kb/state/publish-state.json"
 ```
 
@@ -65,7 +68,6 @@ music-kb weekly-update \
   --expected-count 232 \
   --output-dir "$HOME/.music-kb/releases" \
   --release-name music-kb-2026w30 \
-  --peers-file "$HOME/.config/music-kb/peers.toml" \
   --state-file "$HOME/.music-kb/state/publish-state.json" \
   --publish
 ```

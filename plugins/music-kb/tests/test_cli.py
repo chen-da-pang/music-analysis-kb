@@ -196,6 +196,31 @@ def test_cli_publish_push_dry_run_has_a_machine_readable_plan(tmp_path: Path) ->
     assert parsed["result"]["peers"][0]["status"] == "planned"
 
 
+def test_peer_inventory_defaults_to_private_local_path(monkeypatch) -> None:
+    monkeypatch.delenv("MUSIC_KB_PEERS_FILE", raising=False)
+    parsed = cli.build_parser().parse_args(
+        [
+            "weekly-update",
+            "--db",
+            "/tmp/master.sqlite",
+            "--input",
+            "/tmp/input.jsonl",
+            "--output-dir",
+            "/tmp/releases",
+        ]
+    )
+    assert parsed.peers_file == Path("~/.config/music-kb/peers.toml").expanduser()
+
+
+def test_peer_inventory_environment_override(monkeypatch, tmp_path: Path) -> None:
+    override = tmp_path / "custom-peers.toml"
+    monkeypatch.setenv("MUSIC_KB_PEERS_FILE", str(override))
+    parsed = cli.build_parser().parse_args(
+        ["publish", "push", "--release-dir", "/tmp/release"]
+    )
+    assert parsed.peers_file == override
+
+
 def test_cli_publish_partial_failure_exits_one_with_json_result(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         cli,

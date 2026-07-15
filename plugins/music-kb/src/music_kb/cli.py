@@ -20,6 +20,10 @@ def default_client_database() -> Path:
     return Path(os.environ.get("MUSIC_KB_DB", "~/.music-kb/current.sqlite")).expanduser()
 
 
+def default_peer_inventory() -> Path:
+    return Path(os.environ.get("MUSIC_KB_PEERS_FILE", "~/.config/music-kb/peers.toml")).expanduser()
+
+
 def _add_database_argument(parser: argparse.ArgumentParser, *, required: bool = False) -> None:
     parser.add_argument(
         "--db",
@@ -131,7 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
     push.add_argument(
         "--peers-file",
         type=Path,
-        required=True,
+        required=False,
+        default=default_peer_inventory(),
         help="Private TOML peer inventory; do not commit this file",
     )
     push.add_argument(
@@ -157,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--batch-size", type=int, default=500)
     weekly.add_argument("--output-dir", type=Path, required=True)
     weekly.add_argument("--release-name", default=None)
-    weekly.add_argument("--peers-file", type=Path, required=True)
+    weekly.add_argument("--peers-file", type=Path, default=default_peer_inventory())
     weekly.add_argument("--peer", action="append", default=[])
     weekly.add_argument(
         "--publish",
