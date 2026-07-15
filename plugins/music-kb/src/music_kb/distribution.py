@@ -11,7 +11,8 @@ from .errors import ValidationError
 from .snapshot import validate_release_name, verify_snapshot
 
 
-PEER_CONFIG_VERSION = 1
+PEER_CONFIG_VERSION = 2
+SUPPORTED_PEER_CONFIG_VERSIONS = {1, 2}
 DEFAULT_TARGET_DIR = "~/.music-kb"
 DEFAULT_CLI_PATH = "~/.local/bin/music-kb"
 DEFAULT_PORT = 22
@@ -35,6 +36,7 @@ class DistributionPeer:
     cli_path: str
     connect_timeout_seconds: int
     command_timeout_seconds: int
+    enabled: bool
 
     @property
     def ssh_target(self) -> str:
@@ -58,6 +60,12 @@ def _optional_string(value: object, *, field: str, context: str) -> str | None:
 def _positive_int(value: object, *, field: str, context: str, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
         raise ValidationError(f"{context}.{field} must be an integer between 1 and {maximum}")
+    return value
+
+
+def _boolean(value: object, *, field: str, context: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValidationError(f"{context}.{field} must be a boolean")
     return value
 
 
@@ -118,9 +126,10 @@ def load_distribution_peers(config_path: str | Path) -> list[DistributionPeer]:
         raise ValidationError(f"Peer config is not valid TOML: {exc}") from exc
 
     version = raw.get("version")
-    if version != PEER_CONFIG_VERSION:
+    if version not in SUPPORTED_PEER_CONFIG_VERSIONS:
         raise ValidationError(
-            f"Peer config version must be {PEER_CONFIG_VERSION}", details={"actual": version}
+            f"Peer config version must be one of {sorted(SUPPORTED_PEER_CONFIG_VERSIONS)}",
+            details={"actual": version},
         )
     defaults_value = raw.get("defaults", {})
     defaults = _mapping(defaults_value, context="defaults")
@@ -192,6 +201,11 @@ def load_distribution_peers(config_path: str | Path) -> list[DistributionPeer]:
                     context=context,
                     maximum=86_400,
                 ),
+                enabled=_boolean(
+                    _get_setting(peer, defaults, "enabled", True),
+                    field="enabled",
+                    context=context,
+                ),
             )
         )
     return peers
@@ -199,7 +213,7 @@ def load_distribution_peers(config_path: str | Path) -> list[DistributionPeer]:
 
 def _select_peers(peers: list[DistributionPeer], requested_names: Sequence[str]) -> list[DistributionPeer]:
     if not requested_names:
-        return peers
+        return [peer for peer in peers if peer.enabled]
     requested = set(requested_names)
     available = {peer.name for peer in peers}
     unknown = sorted(requested - available)

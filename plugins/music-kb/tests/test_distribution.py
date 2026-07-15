@@ -17,9 +17,11 @@ def _write_peers(
     key: Path,
     peers: tuple[tuple[str, str], ...] = (("first-mac", "first.example.test"),),
     target_dir: str = "~/.music-kb",
+    enabled: tuple[bool, ...] | None = None,
+    version: int = 1,
 ) -> Path:
     rows = [
-        "version = 1",
+        f"version = {version}",
         "",
         "[defaults]",
         f'identity_file = "{key}"',
@@ -28,12 +30,13 @@ def _write_peers(
         "connect_timeout_seconds = 7",
         "command_timeout_seconds = 33",
     ]
-    for name, host in peers:
+    for index, (name, host) in enumerate(peers):
         rows.extend(
             [
                 "",
                 "[[peers]]",
                 f'name = "{name}"',
+                f"enabled = {str(enabled[index] if enabled is not None else True).lower()}",
                 f'host = "{host}"',
                 'user = "music-user"',
             ]
@@ -248,3 +251,45 @@ def test_private_peer_config_rejects_unsafe_rsync_path_and_unknown_selection(mas
     release = _release(master_database, tmp_path)
     with pytest.raises(ValidationError, match="Requested peer"):
         publish_snapshot(release, valid, peer_names=["missing"])
+
+
+def test_disabled_peers_are_excluded_from_all_peer_publish_but_explicit_retry_can_target_them(
+    master_database, tmp_path: Path
+) -> None:
+    key = tmp_path / "id_ed25519"
+    key.write_text("fixture key", encoding="utf-8")
+    peers = _write_peers(
+        tmp_path,
+        key=key,
+        peers=(("enabled-mac", "enabled.example.test"), ("paused-mac", "paused.example.test")),
+        enabled=(True, False),
+    )
+    release = _release(master_database, tmp_path)
+
+    all_peers = publish_snapshot(release, peers, dry_run=True)
+    assert [peer["name"] for peer in all_peers["peers"]] == ["enabled-mac"]
+
+    explicit = publish_snapshot(release, peers, peer_names=["paused-mac"], dry_run=True)
+    assert [peer["name"] for peer in explicit["peers"]] == ["paused-mac"]
+
+
+def test_peer_config_v1_remains_compatible(master_database, tmp_path: Path) -> None:
+    key = tmp_path / "id_ed25519"
+    key.write_text("fixture key", encoding="utf-8")
+    peers = _write_peers(tmp_path, key=key, version=1)
+    text = peers.read_text(encoding="utf-8").replace("enabled = true\n", "")
+    peers.write_text(text, encoding="utf-8")
+
+    loaded = load_distribution_peers(peers)
+    assert loaded[0].enabled is True
+
+
+def test_peer_config_rejects_non_boolean_enabled(master_database, tmp_path: Path) -> None:
+    key = tmp_path / "id_ed25519"
+    key.write_text("fixture key", encoding="utf-8")
+    peers = _write_peers(tmp_path, key=key, version=2)
+    text = peers.read_text(encoding="utf-8").replace("enabled = true\n", 'enabled = "yes"\n')
+    peers.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="enabled must be a boolean"):
+        load_distribution_peers(peers)

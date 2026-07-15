@@ -37,7 +37,10 @@ chmod 600 "$HOME/.config/music-kb/peers.toml"
 
 The peer file has a `[[peers]]` entry per colleague. It controls only a peer's
 SSH identity, target directory, and the absolute/home-relative CLI path; it
-never contains a database or raw model output. The default `cli_path` is
+never contains a database or raw model output. Set `enabled = false` to keep a
+peer in the inventory without including it in an all-peer publish. An explicit
+`--peer <name>` retry still targets that named peer, even when it is disabled.
+The default `cli_path` is
 `~/.local/bin/music-kb`, the normal destination of `install-local.sh`. Set it
 explicitly if the colleague uses `UV_TOOL_BIN_DIR` or a wrapper location.
 

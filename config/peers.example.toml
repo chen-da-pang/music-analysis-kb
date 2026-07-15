@@ -2,7 +2,7 @@
 #   ~/.config/music-kb/peers.toml
 # Then replace every placeholder. Do not commit the copied file.
 
-version = 1
+version = 2
 
 [defaults]
 # The installed CLI is required on each colleague computer. The publisher uses
@@ -18,5 +18,12 @@ identity_file = "~/.ssh/music-kb-sync"
 
 [[peers]]
 name = "first-colleague"
+enabled = true
 host = "192.0.2.42" # Documentation-only address. Use a private local config.
+user = "macos-user"
+
+[[peers]]
+name = "temporarily-disabled-colleague"
+enabled = false
+host = "192.0.2.43"
 user = "macos-user"
