@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -183,3 +184,17 @@ def test_git_object_transport_rejects_polluted_repository_even_with_group_headro
     )
     assert result["clean"] is False
     assert result["checks"]["repo_git_bytes_within_clean_limit"] is False
+
+
+def test_production_policy_classifies_only_the_migrated_issue27_code_branches() -> None:
+    policy_path = SCRIPT.parents[1] / "references" / "cnb-storage-policy.json"
+    production = json.loads(policy_path.read_text(encoding="utf-8"))
+    migrated = {
+        "codex/issue-27-canonical-direct-delivery",
+        "codex/issue-27-direct-quality-gate",
+        "codex/issue-27-sharded-ledger-index-fix",
+        "codex/issue-27-zero-pending-fix",
+    }
+    for branch in migrated:
+        assert MODULE._matches(branch, production["cleanup_branch_patterns"])
+    assert not MODULE._matches("codex/issue-27-unreviewed-future-work", production["cleanup_branch_patterns"])

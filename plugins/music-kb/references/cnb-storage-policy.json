@@ -23,7 +23,8 @@
     "^run-state/",
     "^codex/weekly-campaign-",
     "^codex/kugou-[0-9]{8}-asr-devgpu$",
-    "^codex/issue-[0-9]+-quality-rerun-"
+    "^codex/issue-[0-9]+-quality-rerun-",
+    "^codex/issue-27-(canonical-direct-delivery|direct-quality-gate|sharded-ledger-index-fix|zero-pending-fix)$"
   ],
   "cleanup_asset_name_patterns": [
     "^music-flamingo-run\\.tar\\.gz$"
