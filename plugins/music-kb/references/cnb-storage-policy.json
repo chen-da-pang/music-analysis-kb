@@ -6,6 +6,11 @@
   "clean_repo_git_bytes_max": 500000000,
   "minimum_group_object_free_bytes": 10000000000,
   "minimum_group_git_free_bytes": 10000000000,
+  "server_gc": {
+    "unreferenced_object_grace_days": 7,
+    "support_issue": "cnb/feedback#4551",
+    "manual_gc_api": false
+  },
   "required_runtime": {
     "registry_slug": "wuyoumusic/moss-music-runner",
     "package_type": "docker",

@@ -21,6 +21,11 @@ def policy() -> dict:
         "clean_repo_git_bytes_max": 500_000_000,
         "minimum_group_object_free_bytes": 10_000_000_000,
         "minimum_group_git_free_bytes": 10_000_000_000,
+        "server_gc": {
+            "unreferenced_object_grace_days": 7,
+            "support_issue": "cnb/feedback#4551",
+            "manual_gc_api": False,
+        },
         "required_runtime": {
             "registry_slug": "org/repo",
             "package_type": "docker",
@@ -184,6 +189,25 @@ def test_git_object_transport_rejects_polluted_repository_even_with_group_headro
     )
     assert result["clean"] is False
     assert result["checks"]["repo_git_bytes_within_clean_limit"] is False
+
+
+def test_inspect_marks_server_gc_pending_after_visible_refs_are_clean() -> None:
+    result = MODULE.inspect(
+        policy(),
+        fixture_runner(
+            object_bytes=64_000_000_000,
+            campaign=False,
+            asset=False,
+            result=False,
+        ),
+        transport="git-objects",
+    )
+    assert result["server_gc_pending"] is True
+    assert result["server_gc"] == {
+        "unreferenced_object_grace_days": 7,
+        "support_issue": "cnb/feedback#4551",
+        "manual_gc_api": False,
+    }
 
 
 def test_production_policy_classifies_only_the_migrated_issue27_code_branches() -> None:
