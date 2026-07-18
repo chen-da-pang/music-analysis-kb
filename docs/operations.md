@@ -91,12 +91,12 @@ Remove `--download-dry-run` only for the approved Claude Code download. Add
 `--publish` after the peer dry-run has been reviewed. Every production publish
 must also include `--confirm-delete-audio --confirm-delete-cnb-storage`; the
 preflight refuses to download when either cleanup confirmation is absent.
-Deletion still waits until the local release and every enabled peer have
-succeeded. CNB cleanup is not considered complete merely because a branch was
-deleted: `cnb charge get-repos-volume` must show the repository below the
-versioned clean threshold. The orchestrator rejects a missing or incomplete
-source-link set and never treats a dry-run or skipped CNB stage as a completed
-analysis.
+Deletion waits until the local release and every enabled peer have succeeded,
+unless `--skip-peers` was explicitly selected. CNB cleanup is not considered
+complete merely because a branch was deleted: `cnb charge get-repos-volume`
+must show the repository below the versioned clean threshold. The orchestrator
+rejects a missing or incomplete source-link set and never treats a dry-run or
+skipped CNB analysis stage as a completed analysis.
 
 When `--rank-id` is omitted, `weekly-run` reads the versioned
 `plugins/music-kb/references/kugou-chart-profile.json` and captures all six

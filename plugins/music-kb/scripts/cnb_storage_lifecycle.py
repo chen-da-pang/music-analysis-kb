@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Inspect and clean CNB campaign storage residue.
+"""Inspect and clean disposable CNB runtime storage residue.
 
-The required Music Flamingo runtime image and result/ledger branches are
-preserved. Normal campaigns use Git LFS and require CNB's authoritative object
-counter to fall below the policy limit. A narrowly bounded ``git-objects``
-transport is available only when orphan LFS has not been reclaimed: it uses
-the separately metered ordinary Git storage counter, while retaining the same
-branch and asset cleanup rules.
+GitHub is the source of truth for runner code. CNB keeps only the protected
+code mirror and the required runtime image; campaign inputs, result branches,
+ledgers, and temporary assets are disposable after their outputs have been
+exported and verified locally. Normal campaigns use Git LFS and require CNB's
+authoritative object counter to fall below the policy limit. A narrowly
+bounded ``git-objects`` transport is available only when orphan LFS has not
+been reclaimed: it uses the separately metered ordinary Git storage counter,
+while retaining the same branch and asset cleanup rules.
 """
 
 from __future__ import annotations
@@ -24,12 +26,13 @@ Runner = Callable[[Sequence[str]], dict[str, Any]]
 
 def load_policy(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
-        raise ValueError(f"CNB storage policy schema must be 1: {path}")
+    if not isinstance(value, dict) or value.get("schema_version") != 2:
+        raise ValueError(f"CNB storage policy schema must be 2: {path}")
     required = {
         "organization_slug",
         "repository_slug",
         "clean_repo_object_bytes_max",
+        "clean_repo_git_bytes_max",
         "minimum_group_object_free_bytes",
         "minimum_group_git_free_bytes",
         "required_runtime",
@@ -43,6 +46,8 @@ def load_policy(path: Path) -> dict[str, Any]:
         raise ValueError(f"CNB storage policy is missing fields: {missing}")
     if int(value["clean_repo_object_bytes_max"]) <= 0:
         raise ValueError("clean_repo_object_bytes_max must be positive")
+    if int(value["clean_repo_git_bytes_max"]) <= 0:
+        raise ValueError("clean_repo_git_bytes_max must be positive")
     if int(value["minimum_group_object_free_bytes"]) <= 0:
         raise ValueError("minimum_group_object_free_bytes must be positive")
     if int(value["minimum_group_git_free_bytes"]) <= 0:
@@ -189,16 +194,18 @@ def inspect(
     runtime_tags = [str(row.get("name", "")) for row in tag_data.get(runtime["package_type"], [])]
     runtime_present = str(runtime["tag"]) in runtime_tags
     threshold = int(policy["clean_repo_object_bytes_max"])
+    git_threshold = int(policy["clean_repo_git_bytes_max"])
     minimum_group_free = int(policy["minimum_group_object_free_bytes"])
     minimum_group_git_free = int(policy["minimum_group_git_free_bytes"])
     lfs_storage_clean = repo_object_bytes <= threshold and group_object_free >= minimum_group_free
-    git_storage_ready = group_git_free >= minimum_group_git_free
+    git_storage_ready = repo_git_bytes <= git_threshold and group_git_free >= minimum_group_git_free
     checks = {
         "required_runtime_present": runtime_present,
         "no_campaign_branches": not cleanup_branches,
         "no_active_campaign_workspaces": not active_campaign_branches,
         "no_temporary_assets": not cleanup_assets,
         "repo_object_bytes_within_clean_limit": repo_object_bytes <= threshold,
+        "repo_git_bytes_within_clean_limit": repo_git_bytes <= git_threshold,
         "group_object_free_bytes_sufficient": group_object_free >= minimum_group_free,
         "group_git_free_bytes_sufficient": git_storage_ready,
         "no_unclassified_branches": not unexpected_branches,
@@ -220,6 +227,7 @@ def inspect(
         "checks": checks,
         "repo_object_bytes": repo_object_bytes,
         "clean_repo_object_bytes_max": threshold,
+        "clean_repo_git_bytes_max": git_threshold,
         "object_quota_total_bytes": quota_total,
         "group_object_used_bytes": group_object_used,
         "group_object_free_bytes": group_object_free,

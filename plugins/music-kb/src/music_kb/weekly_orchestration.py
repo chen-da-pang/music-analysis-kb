@@ -157,6 +157,25 @@ def _inventory_song_count(path: Path) -> int:
     return len(songs)
 
 
+def _cleanup_gate_satisfied(
+    *,
+    publish: bool,
+    release_result: dict[str, Any] | None,
+    skip_peers: bool,
+    publish_result: dict[str, Any],
+) -> bool:
+    """Allow destructive cleanup only after local publication is explicit and safe."""
+
+    if not publish or release_result is None:
+        return False
+    if skip_peers:
+        return True
+    return (
+        int(publish_result.get("peer_count", 0)) > 0
+        and int(publish_result.get("failed_count", 0)) == 0
+    )
+
+
 def run_weekly_run(
     *,
     workspace: str | Path,
@@ -231,7 +250,7 @@ def run_weekly_run(
             outputs.update(preflight)
             if not preflight["valid"]:
                 raise RuntimeError(f"weekly preflight failed: {preflight['failed_required']}")
-            if publish and not skip_peers:
+            if publish:
                 missing_cleanup_confirmations = []
                 if not confirm_delete_audio:
                     missing_cleanup_confirmations.append("--confirm-delete-audio")
@@ -493,7 +512,17 @@ def run_weekly_run(
 
         publish_result: dict[str, Any] = {"status": "skipped", "reason": "no release in dry-run"}
         with atom(context, "peer_publish", inputs={"publish": publish, "peers_file": str(peers_path) if peers_path else None}) as outputs:
-            if release_result is None or skip_peers:
+            if release_result is None:
+                outputs.update(publish_result)
+            elif skip_peers:
+                publish_result = {
+                    "status": "skipped",
+                    "reason": "peer sync explicitly skipped",
+                    "peer_count": 0,
+                    "succeeded_count": 0,
+                    "failed_count": 0,
+                    "dry_run": not publish,
+                }
                 outputs.update(publish_result)
             else:
                 from .distribution import publish_snapshot
@@ -517,11 +546,23 @@ def run_weekly_run(
                     )
                     outputs["state_file"] = str(state_path)
 
-        with atom(context, "audio_cleanup", inputs={"confirm": confirm_delete_audio}) as outputs:
+        cleanup_gate = _cleanup_gate_satisfied(
+            publish=publish,
+            release_result=release_result,
+            skip_peers=skip_peers,
+            publish_result=publish_result,
+        )
+        with atom(
+            context,
+            "audio_cleanup",
+            inputs={"confirm": confirm_delete_audio, "cleanup_gate": cleanup_gate},
+        ) as outputs:
             if not confirm_delete_audio:
                 outputs.update({"status": "skipped", "reason": "confirmation flag not supplied"})
-            elif not publish or release_result is None or skip_peers or publish_result.get("peer_count", 0) == 0:
-                raise RuntimeError("audio cleanup requires a verified release and successful peer publication")
+            elif not cleanup_gate:
+                raise RuntimeError(
+                    "audio cleanup requires a verified release and either explicit peer skip or successful peer publication"
+                )
             else:
                 expected_inventory_count = _inventory_song_count(inventory_path)
                 cleanup_command = [
@@ -551,8 +592,10 @@ def run_weekly_run(
         ) as outputs:
             if not confirm_delete_cnb_storage:
                 outputs.update({"status": "skipped", "reason": "confirmation flag not supplied"})
-            elif not publish or release_result is None or skip_peers or publish_result.get("peer_count", 0) == 0:
-                raise RuntimeError("CNB storage cleanup requires a verified release and successful peer publication")
+            elif not cleanup_gate:
+                raise RuntimeError(
+                    "CNB storage cleanup requires a verified release and either explicit peer skip or successful peer publication"
+                )
             else:
                 command = [
                     sys.executable,

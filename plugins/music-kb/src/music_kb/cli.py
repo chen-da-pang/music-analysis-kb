@@ -225,7 +225,11 @@ def build_parser() -> argparse.ArgumentParser:
     weekly_run.add_argument("--peers-file", type=Path, default=default_peer_inventory())
     weekly_run.add_argument("--peer", action="append", default=[])
     weekly_run.add_argument("--publish", action="store_true")
-    weekly_run.add_argument("--skip-peers", action="store_true", help="Do not create or publish a peer plan")
+    weekly_run.add_argument(
+        "--skip-peers",
+        action="store_true",
+        help="Explicitly skip peer sync; with --publish, cleanup still requires both confirmation flags",
+    )
     weekly_run.add_argument("--delivery", type=Path, help="Existing CNB canonical delivery JSONL")
     weekly_run.add_argument("--cnb-command", help="Command that writes $MUSIC_KB_CNB_OUTPUT canonical JSONL")
     weekly_run.add_argument("--chart-database", type=Path, help="Authoritative chart SQLite used to backfill source links")

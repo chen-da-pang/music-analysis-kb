@@ -48,7 +48,10 @@ The intended order is:
 8. canonical import, tag enrichment, and source-link completeness gate;
 9. snapshot creation and verification;
 10. peer dry-run, schema/plugin compatibility check, and SSH fan-out;
-11. only after all enabled peers succeed, local audio purge, campaign branch/temporary asset cleanup, and final CNB object-byte verification.
+11. after the local release succeeds and either all enabled peers succeed or
+    the publisher explicitly uses `--skip-peers`, purge local audio, delete
+    completed CNB run-input/result/ledger refs and temporary assets, and verify
+    final CNB object bytes.
 
 Use the executable `music-kb weekly-run` entry point. Never bypass the run
 state or call the old full-database downloader for a weekly update.
@@ -56,11 +59,12 @@ state or call the old full-database downloader for a weekly update.
 The storage policy is `plugins/music-kb/references/cnb-storage-policy.json`. Every production
 `--publish` run must include `--confirm-delete-audio` and
 `--confirm-delete-cnb-storage`; preflight fails before download if either is
-missing. Actual deletion still occurs only after the release and every enabled
-peer have succeeded. The CNB cleanup atom preserves the
-runtime image, result branches, canonical delivery, ledger, master database,
-and immutable releases. It deletes only campaign input branches and temporary
-run assets, then checks both CNB storage counters.
+missing. Actual deletion still occurs only after the release and either every
+enabled peer has succeeded or `--skip-peers` was explicitly selected. CNB is a
+runtime mirror, so completed result/ledger refs and temporary run assets are
+disposable after local export. Preserve only the code mirror and required
+runtime image; never store the master database or immutable local releases in
+CNB.
 
 Use LFS only when `cnb_storage_lifecycle.py inspect --transport lfs` proves
 the object-storage policy clean. When CNB's authoritative counter still shows
