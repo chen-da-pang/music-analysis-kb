@@ -24,13 +24,13 @@
     "历史去重依赖 song_inventory.json，不依赖音频文件继续存在。",
     "入库前必须保留歌曲级 source_url；source_links 数量必须等于 source_tracks 数量。",
     "只同步 immutable snapshot，不同步 writable master database。",
-    "只有本地 release 验证和所有启用 peer 发布成功后才允许清理音频。",
+    "只有本地 release 验证，且所有启用 peer 发布成功或用户显式选择 --skip-peers 后，才允许清理音频。",
     "默认 LFS 周更前必须通过 CNB 对象存储清洁门禁；每次周更成功后删除本批 campaign 分支和临时附件，并以 CNB charge API 的仓库对象字节数确认是否已回收。",
     "CNB 未提供 orphan LFS 的公开管理员删除或 GC API；CNB 支持说明服务端默认在对象失去引用 7 天后由定时 GC 清理（cnb/feedback#4551）。不得把删除分支误报为已回收；必须记录 server_gc_pending 和当前 charge 计数，并显式使用受 5 GB 总量、256 MiB 单文件和 Git 余量门禁限制的 git-objects 回退。"
   ],
   "operations": {
     "cnb_storage_preflight": {
-      "effective_method": "读取 cnb-storage-policy.json；通过 CNB git/assets/registries/charge API 确认 Music Flamingo 必需镜像存在、无 campaign 音频分支和临时附件。默认 --cnb-transport lfs 还要求 moss-music-runner 对象用量和根组织对象余量通过清洁阈值；若 orphan LFS 无法回收，显式 --cnb-transport git-objects 改为检查根组织普通 Git 余量，仍要求所有可见 campaign 残留先清理。"
+      "effective_method": "新分析 invocation 读取 cnb-storage-policy.json，并通过 CNB git/assets/registries/charge API 确认 Music Flamingo 必需镜像存在、无 campaign 音频分支和临时附件。默认 --cnb-transport lfs 还要求 moss-music-runner 对象用量和根组织对象余量通过清洁阈值；若 orphan LFS 无法回收，显式 --cnb-transport git-objects 改为检查根组织普通 Git 余量，仍要求所有可见 campaign 残留先清理。显式提供且通过 expected-count 校验的本地 canonical delivery 属于 post-analysis resume，记录本原子 skipped，不读取 CNB 容量。"
     },
     "preflight": {
       "effective_method": "检查操作记录、工作目录、依赖命令、输入路径、数据库和配置可写性；任一失败立即停止。"
@@ -66,7 +66,7 @@
       "effective_method": "读取 publisher-only peers.toml；只同步 release，远端验证后原子切换 current.sqlite；单个 peer 失败可按名称重试。"
     },
     "audio_cleanup": {
-      "effective_method": "仅在本地 release 和所有启用 peer 成功后，校验 provenance/source_tracks/source_links 和 inventory，再标记 purged_after_analysis 并删除音频。"
+      "effective_method": "仅在本地 release 已验证，且所有启用 peer 成功或用户显式选择 --skip-peers 后，校验 provenance/source_tracks/source_links 和 inventory；只删除能按平台 track ID 精确匹配知识库 source_track 的本地音频目录，并标记 purged_after_analysis。未匹配、尚未分析的下载音频必须保留。"
     },
     "cnb_storage_cleanup": {
       "effective_method": "CNB 只作为 GitHub runner 的可丢弃 GPU 运行镜像；仅在 canonical delivery、知识库导入、immutable release 验证和所有启用 peer 发布成功（或显式 --skip-peers）后，按策略删除已导出的 campaign input、result、ledger 分支和临时 run assets。只保留 code-only main 和 Music Flamingo runtime image，绝不删除活跃 Dev GPU 分支；master DB、release 和 canonical 证据已在本地验证后不留在 CNB。删除后必须重跑 charge 检查；若可见 refs 已清零但对象计数仍高，记录 server_gc_pending=true 并按 CNB 默认 7 天服务端 GC 窗口（cnb/feedback#4551）等待复核。后续默认 LFS 周更继续阻断，但通过 Git 余量和全量可见残留门禁的显式 git-objects 周更可以继续。"

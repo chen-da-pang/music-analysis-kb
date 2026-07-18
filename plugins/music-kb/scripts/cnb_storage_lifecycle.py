@@ -218,7 +218,7 @@ def inspect(
         "repo_object_bytes_within_clean_limit": repo_object_bytes <= threshold,
         "repo_git_bytes_within_clean_limit": repo_git_bytes <= git_threshold,
         "group_object_free_bytes_sufficient": group_object_free >= minimum_group_free,
-        "group_git_free_bytes_sufficient": git_storage_ready,
+        "group_git_free_bytes_sufficient": group_git_free >= minimum_group_git_free,
         "no_unclassified_branches": not unexpected_branches,
     }
     transport_ready = lfs_storage_clean if transport == "lfs" else git_storage_ready
