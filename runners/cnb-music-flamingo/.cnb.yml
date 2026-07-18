@@ -1,0 +1,789 @@
+# CNB Music Flamingo pipeline. Runtime consumers use the promoted immutable Docker Artifact digest.
+# Build events publish a unique candidate tag and print its resolved digest for reviewed promotion.
+$:
+  api_trigger:
+  - docker:
+      image: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      volumes:
+      - music-flamingo-output:/workspace/cache/output:read-write
+    runner:
+      tags: cnb:arch:amd64:gpu:L40
+    env:
+      PYTHONUNBUFFERED: '1'
+      HF_HUB_ENABLE_HF_TRANSFER: '1'
+      HF_HOME: /opt/huggingface
+      MUSIC_FLAMINGO_MODEL: nvidia/music-flamingo-think-2601-hf
+      MUSIC_FLAMINGO_REVISION: 1ea2109
+      MUSIC_FLAMINGO_MODEL_DIR: /opt/models/music-flamingo-think-2601-hf
+      CNB_RUNTIME_IMAGE: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      MUSIC_FLAMINGO_MAX_NEW_TOKENS: '2048'
+      MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS: '240'
+      MUSIC_FLAMINGO_PROMPT: Describe this track in full detail - tell me the genre, tempo, broad tonal center, rhythmic feel,
+        instrumentation, vocal character, production style, structure, and overall mood and atmosphere it creates. Focus only
+        on audible musical and performance details. Ignore lyrical content entirely and do not mention, summarize, quote,
+        or transcribe any lyrics.
+      WORK_DIR: /workspace/cache/output/music_flamingo_pipeline
+      MUSIC_FLAMINGO_RUN_ID: ${CNB_BUILD_ID}
+      MUSIC_FLAMINGO_DETAILED_CUDA_TELEMETRY: '0'
+      MUSIC_FLAMINGO_OUTPUT_NAME: one_smoke
+    stages:
+    - name: Check GPU
+      script: bash scripts/check_remote_env.sh
+    - name: Pick smoke audio
+      script: bash scripts/pick_one_audio.sh
+    - name: Verify preloaded Music Flamingo model
+      script: python scripts/run_one_music_flamingo_smoke.py verify
+    - name: Run one-song Music Flamingo smoke
+      timeout: 4h
+      script: 'set -eu
+
+        rc=0
+
+        python scripts/run_one_music_flamingo_smoke.py infer || rc=$?
+
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+
+        echo "===== model_report.json ====="
+
+        cat "$run_dir/model_report.json" || true
+
+        echo "===== run_report.json ====="
+
+        cat "$run_dir/run_report.json" || true
+
+        echo "===== stdout.txt ====="
+
+        cat "$run_dir/stdout.txt" || true
+
+        echo "===== stdout_raw.txt ====="
+
+        cat "$run_dir/stdout_raw.txt" || true
+
+        echo "===== stderr.txt ====="
+
+        cat "$run_dir/stderr.txt" || true
+
+        exit "$rc"
+
+        '
+    - name: Package Music Flamingo run evidence
+      script: bash scripts/package_music_flamingo_run.sh
+    - name: Upload Music Flamingo run evidence
+      image: cnbcool/attachments:latest
+      settings:
+        attachments:
+        - cnb-artifacts/music-flamingo-run.tar.gz
+    lock:
+      key: music-flamingo-output-writer
+      wait: true
+      timeout: 15000
+      expires: 15000
+  api_trigger_official_music_flamingo:
+  - docker:
+      image: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      volumes:
+      - music-flamingo-output:/workspace/cache/output:read-write
+    runner:
+      tags: cnb:arch:amd64:gpu
+    env:
+      PYTHONUNBUFFERED: '1'
+      HF_HUB_ENABLE_HF_TRANSFER: '1'
+      HF_HOME: /opt/huggingface
+      MUSIC_FLAMINGO_MODEL: nvidia/music-flamingo-think-2601-hf
+      MUSIC_FLAMINGO_REVISION: 1ea2109
+      MUSIC_FLAMINGO_MODEL_DIR: /opt/models/music-flamingo-think-2601-hf
+      CNB_RUNTIME_IMAGE: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      MUSIC_FLAMINGO_MAX_NEW_TOKENS: '2048'
+      MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS: '240'
+      MUSIC_FLAMINGO_OUTPUT_NAME: official_one_smoke
+      MUSIC_FLAMINGO_PROMPT: Describe this track in full detail - tell me the genre, tempo, and key, then dive into the instruments,
+        production style, and overall mood it creates.
+      WORK_DIR: /workspace/cache/output/music_flamingo_pipeline
+      MUSIC_FLAMINGO_RUN_ID: ${CNB_BUILD_ID}
+      MUSIC_FLAMINGO_DETAILED_CUDA_TELEMETRY: '0'
+    stages:
+    - name: Check GPU
+      script: bash scripts/check_remote_env.sh
+    - name: Pick smoke audio
+      script: bash scripts/pick_one_audio.sh
+    - name: Verify preloaded Music Flamingo model
+      script: python scripts/run_one_music_flamingo_smoke.py verify
+    - name: Run official Music Flamingo prompt smoke
+      timeout: 4h
+      script: 'set -eu
+
+        rc=0
+
+        python scripts/run_one_music_flamingo_smoke.py infer || rc=$?
+
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+
+        echo "===== model_report.json ====="
+
+        cat "$run_dir/model_report.json" || true
+
+        echo "===== run_report.json ====="
+
+        cat "$run_dir/run_report.json" || true
+
+        echo "===== stdout.txt ====="
+
+        cat "$run_dir/stdout.txt" || true
+
+        echo "===== stdout_raw.txt ====="
+
+        cat "$run_dir/stdout_raw.txt" || true
+
+        echo "===== stderr.txt ====="
+
+        cat "$run_dir/stderr.txt" || true
+
+        exit "$rc"
+
+        '
+    - name: Package Music Flamingo run evidence
+      script: bash scripts/package_music_flamingo_run.sh
+    - name: Upload Music Flamingo run evidence
+      image: cnbcool/attachments:latest
+      settings:
+        attachments:
+        - cnb-artifacts/music-flamingo-run.tar.gz
+    lock:
+      key: music-flamingo-output-writer
+      wait: true
+      timeout: 15000
+      expires: 15000
+  api_trigger_batch10:
+  - docker:
+      image: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      volumes:
+      - music-flamingo-output:/workspace/cache/output:read-write
+    runner:
+      tags: cnb:arch:amd64:gpu
+    env:
+      PYTHONUNBUFFERED: '1'
+      HF_HUB_ENABLE_HF_TRANSFER: '1'
+      HF_HOME: /opt/huggingface
+      AUDIO_ROOT: data/input/batch10
+      MUSIC_FLAMINGO_MODEL: nvidia/music-flamingo-think-2601-hf
+      MUSIC_FLAMINGO_REVISION: 1ea2109
+      MUSIC_FLAMINGO_MODEL_DIR: /opt/models/music-flamingo-think-2601-hf
+      CNB_RUNTIME_IMAGE: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      MUSIC_FLAMINGO_MAX_NEW_TOKENS: '2048'
+      MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS: '240'
+      MUSIC_FLAMINGO_BATCH_LIMIT: '10'
+      MUSIC_FLAMINGO_OUTPUT_NAME: batch10_smoke
+      MUSIC_FLAMINGO_PROMPT: Describe this track in full detail - tell me the genre, tempo, broad tonal center, rhythmic feel,
+        instrumentation, vocal character, production style, structure, and overall mood and atmosphere it creates. Focus only
+        on audible musical and performance details. Ignore lyrical content entirely and do not mention, summarize, quote,
+        or transcribe any lyrics.
+      WORK_DIR: /workspace/cache/output/music_flamingo_pipeline
+      MUSIC_FLAMINGO_RUN_ID: ${CNB_BUILD_ID}
+      MUSIC_FLAMINGO_DETAILED_CUDA_TELEMETRY: '0'
+    stages:
+    - name: Check GPU
+      script: bash scripts/check_remote_env.sh
+    - name: Run ten-song Music Flamingo batch smoke
+      timeout: 4h
+      script: 'set -eu
+
+        rc=0
+
+        python scripts/run_music_flamingo_batch.py || rc=$?
+
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+
+        echo "===== model_report.json ====="
+
+        cat "$run_dir/model_report.json" || true
+
+        echo "===== batch_report.json ====="
+
+        cat "$run_dir/batch_report.json" || true
+
+        echo "===== progress.jsonl tail ====="
+
+        tail -n 80 "$run_dir/progress.jsonl" || true
+
+        echo "===== stderr.txt ====="
+
+        cat "$run_dir/stderr.txt" || true
+
+        exit "$rc"
+
+        '
+    - name: Package Music Flamingo run evidence
+      script: bash scripts/package_music_flamingo_run.sh
+    - name: Upload Music Flamingo run evidence
+      image: cnbcool/attachments:latest
+      settings:
+        attachments:
+        - cnb-artifacts/music-flamingo-run.tar.gz
+    lock:
+      key: music-flamingo-output-writer
+      wait: true
+      timeout: 15000
+      expires: 15000
+  api_trigger_devgpu_batch10:
+  - docker:
+      image: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      volumes:
+      - music-flamingo-output:/workspace/cache/output:read-write
+    services:
+    - vscode
+    runner:
+      tags: cnb:arch:amd64:gpu
+    env:
+      PYTHONUNBUFFERED: '1'
+      HF_HUB_ENABLE_HF_TRANSFER: '1'
+      HF_HOME: /opt/huggingface
+      WORK_DIR: /workspace/cache/output/music_flamingo_pipeline
+      AUDIO_ROOT: data/input/batch10
+      MUSIC_FLAMINGO_MODEL: nvidia/music-flamingo-think-2601-hf
+      MUSIC_FLAMINGO_REVISION: 1ea2109
+      MUSIC_FLAMINGO_MODEL_DIR: /opt/models/music-flamingo-think-2601-hf
+      CNB_RUNTIME_IMAGE: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      MUSIC_FLAMINGO_MAX_NEW_TOKENS: '2048'
+      MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS: '240'
+      MUSIC_FLAMINGO_BATCH_LIMIT: '10'
+      MUSIC_FLAMINGO_OUTPUT_NAME: devgpu_batch10_smoke
+      MUSIC_FLAMINGO_PROMPT: Describe this track in full detail - tell me the genre, tempo, broad tonal center, rhythmic feel,
+        instrumentation, vocal character, production style, structure, and overall mood and atmosphere it creates. Focus only
+        on audible musical and performance details. Ignore lyrical content entirely and do not mention, summarize, quote,
+        or transcribe any lyrics.
+      MUSIC_FLAMINGO_RUN_ID: ${CNB_BUILD_ID}
+      MUSIC_FLAMINGO_DETAILED_CUDA_TELEMETRY: '0'
+    stages:
+    - name: Start Dev GPU log viewer
+      script: 'set -eu
+
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+
+        mkdir -p "$run_dir"
+
+        nohup bash scripts/devgpu_launch.sh > "$run_dir/log_viewer.log" 2>&1 &
+
+        echo "$!" > "$run_dir/log_viewer.pid"
+
+        echo "Log viewer process started on port 8686"
+
+        echo "Log viewer run directory: $run_dir"
+
+        echo "Open port 8686 from the WebIDE PORTS panel."
+
+        '
+    - name: Run ten-song Dev GPU batch smoke
+      timeout: 4h
+      script: 'set -eu
+
+        rc=0
+
+        bash scripts/devgpu_run_batch.sh || rc=$?
+
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+
+        echo "===== batch_report.json ====="
+
+        cat "$run_dir/batch_report.json" || true
+
+        echo "===== progress.jsonl tail ====="
+
+        tail -n 80 "$run_dir/progress.jsonl" || true
+
+        echo "===== stderr.txt ====="
+
+        cat "$run_dir/stderr.txt" || true
+
+        exit "$rc"
+
+        '
+    - name: Package Music Flamingo run evidence
+      script: bash scripts/package_music_flamingo_run.sh
+    - name: Upload Music Flamingo run evidence
+      image: cnbcool/attachments:latest
+      settings:
+        attachments:
+        - cnb-artifacts/music-flamingo-run.tar.gz
+    lock:
+      key: music-flamingo-output-writer
+      wait: true
+      timeout: 15000
+      expires: 15000
+  api_trigger_model_image:
+  - services:
+    - docker
+    runner:
+      tags: cnb:arch:amd64
+    env:
+      PYTHONUNBUFFERED: '1'
+      HF_HUB_ENABLE_HF_TRANSFER: '1'
+      MUSIC_FLAMINGO_MODEL: nvidia/music-flamingo-think-2601-hf
+      MUSIC_FLAMINGO_REVISION: 1ea2109
+      MUSIC_FLAMINGO_MODEL_DIR: /opt/models/music-flamingo-think-2601-hf
+    stages:
+    - name: Build and push Music Flamingo model image
+      timeout: 6h
+      script: "set -eu\ncandidate_image=\"${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:music-flamingo-cuda-model-candidate-${CNB_BUILD_ID}\"\
+        \nprintf '%s\\n' \"candidate_image=${candidate_image}\"\ndocker build \\\n  --label \"org.opencontainers.image.revision=${CNB_BRANCH_SHA:-unknown}\"\
+        \ \\\n  --label \"io.wuyoumusic.music_flamingo.model=${MUSIC_FLAMINGO_MODEL}\" \\\n  --label \"io.wuyoumusic.music_flamingo.revision=${MUSIC_FLAMINGO_REVISION}\"\
+        \ \\\n  --build-arg MUSIC_FLAMINGO_MODEL=\"${MUSIC_FLAMINGO_MODEL}\" \\\n  --build-arg MUSIC_FLAMINGO_REVISION=\"\
+        ${MUSIC_FLAMINGO_REVISION}\" \\\n  --build-arg MUSIC_FLAMINGO_MODEL_DIR=\"${MUSIC_FLAMINGO_MODEL_DIR}\" \\\n  -f .cnb/Dockerfile.flamingo\
+        \ \\\n  -t \"$candidate_image\" .\ndocker push \"$candidate_image\"\ncandidate_image_digest=\"$(docker image inspect\
+        \ --format '{{index .RepoDigests 0}}' \"$candidate_image\")\"\ncase \"$candidate_image_digest\" in\n  *'@sha256:'*)\
+        \ ;;\n  *) echo \"Could not resolve immutable candidate digest for $candidate_image\" >&2; exit 1 ;;\nesac\npython3\
+        \ - <<PYTHON\nimport json\nprint(json.dumps({\n    \"candidate_image\": \"${candidate_image}\",\n    \"candidate_image_digest\"\
+        : \"${candidate_image_digest}\",\n    \"source_commit\": \"${CNB_BRANCH_SHA:-unknown}\",\n    \"model\": \"${MUSIC_FLAMINGO_MODEL}\"\
+        ,\n    \"model_revision\": \"${MUSIC_FLAMINGO_REVISION}\",\n}, ensure_ascii=False, sort_keys=True))\nPYTHON\nprintf\
+        \ '%s\\n' \"Promotion is an explicit reviewed update of the immutable runtime image digest in .cnb.yml.\"\n"
+  api_trigger_cleanup_moss_image:
+  - stages:
+    - name: Remove retired MOSS docker tag
+      type: artifact:remove-tag
+      options:
+        name: moss-music-runner
+        tags:
+        - moss-music-sglang-cuda-model
+        type: docker
+  vscode:
+  # This branch is a one-shot Dev GPU recovery route.  The build-GPU quota is
+  # exhausted, while the independent Dev-GPU allowance remains available.
+  - git:
+      lfs: false
+    docker:
+      image: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      volumes:
+      - music-flamingo-output:/workspace/cache/output:read-write
+    services:
+    - vscode
+    runner:
+      tags: cnb:arch:amd64:gpu:L40
+    env:
+      HF_HUB_ENABLE_HF_TRANSFER: '1'
+      PYTHONUNBUFFERED: '1'
+      HF_HOME: /opt/huggingface
+      WORK_DIR: /workspace/cache/output/music_flamingo_pipeline
+      MUSIC_FLAMINGO_MODEL: nvidia/music-flamingo-think-2601-hf
+      MUSIC_FLAMINGO_REVISION: 1ea2109
+      MUSIC_FLAMINGO_MODEL_DIR: /opt/models/music-flamingo-think-2601-hf
+      CNB_RUNTIME_IMAGE: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      MUSIC_FLAMINGO_MAX_NEW_TOKENS: '2048'
+      MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS: '240'
+      MUSIC_FLAMINGO_OUTPUT_NAME: campaign_kugou_20260716_431
+      MUSIC_FLAMINGO_PROMPT: Describe this track in full detail - tell me the genre, tempo, broad tonal center, rhythmic feel,
+        instrumentation, vocal character, production style, structure, and overall mood and atmosphere it creates. Focus only
+        on audible musical and performance details. Ignore lyrical content entirely and do not mention, summarize, quote,
+        or transcribe any lyrics.
+      MUSIC_FLAMINGO_RUN_ID: ${CNB_BUILD_ID}
+      MUSIC_FLAMINGO_CAMPAIGN_ID: kugou-20260716-431
+      MUSIC_FLAMINGO_CAMPAIGN_SOURCE_MANIFEST: data/input/campaign-kugou-20260716-431/manifest.jsonl
+      MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT: data/input/campaign-kugou-20260716-431
+      MUSIC_FLAMINGO_CAMPAIGN_TRANSPORT: git-objects
+      MUSIC_FLAMINGO_CAMPAIGN_GIT_OBJECTS_MAX_BYTES: '5000000000'
+      MUSIC_FLAMINGO_CAMPAIGN_GIT_OBJECTS_MAX_FILE_BYTES: '268435456'
+      MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT: '431'
+      MUSIC_FLAMINGO_CAMPAIGN_SHARD_INDEX: '1'
+      MUSIC_FLAMINGO_CAMPAIGN_SHARD_COUNT: '4'
+      MUSIC_FLAMINGO_CAMPAIGN_SHARD_ID: kugou-20260716-431-s1
+      MUSIC_FLAMINGO_CAMPAIGN_MAX_ELAPSED_SECONDS: '11000'
+      MUSIC_FLAMINGO_CAMPAIGN_MAX_PENDING_ITEMS: '0'
+      MUSIC_FLAMINGO_CONTINUE_ON_ERROR: '1'
+      MUSIC_FLAMINGO_EXECUTION_PROFILE: nvidia-l40/full_precision/bfloat16
+      MUSIC_FLAMINGO_DURABLE_LEDGER_REQUIRED: '1'
+      MUSIC_FLAMINGO_LEDGER_CHECKPOINT_EVERY: '5'
+      MUSIC_FLAMINGO_LEDGER_REPO_URL: https://cnb.cool/wuyoumusic/moss-music-runner.git
+      MUSIC_FLAMINGO_LEDGER_BRANCH: campaign-results/kugou-20260716-431
+      MUSIC_FLAMINGO_LEDGER_GIT_USER_NAME: CNB Music Campaign Ledger
+      MUSIC_FLAMINGO_LEDGER_GIT_USER_EMAIL: cnb-ledger@wuyoumusic.invalid
+      MUSIC_FLAMINGO_DETAILED_CUDA_TELEMETRY: '0'
+    stages:
+    - name: Validate and run 431-song KuGou Dev GPU shard
+      timeout: 4h
+      script: bash scripts/devgpu_run_kugou_campaign.sh
+    lock:
+      key: music-flamingo-output-writer
+      wait: true
+      timeout: 15000
+      expires: 18000
+  api_trigger_verify_candidate_image:
+  - docker:
+      image: ${MUSIC_FLAMINGO_CANDIDATE_IMAGE}
+      volumes:
+      - music-flamingo-output:/workspace/cache/output:read-write
+    runner:
+      tags: cnb:arch:amd64:gpu
+    env:
+      PYTHONUNBUFFERED: '1'
+      HF_HUB_ENABLE_HF_TRANSFER: '1'
+      HF_HOME: /opt/huggingface
+      AUDIO_ROOT: data/input/batch10
+      MUSIC_FLAMINGO_MODEL: nvidia/music-flamingo-think-2601-hf
+      MUSIC_FLAMINGO_REVISION: 1ea2109
+      MUSIC_FLAMINGO_MODEL_DIR: /opt/models/music-flamingo-think-2601-hf
+      CNB_RUNTIME_IMAGE: ${MUSIC_FLAMINGO_CANDIDATE_IMAGE}
+      MUSIC_FLAMINGO_MAX_NEW_TOKENS: '2048'
+      MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS: '240'
+      MUSIC_FLAMINGO_BATCH_LIMIT: '10'
+      MUSIC_FLAMINGO_OUTPUT_NAME: candidate_batch10_verify
+      MUSIC_FLAMINGO_PROMPT: Describe this track in full detail - tell me the genre, tempo, broad tonal center, rhythmic feel,
+        instrumentation, vocal character, production style, structure, and overall mood and atmosphere it creates. Focus only
+        on audible musical and performance details. Ignore lyrical content entirely and do not mention, summarize, quote,
+        or transcribe any lyrics.
+      WORK_DIR: /workspace/cache/output/music_flamingo_pipeline
+      MUSIC_FLAMINGO_RUN_ID: ${CNB_BUILD_ID}
+      MUSIC_FLAMINGO_DETAILED_CUDA_TELEMETRY: '0'
+      MUSIC_FLAMINGO_CANDIDATE_IMAGE: ${MUSIC_FLAMINGO_CANDIDATE_IMAGE}
+    stages:
+    - name: Check GPU
+      script: bash scripts/check_remote_env.sh
+    - name: Run ten-song Music Flamingo batch smoke
+      timeout: 4h
+      script: 'set -eu
+
+        rc=0
+
+        python scripts/run_music_flamingo_batch.py || rc=$?
+
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+
+        echo "===== model_report.json ====="
+
+        cat "$run_dir/model_report.json" || true
+
+        echo "===== batch_report.json ====="
+
+        cat "$run_dir/batch_report.json" || true
+
+        echo "===== progress.jsonl tail ====="
+
+        tail -n 80 "$run_dir/progress.jsonl" || true
+
+        echo "===== stderr.txt ====="
+
+        cat "$run_dir/stderr.txt" || true
+
+        exit "$rc"
+
+        '
+    - name: Package Music Flamingo run evidence
+      script: bash scripts/package_music_flamingo_run.sh
+    - name: Upload Music Flamingo run evidence
+      image: cnbcool/attachments:latest
+      settings:
+        attachments:
+        - cnb-artifacts/music-flamingo-run.tar.gz
+    lock:
+      key: music-flamingo-output-writer
+      wait: true
+      timeout: 15000
+      expires: 15000
+  # The GPU runner is limited to four hours. One API event runs one
+  # deterministic sparse-LFS shard; override both shard variables together
+  # for shard 2, 3, and 4.
+  api_trigger_campaign_kugou_20260706:
+  - git:
+      lfs: false
+    docker:
+      image: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      volumes:
+      - music-flamingo-output:/workspace/cache/output:read-write
+    runner:
+      tags: cnb:arch:amd64:gpu:L40
+    env:
+      PYTHONUNBUFFERED: '1'
+      HF_HUB_ENABLE_HF_TRANSFER: '1'
+      HF_HOME: /opt/huggingface
+      MUSIC_FLAMINGO_MODEL: nvidia/music-flamingo-think-2601-hf
+      MUSIC_FLAMINGO_REVISION: 1ea2109
+      MUSIC_FLAMINGO_MODEL_DIR: /opt/models/music-flamingo-think-2601-hf
+      CNB_RUNTIME_IMAGE: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      MUSIC_FLAMINGO_MAX_NEW_TOKENS: '2048'
+      MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS: '240'
+      MUSIC_FLAMINGO_PROMPT: Describe this track in full detail - tell me the genre, tempo, broad tonal center, rhythmic feel,
+        instrumentation, vocal character, production style, structure, and overall mood and atmosphere it creates. Focus only
+        on audible musical and performance details. Ignore lyrical content entirely and do not mention, summarize, quote,
+        or transcribe any lyrics.
+      WORK_DIR: /workspace/cache/output/music_flamingo_pipeline
+      MUSIC_FLAMINGO_RUN_ID: kugou-20260706-927
+      MUSIC_FLAMINGO_OUTPUT_NAME: campaign_kugou_20260706_927
+      MUSIC_FLAMINGO_CAMPAIGN_ID: kugou-20260706-927
+      MUSIC_FLAMINGO_CAMPAIGN_SOURCE_MANIFEST: data/input/campaign-kugou-20260706/manifest.jsonl
+      MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT: data/input/campaign-kugou-20260706
+      MUSIC_FLAMINGO_CAMPAIGN_TRANSPORT: lfs
+      MUSIC_FLAMINGO_CAMPAIGN_GIT_OBJECTS_MAX_BYTES: '5000000000'
+      MUSIC_FLAMINGO_CAMPAIGN_GIT_OBJECTS_MAX_FILE_BYTES: '268435456'
+      MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT: '927'
+      MUSIC_FLAMINGO_CAMPAIGN_SHARD_INDEX: '1'
+      MUSIC_FLAMINGO_CAMPAIGN_SHARD_COUNT: '4'
+      MUSIC_FLAMINGO_CAMPAIGN_SHARD_ID: kugou-20260706-927-s1
+      MUSIC_FLAMINGO_CAMPAIGN_MAX_ELAPSED_SECONDS: '11000'
+      # API callers may set these two values to 1 for the no-inference
+      # preflight.  The guard in the stage keeps that route to one file only.
+      MUSIC_FLAMINGO_CAMPAIGN_PREFLIGHT_ONLY: '0'
+      MUSIC_FLAMINGO_CAMPAIGN_MAX_PENDING_ITEMS: '0'
+      MUSIC_FLAMINGO_CONTINUE_ON_ERROR: '1'
+      MUSIC_FLAMINGO_EXECUTION_PROFILE: nvidia-l40/full_precision/bfloat16
+      MUSIC_FLAMINGO_DURABLE_LEDGER_REQUIRED: '1'
+      MUSIC_FLAMINGO_LEDGER_CHECKPOINT_EVERY: '5'
+      MUSIC_FLAMINGO_LEDGER_REPO_URL: https://cnb.cool/wuyoumusic/moss-music-runner.git
+      MUSIC_FLAMINGO_LEDGER_BRANCH: campaign-results/kugou-20260706
+      MUSIC_FLAMINGO_LEDGER_GIT_USER_NAME: CNB Music Campaign Ledger
+      MUSIC_FLAMINGO_LEDGER_GIT_USER_EMAIL: cnb-ledger@wuyoumusic.invalid
+      MUSIC_FLAMINGO_DETAILED_CUDA_TELEMETRY: '0'
+    stages:
+    - name: Validate immutable runtime and shard request
+      script: |
+        set -eu
+        image="${CNB_RUNTIME_IMAGE:?CNB_RUNTIME_IMAGE is required}"
+        digest="${image##*@sha256:}"
+        if [ "$digest" = "$image" ] || [ "${#digest}" -ne 64 ] || ! printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$'; then
+          echo "Campaign runtime must be pinned as image@sha256:<64hex>." >&2
+          exit 2
+        fi
+        case "${MUSIC_FLAMINGO_CAMPAIGN_SHARD_INDEX}" in
+          ''|*[!0-9]*) echo "Campaign shard index must be a positive integer." >&2; exit 2 ;;
+        esac
+        case "${MUSIC_FLAMINGO_CAMPAIGN_SHARD_COUNT}" in
+          ''|*[!0-9]*) echo "Campaign shard count must be a positive integer." >&2; exit 2 ;;
+        esac
+        [ "${MUSIC_FLAMINGO_CAMPAIGN_SHARD_INDEX}" -ge 1 ] || {
+          echo "Campaign shard index must be >=1." >&2
+          exit 2
+        }
+        [ "${MUSIC_FLAMINGO_CAMPAIGN_SHARD_INDEX}" -le "${MUSIC_FLAMINGO_CAMPAIGN_SHARD_COUNT}" ] || {
+          echo "Campaign shard index exceeds shard count." >&2
+          exit 2
+        }
+        [ "${MUSIC_FLAMINGO_CAMPAIGN_SHARD_COUNT}" -ge 1 ] || {
+          echo "Campaign shard count must be >=1." >&2
+          exit 2
+        }
+        case "${MUSIC_FLAMINGO_CAMPAIGN_TRANSPORT:-lfs}" in
+          lfs|git-objects) ;;
+          *) echo "Campaign transport must be lfs or git-objects." >&2; exit 2 ;;
+        esac
+        expected_shard_id="${MUSIC_FLAMINGO_CAMPAIGN_ID:?MUSIC_FLAMINGO_CAMPAIGN_ID is required}-s${MUSIC_FLAMINGO_CAMPAIGN_SHARD_INDEX}"
+        [ "${MUSIC_FLAMINGO_CAMPAIGN_SHARD_ID:?MUSIC_FLAMINGO_CAMPAIGN_SHARD_ID is required}" = "$expected_shard_id" ] || {
+          echo "Campaign shard id must match its static index: ${expected_shard_id}" >&2
+          exit 2
+        }
+    - name: Check L40 GPU
+      script: bash scripts/check_remote_env.sh
+    - name: Restore durable campaign ledger
+      script: |
+        set -eu
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+        mkdir -p "$run_dir"
+        bash scripts/campaign_ledger_git.sh restore "$run_dir/campaign_ledger.jsonl"
+    - name: Hydrate and run sparse KuGou campaign shard
+      timeout: 4h
+      script: |
+        set -eu
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+        bash scripts/prepare_kugou_campaign_shard.sh
+        pending_count="$(python3 - "$run_dir/campaign_shard_plan.json" <<'PYTHON'
+        import json
+        import sys
+        print(json.load(open(sys.argv[1], encoding="utf-8"))["pending_item_count"])
+        PYTHON
+        )"
+        rc=0
+        preflight_only="${MUSIC_FLAMINGO_CAMPAIGN_PREFLIGHT_ONLY:-0}"
+        case "$preflight_only" in
+          0|false|False|FALSE|no|No|NO) preflight_only=0 ;;
+          1|true|True|TRUE|yes|Yes|YES) preflight_only=1 ;;
+          *) echo "MUSIC_FLAMINGO_CAMPAIGN_PREFLIGHT_ONLY must be boolean." >&2; exit 2 ;;
+        esac
+        if [ "$preflight_only" = 0 ] && [ "${MUSIC_FLAMINGO_CAMPAIGN_MAX_PENDING_ITEMS:-0}" != 0 ]; then
+          echo "MUSIC_FLAMINGO_CAMPAIGN_MAX_PENDING_ITEMS is reserved for the explicit preflight." >&2
+          exit 2
+        fi
+        if [ "$preflight_only" = 1 ]; then
+          if [ "${MUSIC_FLAMINGO_CAMPAIGN_MAX_PENDING_ITEMS:-0}" != 1 ]; then
+            echo "Campaign preflight must set MUSIC_FLAMINGO_CAMPAIGN_MAX_PENDING_ITEMS=1." >&2
+            exit 2
+          fi
+          if [ "$pending_count" -gt 1 ]; then
+            echo "Campaign preflight selected more than one audio item." >&2
+            exit 2
+          fi
+          bash scripts/campaign_ledger_git.sh checkpoint "$run_dir/campaign_ledger.jsonl"
+          RUN_DIR="$run_dir" python3 - <<'PYTHON'
+        import json
+        import os
+        from pathlib import Path
+
+        run_dir = Path(os.environ["RUN_DIR"])
+        plan = json.loads((run_dir / "campaign_shard_plan.json").read_text(encoding="utf-8"))
+        report = {
+            "status": "success",
+            "campaign_status": "preflight_success",
+            "campaign": plan,
+        }
+        for name in ("batch_report.json", "campaign_report.json"):
+            (run_dir / name).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        PYTHON
+        elif [ "$pending_count" -gt 0 ]; then
+          export MUSIC_FLAMINGO_INPUT_MANIFEST="$run_dir/campaign_shard_manifest.jsonl"
+          export MUSIC_FLAMINGO_INPUT_AUDIO_ROOT="$PWD/${MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT}"
+          export MUSIC_FLAMINGO_EXPECTED_ITEM_COUNT="$pending_count"
+          python scripts/run_music_flamingo_batch.py || rc=$?
+        else
+          RUN_DIR="$run_dir" python3 - <<'PYTHON'
+        import json
+        import os
+        from pathlib import Path
+        run_dir = Path(os.environ["RUN_DIR"])
+        plan = json.loads((run_dir / "campaign_shard_plan.json").read_text(encoding="utf-8"))
+        report = {"status": "success", "campaign_status": "already_complete_for_selected_shard", "campaign": plan}
+        for name in ("batch_report.json", "campaign_report.json"):
+            (run_dir / name).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        PYTHON
+        fi
+        printf '%s\n' "$rc" > "$run_dir/campaign_runner_exit_code.txt"
+        cat "$run_dir/campaign_shard_plan.json" || true
+        cat "$run_dir/campaign_report.json" || true
+        tail -n 100 "$run_dir/campaign_ledger.jsonl" || true
+        exit 0
+    - name: Package KuGou campaign evidence
+      script: bash scripts/package_music_flamingo_run.sh
+    - name: Upload KuGou campaign evidence
+      image: cnbcool/attachments:latest
+      settings:
+        attachments:
+        - cnb-artifacts/music-flamingo-run.tar.gz
+    - name: Assert KuGou campaign runner status
+      script: |
+        set -eu
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+        rc="$(tr -d '[:space:]' < "$run_dir/campaign_runner_exit_code.txt")"
+        case "$rc" in
+          0) echo "Campaign shard reached a clean terminal status." ;;
+          ''|*[!0-9]*) echo "Invalid campaign runner exit code: ${rc}" >&2; exit 2 ;;
+          *) echo "Campaign shard completed with retryable item failures: ${rc}" >&2; exit "$rc" ;;
+        esac
+    lock:
+      key: kugou-20260706-ledger-writer
+      wait: true
+      timeout: 15000
+      # One stage may run for four hours; retain enough teardown headroom that
+      # a second shard cannot enter while the first still owns the ledger.
+      expires: 18000
+  # Isolated recovery route for the 12 outputs that reached the token cap with
+  # a repeating tail. It never overwrites the completed 927-item ledger.
+  api_trigger_kugou_quality_rerun_12:
+  - git:
+      lfs: false
+    docker:
+      image: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      volumes:
+      - music-flamingo-output:/workspace/cache/output:read-write
+    runner:
+      tags: cnb:arch:amd64:gpu:L40
+    env:
+      PYTHONUNBUFFERED: '1'
+      HF_HUB_ENABLE_HF_TRANSFER: '1'
+      HF_HOME: /opt/huggingface
+      MUSIC_FLAMINGO_MODEL: nvidia/music-flamingo-think-2601-hf
+      MUSIC_FLAMINGO_REVISION: 1ea2109
+      MUSIC_FLAMINGO_MODEL_DIR: /opt/models/music-flamingo-think-2601-hf
+      CNB_RUNTIME_IMAGE: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+      MUSIC_FLAMINGO_MAX_NEW_TOKENS: '1400'
+      MUSIC_FLAMINGO_REPETITION_PENALTY: '1.08'
+      MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE: '4'
+      MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS: '240'
+      MUSIC_FLAMINGO_PROMPT: Describe this track in full detail - tell me the genre, tempo, broad tonal center, rhythmic feel,
+        instrumentation, vocal character, production style, structure, and overall mood and atmosphere it creates. Focus only
+        on audible musical and performance details. Ignore lyrical content entirely and do not mention, summarize, quote,
+        or transcribe any lyrics. End once the analysis is complete; never repeat a phrase, chord loop, token sequence, or
+        whole section merely to continue generation.
+      WORK_DIR: /workspace/cache/output/music_flamingo_pipeline
+      MUSIC_FLAMINGO_RUN_ID: kugou-20260706-927-quality-rerun-12
+      MUSIC_FLAMINGO_OUTPUT_NAME: campaign_kugou_20260706_927_quality_rerun_12
+      MUSIC_FLAMINGO_CAMPAIGN_ID: kugou-20260706-927
+      MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT: data/input/campaign-kugou-20260706
+      MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT: '12'
+      MUSIC_FLAMINGO_CAMPAIGN_MAX_ELAPSED_SECONDS: '7200'
+      MUSIC_FLAMINGO_QUALITY_SOURCE_MANIFEST: data/input/campaign-kugou-20260706/manifest.jsonl
+      MUSIC_FLAMINGO_QUALITY_SELECTION_FILE: data/input/campaign-kugou-20260706/quality_rerun_12_indices.txt
+      MUSIC_FLAMINGO_QUALITY_SOURCE_EXPECTED_COUNT: '927'
+      MUSIC_FLAMINGO_CONTINUE_ON_ERROR: '1'
+      MUSIC_FLAMINGO_EXECUTION_PROFILE: nvidia-l40/full_precision/bfloat16
+      MUSIC_FLAMINGO_DURABLE_LEDGER_REQUIRED: '1'
+      MUSIC_FLAMINGO_LEDGER_CHECKPOINT_EVERY: '1'
+      MUSIC_FLAMINGO_LEDGER_REPO_URL: https://cnb.cool/wuyoumusic/moss-music-runner.git
+      MUSIC_FLAMINGO_LEDGER_BRANCH: campaign-results/kugou-20260706-quality-rerun-12
+      MUSIC_FLAMINGO_LEDGER_GIT_USER_NAME: CNB Music Quality Rerun Ledger
+      MUSIC_FLAMINGO_LEDGER_GIT_USER_EMAIL: cnb-quality-rerun@wuyoumusic.invalid
+      MUSIC_FLAMINGO_DETAILED_CUDA_TELEMETRY: '0'
+    stages:
+    - name: Validate quality rerun request
+      script: |
+        set -eu
+        image="${CNB_RUNTIME_IMAGE:?CNB_RUNTIME_IMAGE is required}"
+        digest="${image##*@sha256:}"
+        if [ "$digest" = "$image" ] || [ "${#digest}" -ne 64 ] || ! printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$'; then
+          echo "Quality rerun runtime must be pinned as image@sha256:<64hex>." >&2
+          exit 2
+        fi
+        [ "${MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT}" = '12' ] || {
+          echo "Quality rerun must contain exactly 12 selected items." >&2
+          exit 2
+        }
+        [ "${MUSIC_FLAMINGO_MAX_NEW_TOKENS}" = '1400' ] || {
+          echo "Quality rerun must retain its 1400-token recovery cap." >&2
+          exit 2
+        }
+        [ "${MUSIC_FLAMINGO_REPETITION_PENALTY}" = '1.08' ] || {
+          echo "Quality rerun must retain repetition_penalty=1.08." >&2
+          exit 2
+        }
+        [ "${MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE}" = '4' ] || {
+          echo "Quality rerun must retain no_repeat_ngram_size=4." >&2
+          exit 2
+        }
+    - name: Check L40 GPU
+      script: bash scripts/check_remote_env.sh
+    - name: Restore isolated quality-rerun ledger
+      script: |
+        set -eu
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+        mkdir -p "$run_dir"
+        bash scripts/campaign_ledger_git.sh restore "$run_dir/campaign_ledger.jsonl"
+    - name: Hydrate and rerun selected KuGou outputs
+      timeout: 2h
+      script: |
+        set -eu
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+        bash scripts/prepare_kugou_quality_rerun.sh
+        rc=0
+        export MUSIC_FLAMINGO_INPUT_MANIFEST="$run_dir/quality_rerun_manifest.jsonl"
+        export MUSIC_FLAMINGO_INPUT_AUDIO_ROOT="$PWD/${MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT}"
+        export MUSIC_FLAMINGO_EXPECTED_ITEM_COUNT="${MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT}"
+        python scripts/run_music_flamingo_batch.py || rc=$?
+        printf '%s\n' "$rc" > "$run_dir/campaign_runner_exit_code.txt"
+        cat "$run_dir/quality_rerun_plan.json" || true
+        cat "$run_dir/campaign_report.json" || true
+        tail -n 100 "$run_dir/campaign_ledger.jsonl" || true
+        exit 0
+    - name: Package quality-rerun evidence
+      script: bash scripts/package_music_flamingo_run.sh
+    - name: Upload quality-rerun evidence
+      image: cnbcool/attachments:latest
+      settings:
+        attachments:
+        - cnb-artifacts/music-flamingo-run.tar.gz
+    - name: Assert quality-rerun status
+      script: |
+        set -eu
+        run_dir="$(python scripts/music_flamingo_run_context.py print-dir)"
+        rc="$(tr -d '[:space:]' < "$run_dir/campaign_runner_exit_code.txt")"
+        case "$rc" in
+          0) echo "Quality rerun reached a clean terminal status." ;;
+          ''|*[!0-9]*) echo "Invalid quality-rerun exit code: ${rc}" >&2; exit 2 ;;
+          *) echo "Quality rerun completed with retryable item failures: ${rc}" >&2; exit "$rc" ;;
+        esac
+    lock:
+      key: kugou-20260706-quality-rerun-12-ledger-writer
+      wait: true
+      timeout: 7200
+      expires: 9000

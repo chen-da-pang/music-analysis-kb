@@ -1,0 +1,8 @@
+# Direct runtime pins from the currently promoted Music Flamingo image.
+# The source revision below is the tested Music Flamingo-compatible Transformers fork.
+git+https://github.com/lashahub/transformers@66ce201#egg=transformers
+accelerate==1.14.0
+bitsandbytes==0.49.2
+librosa==0.11.0
+soundfile==0.14.0
+huggingface_hub[hf_transfer]==1.22.0

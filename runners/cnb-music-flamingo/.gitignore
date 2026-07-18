@@ -1,0 +1,28 @@
+# Inputs, outputs, checkpoints, and model artifacts are always transient.  They
+# are uploaded to a run ref only for the duration of a GPU job and must never be
+# committed to the code-only CNB mirror.
+data/
+cache/
+work/
+logs/
+artifacts/
+.worktrees/
+.env
+__pycache__/
+*.py[cod]
+*.mp3
+*.flac
+*.wav
+*.m4a
+*.aac
+*.ogg
+*.opus
+*.wma
+*.aiff
+*.aif
+*.ape
+*.alac
+*.jsonl
+*.sqlite
+*.sqlite3
+*.db
