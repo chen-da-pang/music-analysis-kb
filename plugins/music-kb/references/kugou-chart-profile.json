@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "profile_id": "kugou-full-six-charts-v1",
+  "platform": "kugou",
+  "page_size": 100,
+  "termination": "empty_or_short_page",
+  "minimum_total_source_records": 100,
+  "charts": [
+    {
+      "rank_id": "8888",
+      "chart_name": "TOP500榜"
+    },
+    {
+      "rank_id": "90379",
+      "chart_name": "星耀星光榜"
+    },
+    {
+      "rank_id": "6666",
+      "chart_name": "飙升榜"
+    },
+    {
+      "rank_id": "85432",
+      "chart_name": "百万收藏榜"
+    },
+    {
+      "rank_id": "74534",
+      "chart_name": "新歌榜"
+    },
+    {
+      "rank_id": "52144",
+      "chart_name": "抖音热歌酷狗榜"
+    }
+  ]
+}

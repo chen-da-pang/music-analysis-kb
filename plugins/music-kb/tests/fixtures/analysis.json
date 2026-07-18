@@ -54,6 +54,8 @@
     {"name": "bpm", "value": 102, "unit": "bpm", "confidence": 0.97}
   ],
   "source_tracks": [
-    {"source": "fixture", "source_track_id": "fixture-001", "source_title": "霓虹夜航"}
+    {"source": "fixture", "source_track_id": "fixture-001", "source_title": "霓虹夜航",
+     "source_artist_credit": "示例乐队",
+     "source_url": "https://music.example/listen/fixture-001"}
   ]
 }

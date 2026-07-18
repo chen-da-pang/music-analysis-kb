@@ -11,6 +11,7 @@ at 100k-recording scale.
 | `recording` | Recording identity, title/version metadata, audio hash, and one `canonical_analysis_id`. |
 | `artist`, `artist_alias`, `recording_artist` | Canonical artist identities, aliases/pinyin/initials supplied by the importer, and roles. |
 | `title_alias` | Title variants, subtitle forms, punctuation-normalized forms, and supplied transliterations. |
+| `source_track` | Platform identity, source-facing title/artist, and optional public listening URL. |
 | `analysis_revision` | Immutable Music Flamingo output, model/prompt provenance, quality state, and output hash. |
 | `campaign_delivery_provenance` | Immutable KuGou canonical-delivery evidence: delivery schema/campaign IDs, source title/artist, source/output hashes, bytes, manifest index, contract, attempt, canonical source, plus canonicalized model/runner/prompt/generation metadata. |
 | `tag_namespace`, `tag`, `tag_alias` | Namespaced, hierarchical tags and aliases without an arbitrary quantity cap. |
@@ -53,10 +54,12 @@ tag retrieval and is not part of this first release.
 - The deterministic `music_flamingo_parser_v1` source can backfill rich
   analysis tags without changing canonical raw text. It replaces only its own
   assignments, so manual editorial tags remain durable across parser reruns.
-- Schema v5 accepts publisher databases created by every released prior schema
+- Schema v6 accepts publisher databases created by every released prior schema
   (v1–v4). Upgrading a v4 publisher master with `music-kb init --db ...` is a
   required one-time gate before the new 100k paths are used: it installs the
   canonical-switch and exact-tag indexes and records the FTS projection state.
   Existing numeric measurements are labelled `legacy` during migration; new
   generic imports default to `model` and parser BPM values carry their parser
-  version, so ownership remains explicit.
+  version, so ownership remains explicit. The v5-to-v6 migration adds the
+  nullable `source_track.source_url` field; it does not depend on local audio
+  files.

@@ -14,6 +14,8 @@ def test_rare_tag_alias_and_identity_alias_are_recalled(master_database) -> None
     with MusicKBRepository(master_database, read_only=True) as repository:
         rare = repository.search(tags=["切分边击"])
         assert [item["recording_id"] for item in rare] == ["rec_neon_night_studio"]
+        assert rare[0]["listen_url"] == "https://music.example/listen/fixture-001"
+        assert rare[0]["source_links"][0]["url"] == rare[0]["listen_url"]
         title = repository.search(title="Ni Hong Ye Hang")
         assert title[0]["title"] == "霓虹夜航"
         artist = repository.search(artist="SLYD")
@@ -39,6 +41,7 @@ def test_replacement_keeps_one_canonical_revision_and_hides_history(master_datab
     with MusicKBRepository(master_database, read_only=True) as repository:
         public = repository.get_canonical_analysis("rec_neon_night_studio")
         assert public["analysis"]["raw_text"].startswith("Replacement canonical analysis")
+        assert public["listen_url"] == "https://music.example/listen/fixture-001"
 
 
 def test_canonical_requires_passed_quality(master_database, fixture_payload) -> None:
@@ -56,6 +59,59 @@ def test_read_only_repository_cannot_mutate(master_database) -> None:
             repository.import_analysis({})
         with pytest.raises(sqlite3.OperationalError):
             repository.connection.execute("INSERT INTO meta(key, value) VALUES ('bad', 'write')")
+
+
+def test_backfill_kugou_source_links_from_chart_database(master_database, tmp_path) -> None:
+    chart_database = tmp_path / "charts.sqlite"
+    with sqlite3.connect(chart_database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE songs(song_id INTEGER PRIMARY KEY, canonical_title TEXT, canonical_artist TEXT);
+            CREATE TABLE platform_tracks(song_id INTEGER, platform TEXT, play_link TEXT);
+            INSERT INTO songs VALUES (1, '霓虹夜航', '示例乐队');
+            INSERT INTO platform_tracks VALUES (
+              1, 'kugou', 'https://www.kugou.com/mixsong/agent_gateway/fixture.html'
+            );
+            """
+        )
+    with MusicKBRepository(master_database) as repository:
+        repository.connection.execute("UPDATE source_track SET source_name = 'kugou', source_url = NULL")
+        result = repository.backfill_source_links(chart_database)
+        assert result["matched"] == 1
+        found = repository.search(title="霓虹夜航")[0]
+        assert found["listen_url"] == "https://www.kugou.com/mixsong/agent_gateway/fixture.html"
+
+
+def test_init_migrates_v5_source_tracks_to_v6(master_database) -> None:
+    with sqlite3.connect(master_database) as connection:
+        connection.executescript(
+            """
+            ALTER TABLE source_track RENAME TO source_track_v6;
+            CREATE TABLE source_track (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL REFERENCES recording(id) ON DELETE CASCADE,
+                source_name TEXT NOT NULL,
+                source_track_id TEXT NOT NULL,
+                source_title TEXT,
+                source_artist_credit TEXT,
+                UNIQUE(source_name, source_track_id)
+            );
+            INSERT INTO source_track(
+              id, recording_id, source_name, source_track_id, source_title, source_artist_credit
+            )
+            SELECT id, recording_id, source_name, source_track_id, source_title, source_artist_credit
+            FROM source_track_v6;
+            DROP TABLE source_track_v6;
+            UPDATE meta SET value = '5' WHERE key = 'schema_version';
+            """
+        )
+    from music_kb.schema import initialize_database
+
+    initialize_database(master_database)
+    with MusicKBRepository(master_database) as repository:
+        columns = {row["name"] for row in repository.connection.execute("PRAGMA table_info(source_track)")}
+        assert "source_url" in columns
+        assert repository.status()["schema_version"] == 6
 
 
 def test_importer_rejects_feigua_workflow_tags(master_database, fixture_payload) -> None:

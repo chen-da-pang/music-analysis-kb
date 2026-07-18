@@ -14,6 +14,10 @@ port = 22
 connect_timeout_seconds = 10
 command_timeout_seconds = 600
 identity_file = "~/.ssh/music-kb-sync"
+# The publisher checks this remote cache for a music-kb plugin manifest and
+# schema.py before transferring a release. Adjust only if Codex uses another
+# plugin cache location on the colleague Mac.
+plugin_cache_root = "~/.codex/plugins/cache/music-analysis-kb/music-kb"
 
 [[peers]]
 name = "first-colleague"

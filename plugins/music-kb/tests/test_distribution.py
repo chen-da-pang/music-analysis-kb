@@ -8,6 +8,7 @@ from typing import Sequence
 import pytest
 
 from music_kb.distribution import (
+    _REMOTE_COMPATIBILITY_CODE,
     _REMOTE_INSTALL_CODE,
     _REMOTE_VERIFY_CODE,
     load_distribution_peers,
@@ -78,6 +79,8 @@ class RecordingRunner:
         remote = command[-1]
         if "import hashlib, json, sqlite3" in remote:
             return "preflight"
+        if "music-kb plugin/schema incompatible" in remote:
+            return "plugin_compatibility"
         if "mkdir -p" in remote:
             return "mkdir"
         if "PRAGMA integrity_check" in remote and "current.sqlite" not in remote:
@@ -143,14 +146,15 @@ def test_publish_stages_then_verifies_and_installs_without_inplace(master_databa
     assert result["succeeded_count"] == 1
     assert result["failed_count"] == 0
     commands = [command for command, _ in runner.commands]
-    assert [command[0] for command in commands] == ["ssh", "ssh", "rsync", "ssh", "ssh"]
-    assert [timeout for _, timeout in runner.commands] == [33, 33, 33, 33, 33]
-    preflight, mkdir, rsync, verify, install = commands
+    assert [command[0] for command in commands] == ["ssh", "ssh", "ssh", "rsync", "ssh", "ssh"]
+    assert [timeout for _, timeout in runner.commands] == [33, 33, 33, 33, 33, 33]
+    preflight, compatibility, mkdir, rsync, verify, install = commands
     assert "BatchMode=yes" in mkdir
     assert "StrictHostKeyChecking=yes" in mkdir
     assert "ConnectTimeout=7" in mkdir
     assert "-i" in mkdir and str(key.resolve()) in mkdir
     assert preflight[-1] == "set -eu; python3 -c 'import hashlib, json, sqlite3'"
+    assert "required_schema_version" in compatibility[-1]
     assert mkdir[-1] == 'set -eu; mkdir -p "$HOME"/.music-kb/incoming/distribution-fixture'
     assert "--inplace" not in rsync
     assert "--partial" in rsync
@@ -167,6 +171,7 @@ def test_publish_stages_then_verifies_and_installs_without_inplace(master_databa
     assert "snapshot install" not in rendered_commands
     assert [stage["name"] for stage in result["peers"][0]["stages"]] == [
         "preflight",
+        "plugin_compatibility",
         "mkdir",
         "rsync",
         "verify",
@@ -194,7 +199,7 @@ def test_one_failed_peer_does_not_block_other_peers(master_database, tmp_path: P
         {"name": "preflight", "ok": False, "returncode": 255, "stderr": "Connection timed out"}
     ]
     assert result["peers"][1]["status"] == "succeeded"
-    assert len(runner.commands) == 6
+    assert len(runner.commands) == 7
 
 
 def test_rsync_failure_stops_that_peer_but_continues_to_another_peer(master_database, tmp_path: Path) -> None:
@@ -213,17 +218,19 @@ def test_rsync_failure_stops_that_peer_but_continues_to_another_peer(master_data
     assert result["succeeded_count"] == 1
     assert [stage["name"] for stage in result["peers"][0]["stages"]] == [
         "preflight",
+        "plugin_compatibility",
         "mkdir",
         "rsync",
     ]
     assert [stage["name"] for stage in result["peers"][1]["stages"]] == [
         "preflight",
+        "plugin_compatibility",
         "mkdir",
         "rsync",
         "verify",
         "install",
     ]
-    assert len(runner.commands) == 8
+    assert len(runner.commands) == 10
 
 
 def test_timeout_stops_later_stages_for_that_peer(master_database, tmp_path: Path) -> None:
@@ -235,7 +242,7 @@ def test_timeout_stops_later_stages_for_that_peer(master_database, tmp_path: Pat
     result = publish_snapshot(_release(master_database, tmp_path), peers, runner=runner)
 
     stages = result["peers"][0]["stages"]
-    assert [stage["name"] for stage in stages] == ["preflight", "mkdir", "rsync", "verify"]
+    assert [stage["name"] for stage in stages] == ["preflight", "plugin_compatibility", "mkdir", "rsync", "verify"]
     assert stages[-1]["error"] == "timeout"
 
 
@@ -296,6 +303,44 @@ def test_peer_config_rejects_non_boolean_enabled(master_database, tmp_path: Path
 
     with pytest.raises(ValidationError, match="enabled must be a boolean"):
         load_distribution_peers(peers)
+
+
+def test_remote_plugin_compatibility_script_accepts_matching_cache(tmp_path: Path) -> None:
+    install = tmp_path / "0.7.0"
+    (install / ".codex-plugin").mkdir(parents=True)
+    (install / "src" / "music_kb").mkdir(parents=True)
+    (install / ".codex-plugin" / "plugin.json").write_text(
+        '{"name":"music-kb","version":"0.7.0"}\n', encoding="utf-8"
+    )
+    (install / "src" / "music_kb" / "schema.py").write_text("SCHEMA_VERSION = 6\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-c", _REMOTE_COMPATIBILITY_CODE, str(tmp_path), "0.7.0", "6"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '"compatible": true' in result.stdout
+
+
+def test_remote_plugin_compatibility_script_rejects_old_schema(tmp_path: Path) -> None:
+    install = tmp_path / "0.6.0"
+    (install / ".codex-plugin").mkdir(parents=True)
+    (install / "src" / "music_kb").mkdir(parents=True)
+    (install / ".codex-plugin" / "plugin.json").write_text(
+        '{"name":"music-kb","version":"0.6.0"}\n', encoding="utf-8"
+    )
+    (install / "src" / "music_kb" / "schema.py").write_text("SCHEMA_VERSION = 5\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-c", _REMOTE_COMPATIBILITY_CODE, str(tmp_path), "0.7.0", "6"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "incompatible" in result.stderr
 
 
 def test_self_contained_remote_scripts_verify_and_atomically_install_snapshot(master_database, tmp_path: Path) -> None:

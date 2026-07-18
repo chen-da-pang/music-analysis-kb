@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-07-17",
+  "sources": [
+    {
+      "kind": "codex-thread",
+      "id": "019f4aaf-9f38-7000-a8f2-785053859ce1",
+      "role": "最终有效的周更、去重、Claude Code、链接、SSH 和音频清理决策"
+    },
+    {
+      "kind": "claude-code-conversation",
+      "path": "~/.claude/projects/-Users-wycm-Documents--------/aa501171-fbfe-408b-9724-d2a2071038e4.jsonl",
+      "role": "已验证的 musicdl + KugouMusicClient 下载方法"
+    },
+    {
+      "kind": "cnb-openapi-and-live-run",
+      "url": "https://api.cnb.cool/swagger.json",
+      "role": "CNB 用量、LFS API 能力和 431 首 Dev GPU 实际推理验证"
+    }
+  ],
+  "rules": [
+    "榜单输入必须先保存原始 JSON，再进行规范化和去重。",
+    "下载必须由 Claude Code 调用固定 worker；worker 使用 musicdl 的 MusicClient + KugouMusicClient。",
+    "历史去重依赖 song_inventory.json，不依赖音频文件继续存在。",
+    "入库前必须保留歌曲级 source_url；source_links 数量必须等于 source_tracks 数量。",
+    "只同步 immutable snapshot，不同步 writable master database。",
+    "只有本地 release 验证和所有启用 peer 发布成功后才允许清理音频。",
+    "默认 LFS 周更前必须通过 CNB 对象存储清洁门禁；每次周更成功后删除本批 campaign 分支和临时附件，并以 CNB charge API 的仓库对象字节数确认是否已回收。",
+    "CNB 未提供 orphan LFS 的管理员删除或 GC API/UI 时，不得把删除分支误报为已回收；必须记录未回收状态，并显式使用受 5 GB 总量、256 MiB 单文件和 Git 余量门禁限制的 git-objects 回退。"
+  ],
+  "operations": {
+    "cnb_storage_preflight": {
+      "effective_method": "读取 cnb-storage-policy.json；通过 CNB git/assets/registries/charge API 确认 Music Flamingo 必需镜像存在、无 campaign 音频分支和临时附件。默认 --cnb-transport lfs 还要求 moss-music-runner 对象用量和根组织对象余量通过清洁阈值；若 orphan LFS 无法回收，显式 --cnb-transport git-objects 改为检查根组织普通 Git 余量，仍要求所有可见 campaign 残留先清理。"
+    },
+    "preflight": {
+      "effective_method": "检查操作记录、工作目录、依赖命令、输入路径、数据库和配置可写性；任一失败立即停止。"
+    },
+    "chart_capture": {
+      "effective_method": "默认读取 kugou-chart-profile.json，使用 kugou-cli --no-update-check music charts 对六张榜单逐页抓取直到空页或短页；每页保存原始 JSON 和规范化 songs JSON，跨页保留绝对 rank。显式 --rank-id 时保留单页受控捕获。"
+    },
+    "chart_dedupe": {
+      "effective_method": "优先按 kugou:<mix_song_id> 去重，缺失平台 ID 时按规范化 title + artist 兜底；保留 play_link。"
+    },
+    "historical_dedupe": {
+      "effective_method": "先重建 song_inventory.json；downloaded 且文件存在或 retention=purged_after_analysis 时跳过，missing/failed/no_results 才进入队列。"
+    },
+    "claude_download": {
+      "effective_method": "由 run_claude_download.py 调用 claude -p；Claude 严格执行 download_music_queue.py，不调用 kugou-cli，不运行旧 batch_download.py。"
+    },
+    "fallback_download": {
+      "effective_method": "只处理主 Kugou worker 已记录为 no_results 的队列；由 Claude Code 串行运行 download_music_fallback.py，按 fallback-download-profile.json 的 QQ、咪咕、酷我顺序逐来源搜索，严格匹配规范化标题和歌手（含显式艺名别名），下载后必须验证文件大于 1 MB 且 ffprobe 时长至少 60 秒，成功后才更新 song_inventory.json；每来源 90 秒硬超时，失败和 no_results 保留可审计状态。"
+    },
+    "cnb_input_materialization": {
+      "effective_method": "只消费本周已去重下载队列和 song_inventory.json；逐首确认 downloaded 状态、实际文件存在、唯一 identity、文件 SHA-256 和有效 play_link，使用硬链接优先将音频放入独立 campaign staging，并生成带 source_bytes、sha256、title、artist、source_url 的 LF JSONL manifest；写入 weekly atom receipt，不触发 CNB。"
+    },
+    "cnb_analysis": {
+      "effective_method": "只接收带 run identity 的 CNB canonical delivery；使用固定 Music Flamingo 镜像、模型 revision、2048 token 和 240 秒音频时长契约。对于 git-objects，campaign 分支的音频路径禁用 LFS，运行前验证总量不超过 5 GB、单文件不超过 256 MiB、manifest SHA-256 和 durable ledger。若云原生构建 GPU 的预冻结额度不足，改在同一固定镜像的 CNB vscode Dev GPU L40 工作区启动同一分片；只有日志出现 item_generate_start 且至少一首 item_generate_done 才算实际分析启动。"
+    },
+    "knowledge_import": {
+      "effective_method": "只导入质量通过的 canonical delivery；幂等导入、重建标签和搜索投影，然后验证 source_links 完整。"
+    },
+    "snapshot": {
+      "effective_method": "创建 immutable snapshot，验证 manifest、SHA-256、SQLite integrity、schema 和 canonical-only counts。"
+    },
+    "peer_publish": {
+      "effective_method": "读取 publisher-only peers.toml；只同步 release，远端验证后原子切换 current.sqlite；单个 peer 失败可按名称重试。"
+    },
+    "audio_cleanup": {
+      "effective_method": "仅在本地 release 和所有启用 peer 成功后，校验 provenance/source_tracks/source_links 和 inventory，再标记 purged_after_analysis 并删除音频。"
+    },
+    "cnb_storage_cleanup": {
+      "effective_method": "CNB 只作为 GitHub runner 的可丢弃 GPU 运行镜像；仅在 canonical delivery、知识库导入、immutable release 验证和所有启用 peer 发布成功（或显式 --skip-peers）后，按策略删除已导出的 campaign input、result、ledger 分支和临时 run assets。只保留 code-only main 和 Music Flamingo runtime image，绝不删除活跃 Dev GPU 分支；master DB、release 和 canonical 证据已在本地验证后不留在 CNB。删除后必须重跑 charge 检查。对象字节数未回落时记录 orphan LFS 未回收；后续默认 LFS 周更继续阻断，但通过 Git 余量和全量可见残留门禁的显式 git-objects 周更可以继续。"
+    }
+  }
+}

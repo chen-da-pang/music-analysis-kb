@@ -51,7 +51,8 @@ one-object-per-physical-LF files take the streaming path.
     {"name": "bpm", "value": 102, "unit": "bpm"}
   ],
   "source_tracks": [
-    {"source": "kugou", "source_track_id": "123", "source_title": "夜航"}
+    {"source": "kugou", "source_track_id": "123", "source_title": "夜航",
+     "source_url": "https://www.kugou.com/mixsong/agent_gateway/example.html"}
   ]
 }
 ```
@@ -62,6 +63,10 @@ one-object-per-physical-LF files take the streaming path.
 - at least one artist (`artists`, or the legacy top-level `artist`)
 - `analysis.raw_text`
 - `analysis.quality_state: "passed"` when the revision is made canonical
+
+`source_url` is optional source metadata. When present it must be an absolute
+`http` or `https` URL; the read-only search and get tools expose it as a
+clickable listening link.
 
 ## Tag rules
 

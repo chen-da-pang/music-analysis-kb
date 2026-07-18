@@ -57,6 +57,20 @@ def test_delivery_loader_is_strict_lf_and_keeps_unicode_line_separator() -> None
         load_campaign_delivery_file(FIXTURE, expected_count=927)
 
 
+def test_campaign_delivery_exposes_source_listening_url(tmp_path: Path) -> None:
+    record = fixture_records()[0]
+    record["source_url"] = "https://www.kugou.com/mixsong/agent_gateway/fixture.html"
+    path = write_jsonl(tmp_path / "with-link.jsonl", [record])
+    database = tmp_path / "master.sqlite"
+    initialize_database(database)
+    with MusicKBRepository(database) as repository:
+        repository.import_campaign_delivery(load_campaign_delivery_file(path))
+        result = repository.search(title=record["title"])[0]
+        assert result["listen_url"] == record["source_url"]
+        canonical = repository.get_canonical_analysis(result["recording_id"])
+        assert canonical["source_links"][0]["url"] == record["source_url"]
+
+
 @pytest.mark.parametrize(
     ("name", "mutate", "match"),
     [

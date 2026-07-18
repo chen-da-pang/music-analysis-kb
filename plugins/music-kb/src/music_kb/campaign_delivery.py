@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import ValidationError
 from .normalization import normalized
@@ -65,6 +66,7 @@ class CampaignDeliveryEntry:
     attempt_id: str
     canonical_source: str
     provenance_json: str | None
+    source_url: str | None
 
 
 def load_campaign_delivery_file(
@@ -216,6 +218,7 @@ def to_import_payload(entries: Sequence[CampaignDeliveryEntry]) -> dict[str, Any
                 "source_track_id": candidate.delivery_id,
                 "source_title": candidate.title,
                 "source_artist_credit": candidate.artist,
+                **({"source_url": candidate.source_url} if candidate.source_url else {}),
             }
             for candidate in group
         ],
@@ -269,6 +272,7 @@ def _parse_entry(value: Mapping[str, Any], *, line_number: int) -> CampaignDeliv
     attempt_id = _required_text(value["attempt_id"], "attempt_id", line_number=line_number)
     canonical_source = _required_text(value["canonical_source"], "canonical_source", line_number=line_number)
     provenance_json = _delivery_provenance(value, line_number=line_number)
+    source_url = _source_url(value.get("source_url"), line_number=line_number)
     return CampaignDeliveryEntry(
         line_number=line_number,
         delivery_schema_version=delivery_schema_version,
@@ -288,6 +292,7 @@ def _parse_entry(value: Mapping[str, Any], *, line_number: int) -> CampaignDeliv
         attempt_id=attempt_id,
         canonical_source=canonical_source,
         provenance_json=provenance_json,
+        source_url=source_url,
     )
 
 
@@ -367,6 +372,18 @@ def _relative_audio_path(value: object, *, line_number: int) -> str:
             f"Campaign delivery line {line_number} relative_audio_path must be a safe relative path"
         )
     return path
+
+
+def _source_url(value: object, *, line_number: int) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    url = str(value).strip()
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValidationError(
+            f"Campaign delivery line {line_number} source_url must be an absolute http(s) URL"
+        )
+    return url
 
 
 def _delivery_provenance(value: Mapping[str, Any], *, line_number: int) -> str | None:
