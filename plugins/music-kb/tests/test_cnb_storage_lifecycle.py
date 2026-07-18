@@ -191,6 +191,23 @@ def test_git_object_transport_rejects_polluted_repository_even_with_group_headro
     assert result["checks"]["repo_git_bytes_within_clean_limit"] is False
 
 
+def test_git_group_headroom_check_is_independent_of_repo_git_limit() -> None:
+    result = MODULE.inspect(
+        policy(),
+        fixture_runner(
+            object_bytes=64_000_000_000,
+            group_bytes=95_000_000_000,
+            git_bytes=3_300_000_000,
+            git_group_bytes=5_000_000_000,
+            campaign=False,
+            asset=False,
+        ),
+        transport="git-objects",
+    )
+    assert result["checks"]["repo_git_bytes_within_clean_limit"] is False
+    assert result["checks"]["group_git_free_bytes_sufficient"] is True
+
+
 def test_inspect_marks_server_gc_pending_after_visible_refs_are_clean() -> None:
     result = MODULE.inspect(
         policy(),

@@ -30,16 +30,28 @@ output paths/counts, timestamps, and either `succeeded` or `failed` plus the
 bounded error. A failed atom stops the run; resume only from a recorded safe
 boundary.
 
+## Invocation-time execution gate
+
+The word "weekly" describes the business update cadence, not a separate
+monitoring schedule. Every invocation of `music-kb weekly-run` must run the
+local `preflight` atom and then the read-only `cnb_storage_preflight` atom
+before chart capture, download, CNB upload, or Music Flamingo analysis. The result is
+recorded in that invocation's atom receipt. A failed gate stops this
+invocation immediately; it must not start a download or bind compute budget.
+
+Do not create a daily or weekly CNB polling job for this gate. CNB is queried
+only as an external execution prerequisite when the skill is actually run.
+
 When `weekly-run` has no explicit `--rank-id`, the chart-capture atom reads
 `references/kugou-chart-profile.json` and captures all configured charts page by
 page until an empty or short page. Explicit `--rank-id` values remain a
 bounded single-page override for targeted checks; they must not be used for a
 normal full-library weekly update.
 
-The intended order is:
+The intended order for each invocation is:
 
-1. preflight and publisher lock;
-2. CNB storage preflight: verify the Music Flamingo runtime image is present and no prior campaign branches or temporary run assets remain. The default LFS transport also requires the object-storage counter to be clean; the explicit bounded Git-object fallback requires the ordinary Git-storage counter to have the policy headroom instead;
+1. local preflight and publisher lock;
+2. invocation-time CNB storage preflight: verify the Music Flamingo runtime image is present and no prior campaign branches or temporary run assets remain. The default LFS transport also requires the object-storage counter to be clean; the explicit bounded Git-object fallback requires the ordinary Git-storage counter to have the policy headroom instead;
 3. Kugou chart capture and chart-level dedupe;
 4. inventory rebuild and historical dedupe;
 5. Claude Code download of the bounded queue;
@@ -58,9 +70,10 @@ state or call the old full-database downloader for a weekly update.
 
 The storage policy is `plugins/music-kb/references/cnb-storage-policy.json`. Every production
 `--publish` run must include `--confirm-delete-audio` and
-`--confirm-delete-cnb-storage`; preflight fails before download if either is
-missing. Actual deletion still occurs only after the release and either every
-enabled peer has succeeded or `--skip-peers` was explicitly selected. CNB is a
+`--confirm-delete-cnb-storage`; the invocation gate fails before chart capture
+or download if either is missing. Actual deletion still occurs only after the
+release and either every enabled peer has succeeded or `--skip-peers` was
+explicitly selected. CNB is a
 runtime mirror, so completed result/ledger refs and temporary run assets are
 disposable after local export. Preserve only the code mirror and required
 runtime image; never store the master database or immutable local releases in

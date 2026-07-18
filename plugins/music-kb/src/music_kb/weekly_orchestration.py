@@ -259,7 +259,7 @@ def run_weekly_run(
                 if missing_cleanup_confirmations:
                     outputs["missing_cleanup_confirmations"] = missing_cleanup_confirmations
                     raise RuntimeError(
-                        "a publishing weekly run must guarantee post-run cleanup; missing: "
+                        "this publishing weekly-run invocation must guarantee post-run cleanup; missing: "
                         + ", ".join(missing_cleanup_confirmations)
                     )
 
@@ -286,7 +286,7 @@ def run_weekly_run(
                     outputs["stdout"] = completed.stdout[-2000:]
             if completed.returncode != 0:
                 raise RuntimeError(
-                    "CNB object storage is not clean before weekly run: "
+                    "CNB object storage is not clean before this weekly-run invocation: "
                     f"{completed.stderr.strip() or outputs}"
                 )
 
