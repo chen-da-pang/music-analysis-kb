@@ -52,6 +52,17 @@ def load_policy(path: Path) -> dict[str, Any]:
         raise ValueError("minimum_group_object_free_bytes must be positive")
     if int(value["minimum_group_git_free_bytes"]) <= 0:
         raise ValueError("minimum_group_git_free_bytes must be positive")
+    server_gc = value.setdefault("server_gc", {})
+    if not isinstance(server_gc, dict):
+        raise ValueError("server_gc must be an object")
+    try:
+        grace_days = int(server_gc.setdefault("unreferenced_object_grace_days", 7))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("server_gc.unreferenced_object_grace_days must be an integer") from exc
+    if grace_days <= 0:
+        raise ValueError("server_gc.unreferenced_object_grace_days must be positive")
+    server_gc.setdefault("support_issue", "cnb/feedback#4551")
+    server_gc.setdefault("manual_gc_api", False)
     for key in ("preserved_branch_patterns", "cleanup_branch_patterns", "cleanup_asset_name_patterns"):
         for pattern in value[key]:
             re.compile(pattern)
@@ -218,6 +229,8 @@ def inspect(
         and not cleanup_assets
         and not unexpected_branches
     )
+    server_gc = policy.get("server_gc", {})
+    server_gc_pending = common_clean and not lfs_storage_clean
     return {
         "action": "inspect",
         "transport": transport,
@@ -251,6 +264,12 @@ def inspect(
         "lfs_storage_capacity_verified": lfs_storage_clean,
         "git_storage_capacity_verified": git_storage_ready,
         "storage_capacity_verified": transport_ready,
+        "server_gc": {
+            "unreferenced_object_grace_days": int(server_gc.get("unreferenced_object_grace_days", 7)),
+            "support_issue": str(server_gc.get("support_issue", "cnb/feedback#4551")),
+            "manual_gc_api": bool(server_gc.get("manual_gc_api", False)),
+        },
+        "server_gc_pending": server_gc_pending,
     }
 
 
@@ -300,6 +319,7 @@ def cleanup(
         "after": after,
         "visible_cleanup_complete": not after["cleanup_branches"] and not after["cleanup_assets"],
         "lfs_reclamation_verified": after["lfs_reclamation_verified"],
+        "server_gc_pending": after["server_gc_pending"],
         "clean": after["clean"] and not failures,
     }
 

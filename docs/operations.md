@@ -93,10 +93,16 @@ must also include `--confirm-delete-audio --confirm-delete-cnb-storage`; the
 preflight refuses to download when either cleanup confirmation is absent.
 Deletion waits until the local release and every enabled peer have succeeded,
 unless `--skip-peers` was explicitly selected. CNB cleanup is not considered
-complete merely because a branch was deleted: `cnb charge get-repos-volume`
-must show the repository below the versioned clean threshold. The orchestrator
-rejects a missing or incomplete source-link set and never treats a dry-run or
-skipped CNB analysis stage as a completed analysis.
+object-reclaimed merely because a branch was deleted: `cnb charge
+get-repos-volume` must show the repository below the versioned clean threshold.
+If all visible refs/assets are gone but the counter remains high, the receipt
+must say `server_gc_pending=true`; CNB support documents a default seven-day
+server-side GC window in `cnb/feedback#4551`, and there is no manual LFS-GC API
+in the public surface. The orchestrator must wait/recheck rather than delete
+the runtime image or repository. It may use the explicitly bounded
+Git-object route only when that route's own storage gate passes. The
+orchestrator rejects a missing or incomplete source-link set and never treats a
+dry-run or skipped CNB analysis stage as a completed analysis.
 
 When `--rank-id` is omitted, `weekly-run` reads the versioned
 `plugins/music-kb/references/kugou-chart-profile.json` and captures all six

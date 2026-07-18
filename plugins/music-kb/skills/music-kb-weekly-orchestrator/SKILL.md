@@ -69,11 +69,15 @@ CNB.
 Use LFS only when `cnb_storage_lifecycle.py inspect --transport lfs` proves
 the object-storage policy clean. When CNB's authoritative counter still shows
 orphan LFS after every visible campaign branch and temporary asset has been
-cleaned, do not call it reclaimed: CNB's documented API exposes LFS download
-only, not object deletion or garbage collection. Record that fact in the atom
-receipt, then use the explicit `--cnb-transport git-objects` fallback. It is
-limited by the policy and campaign gate to 5 GB total and 256 MiB per file and
-must still prove runtime presence, no stale campaign branches/assets, and at
-least 10 GB ordinary Git headroom. Pass the same transport to the final CNB
-cleanup atom; do not let a successful Git-object weekly run be falsely failed
-because orphan LFS did not disappear.
+cleaned, do not call it reclaimed: CNB's public API exposes LFS download and
+read-only charge counters, not a manual object-delete/GC operation. CNB support
+documents a default seven-day server-side GC window for unreferenced objects
+(`cnb/feedback#4551`). Record `server_gc_pending=true` and the observed counter
+in the atom receipt, then use the explicit `--cnb-transport git-objects`
+fallback only when its own Git-storage gate passes. It is limited by the policy
+and campaign gate to 5 GB total and 256 MiB per file and must still prove
+runtime presence, no stale campaign branches/assets, and at least 10 GB ordinary
+Git headroom. Pass the same transport to the final CNB cleanup atom. A visible
+ref cleanup is successful even when `server_gc_pending` remains true, but a
+weekly LFS preflight must stay blocked until the counter is below policy or the
+bounded Git-object route passes.
