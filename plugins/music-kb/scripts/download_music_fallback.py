@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Download explicitly queued Kugou no-results through alternate musicdl sources."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import signal
+import subprocess
+import tempfile
+import time
+import unicodedata
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+class ItemTimeoutError(RuntimeError):
+    pass
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def normalize(value: Any) -> str:
+    return " ".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
+
+
+def split_artists(value: Any) -> set[str]:
+    return {normalize(part) for part in re.split(r"[、&,/]", str(value or "")) if normalize(part)}
+
+
+def artists_match(target: str, found: str, aliases: list[list[str]]) -> bool:
+    left, right = split_artists(target), split_artists(found)
+    if left == right:
+        return True
+    for group in aliases:
+        values = {normalize(item) for item in group}
+        canonical = min(values) if values else ""
+        left = {canonical if item in values else item for item in left}
+        right = {canonical if item in values else item for item in right}
+    return left == right
+
+
+@contextmanager
+def item_timeout(seconds: float):
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+    previous = signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(ItemTimeoutError(f"timed out after {seconds:g}s")))
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def verify_file(path: Path, minimum_size: int, minimum_duration: float) -> dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError(f"file missing: {path}")
+    size = path.stat().st_size
+    if size <= minimum_size:
+        raise RuntimeError(f"file too small: {size} bytes")
+    probe = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    if probe.returncode != 0 or not probe.stdout.strip():
+        raise RuntimeError("ffprobe could not read duration")
+    duration = float(probe.stdout.strip())
+    if duration < minimum_duration:
+        raise RuntimeError(f"duration too short: {duration:.3f}s")
+    return {"size_bytes": size, "duration_seconds": duration}
+
+
+def queue_rows(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def find_item(inventory: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    identity = candidate.get("identity_key")
+    title_key = candidate.get("title_artist_key")
+    for song in inventory.get("songs", []):
+        if identity and song.get("identity_key") == identity:
+            return song
+        if title_key and song.get("title_artist_key") == title_key:
+            return song
+    song = dict(candidate)
+    inventory.setdefault("songs", []).append(song)
+    return song
+
+
+def downloaded_present(item: dict[str, Any]) -> bool:
+    download = item.get("download", {})
+    if download.get("status") != "downloaded":
+        return False
+    if download.get("retention") == "purged_after_analysis":
+        return True
+    path = download.get("path")
+    return bool(path and Path(path).expanduser().is_file())
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--queue", type=Path, required=True)
+    parser.add_argument("--inventory", type=Path, required=True)
+    parser.add_argument("--work-dir", type=Path, required=True)
+    parser.add_argument("--progress", type=Path, required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--profile", type=Path, required=True)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    profile = json.loads(args.profile.read_text(encoding="utf-8"))
+    queue = queue_rows(args.queue)
+    inventory = json.loads(args.inventory.read_text(encoding="utf-8"))
+    summary = {"run_id": args.run_id, "queue": len(queue), "downloaded": 0, "skipped_existing": 0, "failed": 0, "no_results": 0, "dry_run": args.dry_run}
+    progress = {"schema_version": 1, "run_id": args.run_id, "started_at": now_iso(), "results": {}}
+    if args.dry_run:
+        summary["would_process"] = len(queue)
+        print(json.dumps(summary, ensure_ascii=False))
+        return 0
+    try:
+        from musicdl.musicdl import MusicClient
+    except Exception as exc:
+        raise SystemExit(f"无法导入 musicdl: {exc}") from exc
+    sources = list(profile["sources"])
+    for candidate in queue:
+        identity = candidate.get("identity_key") or candidate.get("title_artist_key")
+        item = find_item(inventory, candidate)
+        if downloaded_present(item):
+            summary["skipped_existing"] += 1
+            progress["results"][identity] = {"status": "skipped_existing", "at": now_iso()}
+            continue
+        aliases = candidate.get("artist_aliases") or profile.get("artist_aliases", {}).get(f"{candidate.get('title')}\u0000{candidate.get('artist')}", [])
+        result: dict[str, Any] = {"status": "failed", "source": None, "error": None, "at": now_iso()}
+        matched = None
+        for source in sources:
+            try:
+                client = MusicClient(
+                    music_sources=[source],
+                    init_music_clients_cfg={source: {"work_dir": str(args.work_dir)}},
+                )
+                with item_timeout(float(profile["source_timeout_seconds"])):
+                    found = client.search(f"{candidate['title']} {candidate['artist']}").get(source, [])
+                for song in found:
+                    if normalize(getattr(song, "song_name", "")) == normalize(candidate["title"]) and artists_match(candidate["artist"], getattr(song, "singers", ""), aliases):
+                        matched = (source, song)
+                        break
+                if matched:
+                    break
+            except Exception as exc:
+                result["error"] = f"{source}: {exc}"
+        if matched is None:
+            summary["no_results"] += 1
+            result["status"] = "no_results"
+            item["download"] = {"status": "no_results", "retention": "retained", "path": None, "recorded_at": now_iso(), "fallback": True}
+        else:
+            source, song = matched
+            try:
+                with item_timeout(float(profile["source_timeout_seconds"])):
+                    downloaded = client.download([song])
+                raw_path = getattr(downloaded[0], "save_path", None) or getattr(downloaded[0], "saved_path", None) or getattr(downloaded[0], "_save_path", None)
+                path = Path(raw_path).expanduser() if raw_path else None
+                if path and not path.is_absolute():
+                    path = args.work_dir / path
+                if path is None:
+                    raise RuntimeError("musicdl returned no file path")
+                verified = verify_file(path, int(profile["minimum_size_bytes"]), float(profile["minimum_duration_seconds"]))
+                item["download"] = {"status": "downloaded", "retention": "retained", "path": str(path.resolve()), "file_present": True, "exists": True, "source": source, "matched_title": getattr(song, "song_name", None), "matched_artist": getattr(song, "singers", None), "recorded_at": now_iso(), **verified}
+                summary["downloaded"] += 1
+                result.update({"status": "downloaded", "source": source, "path": str(path.resolve()), **verified})
+            except Exception as exc:
+                summary["failed"] += 1
+                result["error"] = str(exc)
+                item["download"] = {"status": "failed", "retention": "retained", "path": None, "recorded_at": now_iso(), "error": str(exc), "fallback": True}
+        progress["results"][identity] = result
+        inventory["generated_at"] = now_iso()
+        inventory["counts"] = {"total": len(inventory.get("songs", []))}
+        for song in inventory.get("songs", []):
+            status = song.get("download", {}).get("status", "not_attempted")
+            inventory["counts"][status] = inventory["counts"].get(status, 0) + 1
+        atomic_write_json(args.inventory, inventory)
+        atomic_write_json(args.progress, {**progress, "summary": summary})
+    progress["finished_at"] = now_iso()
+    progress["summary"] = summary
+    atomic_write_json(args.progress, progress)
+    print(json.dumps(summary, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

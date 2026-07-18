@@ -63,6 +63,19 @@ def run_weekly_update(
     if not validation["valid"]:
         raise ValueError("Master database failed validation")
 
+    source_link_status: dict[str, Any] | None = None
+    if input_kind == "campaign":
+        source_link_status = _with_repository(db, lambda repo: repo.status()["counts"])
+        if (
+            source_link_status["source_tracks"] <= 0
+            or source_link_status["source_links"] != source_link_status["source_tracks"]
+        ):
+            raise ValueError(
+                "Source-link completeness gate failed: "
+                f"source_tracks={source_link_status['source_tracks']} "
+                f"source_links={source_link_status['source_links']}"
+            )
+
     release = create_snapshot(db, output_dir, release_name=release_name)
     verified = verify_snapshot(Path(release["manifest"]))
     publish_result = publish_snapshot(
@@ -85,6 +98,7 @@ def run_weekly_update(
         "import": import_result,
         "tags": tag_result,
         "validation": validation,
+        "source_link_status": source_link_status,
         "release": release,
         "release_verification": {
             "valid": verified["valid"],

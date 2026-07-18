@@ -67,14 +67,54 @@ when a colleague uses a nonstandard Python installation.
      --peers-file "$HOME/.config/music-kb/peers.toml"
    ```
 
-For each peer, the command performs five bounded stages:
+### Complete weekly-run orchestration
+
+For a recurring update, use the publisher-only orchestrator so the capture,
+dedupe, Claude Code download, CNB handoff, import, link gate, snapshot, peer
+plan, and cleanup receipts share one run id:
+
+```bash
+uv run music-kb --json weekly-run \
+  --workspace /path/to/music-workspace \
+  --run-id kugou-2026w30 \
+  --chart-size 100 \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --delivery /secure/path/canonical-delivery.jsonl \
+  --chart-database /path/to/music-workspace/data/music_trends.sqlite \
+  --peers-file "$HOME/.config/music-kb/peers.toml" \
+  --output-dir "$HOME/.music-kb/releases" \
+  --release-name music-kb-2026w30 \
+  --download-dry-run
+```
+
+Remove `--download-dry-run` only for the approved Claude Code download. Add
+`--publish` after the peer dry-run has been reviewed. Every production publish
+must also include `--confirm-delete-audio --confirm-delete-cnb-storage`; the
+preflight refuses to download when either cleanup confirmation is absent.
+Deletion still waits until the local release and every enabled peer have
+succeeded. CNB cleanup is not considered complete merely because a branch was
+deleted: `cnb charge get-repos-volume` must show the repository below the
+versioned clean threshold. The orchestrator rejects a missing or incomplete
+source-link set and never treats a dry-run or skipped CNB stage as a completed
+analysis.
+
+When `--rank-id` is omitted, `weekly-run` reads the versioned
+`plugins/music-kb/references/kugou-chart-profile.json` and captures all six
+configured Kugou charts page by page until an empty or short page. The default
+profile is the validated six-chart contract (1136 historical raw rows and 927
+unique songs; live counts may drift). Passing `--rank-id` intentionally selects
+the bounded single-page mode for a targeted chart check.
+
+For each peer, the command performs six bounded stages:
 
 1. preflights the configured Python executable over non-interactive SSH;
-2. creates `~/.music-kb/incoming/<release-name>/`;
-3. runs `rsync -a --partial --checksum` into that incoming directory;
-4. remotely runs an embedded `hashlib`/`sqlite3` verification against
+2. checks the remote music-kb plugin cache for a compatible plugin version and
+   schema before transferring any database;
+3. creates `~/.music-kb/incoming/<release-name>/`;
+4. runs `rsync -a --partial --checksum` into that incoming directory;
+5. remotely runs an embedded `hashlib`/`sqlite3` verification against
    `manifest.json`;
-5. remotely copies the verified release into the peer's release directory and
+6. remotely copies the verified release into the peer's release directory and
    atomically changes only `~/.music-kb/current.sqlite`.
 
 It never syncs `music-master.sqlite`, never uses `rsync --inplace`, and does
@@ -95,7 +135,7 @@ peer installs.
 
 Never grant client agents write access to a snapshot.
 
-## Schema v5 publisher upgrade
+## Schema v6 publisher upgrade
 
 Before using the 100k generic-import path against a pre-existing schema-v4
 master, run the one-time local migration on the publisher machine:
@@ -105,8 +145,9 @@ music-kb init --db "$HOME/.music-kb/music-master.sqlite"
 music-kb validate --db "$HOME/.music-kb/music-master.sqlite"
 ```
 
-This installs the canonical-switch and exact-tag indexes and records the FTS
-projection state. It never rewrites Music Flamingo raw text or uploads data.
+This installs the v5 canonical-switch/exact-tag indexes and the v6
+`source_track.source_url` field, then records the FTS projection state. It
+never rewrites Music Flamingo raw text or uploads data.
 Create and distribute a fresh snapshot after the migration; do not try to
 initialize a client snapshot directly.
 

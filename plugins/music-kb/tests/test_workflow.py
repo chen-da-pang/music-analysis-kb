@@ -5,12 +5,15 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
+import pytest
+
 from music_kb.publish_state import load_publish_state
 from music_kb.schema import initialize_database
 from music_kb.workflow import run_weekly_update
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "analysis.json"
+CAMPAIGN_FIXTURE = Path(__file__).parent / "fixtures" / "kugou_canonical_delivery.jsonl"
 
 
 def _peers(path: Path, key: Path) -> None:
@@ -101,8 +104,32 @@ def test_weekly_update_publish_records_state_after_verified_fanout(tmp_path: Pat
 
     assert result["publish"]["dry_run"] is False
     assert result["publish"]["succeeded_count"] == 1
-    assert len(runner.commands) == 5
+    assert len(runner.commands) == 6
     saved = load_publish_state(state)
     assert saved["last_publish"]["release_name"] == "music-kb-atom3-publish"
     assert saved["peers"]["fixture-peer"]["last_success"]["status"] == "succeeded"
     assert saved["peers"]["fixture-peer"]["last_success"]["release_sha256"] == result["release_verification"]["sha256"]
+
+
+def test_campaign_weekly_update_rejects_missing_source_links(tmp_path: Path) -> None:
+    database = tmp_path / "master.sqlite"
+    initialize_database(database)
+    key = tmp_path / "id_ed25519"
+    key.write_text("fixture", encoding="utf-8")
+    peers = tmp_path / "peers.toml"
+    _peers(peers, key)
+
+    with pytest.raises(ValueError, match="Source-link completeness gate failed"):
+        run_weekly_update(
+            database=database,
+            input_path=CAMPAIGN_FIXTURE,
+            input_kind="campaign",
+            expected_count=2,
+            batch_size=1,
+            output_dir=tmp_path / "releases",
+            release_name="campaign-link-gate",
+            peers_file=peers,
+            publish=False,
+            state_file=tmp_path / "publish-state.json",
+            runner=NoTransport(),
+        )

@@ -4,10 +4,12 @@ import shlex
 import subprocess
 import tomllib
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .errors import ValidationError
+from .schema import SCHEMA_VERSION
 from .snapshot import validate_release_name, verify_snapshot
 
 
@@ -18,6 +20,7 @@ DEFAULT_PYTHON_PATH = "python3"
 DEFAULT_PORT = 22
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
+DEFAULT_PLUGIN_CACHE_ROOT = "~/.codex/plugins/cache/music-analysis-kb/music-kb"
 MAX_OUTPUT_CHARS = 2_000
 
 CommandRunner = Callable[[Sequence[str], int], subprocess.CompletedProcess[str]]
@@ -34,6 +37,7 @@ class DistributionPeer:
     identity_file: Path | None
     target_dir: str
     cli_path: str | None
+    plugin_cache_root: str
     python_path: str
     connect_timeout_seconds: int
     command_timeout_seconds: int
@@ -104,6 +108,13 @@ def _remote_executable_setting(value: str, *, field: str, context: str) -> str:
     if any(not (character.isalnum() or character in "._~/-") for character in value):
         raise ValidationError(f"{context}.{field} contains unsafe characters")
     return value
+
+
+def _current_plugin_version() -> str:
+    try:
+        return package_version("music-kb")
+    except PackageNotFoundError:
+        return "0.7.0"
 
 
 def _identity_file(value: str | None, *, context: str) -> Path | None:
@@ -192,6 +203,15 @@ def load_distribution_peers(config_path: str | Path) -> list[DistributionPeer]:
             field="python_path",
             context=context,
         )
+        plugin_cache_root = _remote_path_setting(
+            _require_string(
+                _get_setting(peer, defaults, "plugin_cache_root", DEFAULT_PLUGIN_CACHE_ROOT),
+                field="plugin_cache_root",
+                context=context,
+            ),
+            field="plugin_cache_root",
+            context=context,
+        )
         identity = _optional_string(
             _get_setting(peer, defaults, "identity_file", None), field="identity_file", context=context
         )
@@ -209,6 +229,7 @@ def load_distribution_peers(config_path: str | Path) -> list[DistributionPeer]:
                 identity_file=_identity_file(identity, context=context),
                 target_dir=target_dir,
                 cli_path=cli_path,
+                plugin_cache_root=plugin_cache_root,
                 python_path=python_path,
                 connect_timeout_seconds=_positive_int(
                     _get_setting(
@@ -344,6 +365,49 @@ finally:
     connection.close()
 """
 
+_REMOTE_COMPATIBILITY_CODE = r"""
+import glob
+import json
+import os
+import re
+import sys
+
+root = os.path.abspath(os.path.expanduser(sys.argv[1]))
+required_version = tuple(int(part) for part in sys.argv[2].split('.') if part.isdigit())
+required_schema = int(sys.argv[3])
+
+def version_tuple(value):
+    return tuple(int(part) for part in re.findall(r'\d+', str(value)))
+
+matches = []
+for manifest_path in glob.glob(os.path.join(root, '*', '.codex-plugin', 'plugin.json')):
+    try:
+        with open(manifest_path, encoding='utf-8') as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError):
+        continue
+    if manifest.get('name') != 'music-kb':
+        continue
+    install_root = os.path.dirname(os.path.dirname(manifest_path))
+    schema_path = os.path.join(install_root, 'src', 'music_kb', 'schema.py')
+    try:
+        with open(schema_path, encoding='utf-8') as handle:
+            source = handle.read()
+    except OSError:
+        continue
+    schema_match = re.search(r'^SCHEMA_VERSION\s*=\s*(\d+)', source, re.MULTILINE)
+    if not schema_match:
+        continue
+    version = str(manifest.get('version', ''))
+    schema = int(schema_match.group(1))
+    matches.append({'version': version, 'schema_version': schema, 'manifest': manifest_path})
+
+compatible = [item for item in matches if version_tuple(item['version']) >= required_version and item['schema_version'] >= required_schema]
+if not compatible:
+    raise SystemExit(json.dumps({'error': 'music-kb plugin/schema incompatible', 'required_version': sys.argv[2], 'required_schema_version': required_schema, 'found': matches}, ensure_ascii=False))
+print(json.dumps({'compatible': True, 'required_version': sys.argv[2], 'required_schema_version': required_schema, 'found': compatible}, ensure_ascii=False))
+"""
+
 
 _REMOTE_INSTALL_CODE = r"""
 import hashlib
@@ -433,6 +497,16 @@ def _remote_python_command(python_path: str, code: str, *arguments: str) -> str:
 
 def _remote_preflight_command(python_path: str) -> str:
     return _remote_python_command(python_path, "import hashlib, json, sqlite3")
+
+
+def _remote_compatibility_command(peer: DistributionPeer) -> str:
+    return _remote_python_command(
+        peer.python_path,
+        _REMOTE_COMPATIBILITY_CODE,
+        peer.plugin_cache_root,
+        _current_plugin_version(),
+        str(SCHEMA_VERSION),
+    )
 
 
 def _remote_verify_command(incoming_dir: str, python_path: str) -> str:
@@ -535,6 +609,7 @@ def publish_snapshot(
 
         stages: list[tuple[str, Sequence[str]]] = [
             ("preflight", _ssh_command(peer, _remote_preflight_command(peer.python_path))),
+            ("plugin_compatibility", _ssh_command(peer, _remote_compatibility_command(peer))),
             ("mkdir", _ssh_command(peer, _remote_mkdir_command(plan["incoming_dir"]))),
             ("rsync", _rsync_command(peer, source, plan["incoming_dir"])),
             ("verify", _ssh_command(peer, _remote_verify_command(plan["incoming_dir"], peer.python_path))),

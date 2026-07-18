@@ -1,6 +1,6 @@
 ---
 name: music-kb-weekly-publisher
-description: Publish a completed Music Flamingo delivery into the local writable Music KB, create a verified immutable snapshot, and fan it out to configured colleague Macs over SSH. Use only on the publisher machine.
+description: Publish a completed Music Flamingo delivery into the local writable Music KB, create a verified immutable snapshot, and fan it out to configured colleague Macs over SSH. Use when the publisher needs to publish a completed weekly Music KB delivery to colleague Macs. Use only on the publisher machine.
 ---
 
 # Music KB Weekly Publisher
@@ -98,8 +98,9 @@ the import command returned zero.
 7. **Peer dry-run review** — list every enabled peer, target directory, and
    intended release. Disabled peers are not included unless explicitly named
    for a retry.
-8. **Fan-out verification** — each peer is staged, verified remotely, and
-   atomically installed. One offline peer does not cancel other peers.
+8. **Fan-out verification** — each peer's installed music-kb plugin version and
+   schema are checked remotely before staging; then the release is verified
+   and atomically installed. One offline peer does not cancel other peers.
 9. **State review** — `publish-state.json` records release SHA, per-peer
    attempt status, and last successful release without raw command output.
 

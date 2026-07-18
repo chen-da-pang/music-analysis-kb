@@ -38,6 +38,7 @@ audit but are removed from client snapshots and never appear in MCP search.
 | `music-kb` CLI | Publisher lifecycle: initialize, import, validate, create/verify/install snapshots, SSH/rsync fan-out, and local search. |
 | `music-kb-mcp` | Bounded, read-only local MCP interface for agents. |
 | `plugins/music-kb/skills/music-kb` | Retrieval workflow for canonical analyses and granular tags. |
+| `plugins/music-kb/skills/music-kb-audio-downloader` | Publisher-only upstream queue, inventory, and Claude Code/musicdl download workflow. |
 | Codex plugin | Packaging layer that ships the CLI/MCP/Skill together. It does not contain the database. |
 
 ## Quick start (publisher)
@@ -141,6 +142,7 @@ conversion: all of these tags exist to improve local retrieval.
 - [Import contract](docs/import-contract.md)
 - [Schema and retrieval design](docs/schema.md)
 - [Snapshot publishing and SSH operations](docs/operations.md)
+- [Weekly audio download through Claude Code](docs/download-via-claude-code.md)
 - [Architecture decision](docs/architecture/2026-07-13-music-analysis-knowledge-base.md)
 - [Synthetic 100k benchmark](docs/benchmarks/2026-07-13-generic-100k.md)
 
@@ -151,7 +153,7 @@ cd plugins/music-kb
 uv sync --all-groups
 uv run pytest
 uv run python scripts/benchmark_100k.py --records 1000  # fast synthetic smoke test
-python3 /Users/wycm/.codex/skills/plugin-creator/scripts/validate_plugin.py .
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/plugin-creator/scripts/validate_plugin.py" .
 ```
 
 Issue tracking and pull requests are required for all changes. See

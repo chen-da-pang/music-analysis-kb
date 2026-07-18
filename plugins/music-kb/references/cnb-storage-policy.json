@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "organization_slug": "wuyoumusic",
+  "repository_slug": "wuyoumusic/moss-music-runner",
+  "clean_repo_object_bytes_max": 25000000000,
+  "minimum_group_object_free_bytes": 10000000000,
+  "minimum_group_git_free_bytes": 10000000000,
+  "required_runtime": {
+    "registry_slug": "wuyoumusic/moss-music-runner",
+    "package_type": "docker",
+    "package_name": "moss-music-runner",
+    "tag": "music-flamingo-cuda-model"
+  },
+  "protected_branches": [
+    "main"
+  ],
+  "preserved_branch_patterns": [
+    "^campaign-results/"
+  ],
+  "cleanup_branch_patterns": [
+    "^campaign-kugou-",
+    "^codex/weekly-campaign-",
+    "^codex/kugou-[0-9]{8}-asr-devgpu$"
+  ],
+  "cleanup_asset_name_patterns": [
+    "^music-flamingo-run\\.tar\\.gz$"
+  ]
+}

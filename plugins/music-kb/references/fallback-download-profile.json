@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "sources": [
+    "QQMusicClient",
+    "MiguMusicClient",
+    "KuwoMusicClient"
+  ],
+  "source_timeout_seconds": 90,
+  "minimum_size_bytes": 1000000,
+  "minimum_duration_seconds": 60,
+  "artist_aliases": {
+    "Pretty Girl\u0000RESCENE": [["RESCENE", "RESCENE (리센느)"]],
+    "Beyond the Dream\u0000DINO": [["DINO", "디노"]]
+  }
+}

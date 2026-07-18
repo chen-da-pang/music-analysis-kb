@@ -8,6 +8,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .campaign_delivery import CampaignDeliveryEntry, group_campaign_delivery, to_import_payload
 from .errors import NotFoundError, ValidationError
@@ -25,6 +26,16 @@ MAX_IMPORT_RESULT_SAMPLE = 1_000
 SEARCH_PROJECTION_STATE_KEY = "search_projection_state"
 SEARCH_PROJECTION_CURRENT = "current"
 SEARCH_PROJECTION_DIRTY = "dirty"
+
+
+def _optional_source_url(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parsed = urlsplit(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValidationError("source_track.source_url must be an absolute http(s) URL")
+    return text
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -1161,6 +1172,7 @@ class MusicKBRepository:
             require_text(source.get("source") or source.get("source_name"), "source_track.source")
         )
         source_track_id = require_text(source.get("source_track_id"), "source_track.source_track_id")
+        source_url = _optional_source_url(source.get("source_url"))
         matches = list(
             self.connection.execute(
                 """
@@ -1198,13 +1210,15 @@ class MusicKBRepository:
                 UPDATE source_track
                 SET source_name = ?,
                     source_title = COALESCE(?, source_title),
-                    source_artist_credit = COALESCE(?, source_artist_credit)
+                    source_artist_credit = COALESCE(?, source_artist_credit),
+                    source_url = COALESCE(?, source_url)
                 WHERE source_name = ? AND source_track_id = ?
                 """,
                 (
                     source_name,
                     str(source.get("source_title") or "").strip() or None,
                     str(source.get("source_artist_credit") or "").strip() or None,
+                    source_url,
                     str(existing["source_name"]),
                     source_track_id,
                 ),
@@ -1213,11 +1227,12 @@ class MusicKBRepository:
         source_id = _stable_id("src", normalized(source_name), source_track_id)
         self.connection.execute(
             """
-            INSERT INTO source_track(id, recording_id, source_name, source_track_id, source_title, source_artist_credit)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO source_track(id, recording_id, source_name, source_track_id, source_title, source_artist_credit, source_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_name, source_track_id) DO UPDATE SET
                 source_title = COALESCE(excluded.source_title, source_track.source_title),
-                source_artist_credit = COALESCE(excluded.source_artist_credit, source_track.source_artist_credit)
+                source_artist_credit = COALESCE(excluded.source_artist_credit, source_track.source_artist_credit),
+                source_url = COALESCE(excluded.source_url, source_track.source_url)
             """,
             (
                 source_id,
@@ -1226,8 +1241,76 @@ class MusicKBRepository:
                 source_track_id,
                 str(source.get("source_title") or "").strip() or None,
                 str(source.get("source_artist_credit") or "").strip() or None,
+                source_url,
             ),
         )
+
+    def backfill_source_links(self, chart_database: str | Path) -> dict[str, Any]:
+        """Backfill source URLs from the authoritative Kugou chart database."""
+
+        self._require_writer()
+        chart_path = Path(chart_database).expanduser().resolve()
+        if not chart_path.is_file():
+            raise ValidationError(f"Kugou chart database does not exist: {chart_path}")
+        external = sqlite3.connect(f"{chart_path.as_uri()}?mode=ro", uri=True)
+        external.row_factory = sqlite3.Row
+        try:
+            rows = external.execute(
+                """
+                SELECT s.canonical_title AS title, s.canonical_artist AS artist, pt.play_link
+                FROM songs s JOIN platform_tracks pt ON pt.song_id = s.song_id
+                WHERE pt.platform = 'kugou' AND pt.play_link IS NOT NULL AND trim(pt.play_link) <> ''
+                """
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise ValidationError(f"Unable to read Kugou chart database: {exc}") from exc
+        finally:
+            external.close()
+
+        links: dict[tuple[str, str], str] = {}
+        for row in rows:
+            url = _optional_source_url(row["play_link"])
+            if url is None:
+                continue
+            key = (normalized(str(row["title"])), normalized(str(row["artist"])))
+            previous = links.get(key)
+            if previous is not None and previous != url:
+                raise ValidationError(
+                    "Kugou chart database has conflicting links for one title/artist",
+                    details={"title": row["title"], "artist": row["artist"]},
+                )
+            links[key] = url
+
+        source_rows = list(
+            self.connection.execute(
+                """
+                SELECT source_track_id, source_title, source_artist_credit
+                FROM source_track
+                WHERE source_name = 'kugou'
+                """
+            )
+        )
+        matched = 0
+        unresolved: list[str] = []
+        with self.connection:
+            for row in source_rows:
+                key = (normalized(str(row["source_title"] or "")), normalized(str(row["source_artist_credit"] or "")))
+                url = links.get(key)
+                if url is None:
+                    unresolved.append(str(row["source_track_id"]))
+                    continue
+                self.connection.execute(
+                    "UPDATE source_track SET source_url = ? WHERE source_name = 'kugou' AND source_track_id = ?",
+                    (url, row["source_track_id"]),
+                )
+                matched += 1
+        return {
+            "chart_database": str(chart_path),
+            "chart_link_count": len(links),
+            "kugou_source_track_count": len(source_rows),
+            "matched": matched,
+            "unresolved": unresolved,
+        }
 
     def _upsert_tag_from_payload(
         self, tag: Any, *, lookup_cache: _BoundedImportLookupCache | None = None
@@ -1471,6 +1554,28 @@ class MusicKBRepository:
         )
         return [str(row["alias"]) for row in rows]
 
+    def _source_links(self, recording_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT source_name, source_track_id, source_title,
+                   source_artist_credit, source_url
+            FROM source_track
+            WHERE recording_id = ? AND source_url IS NOT NULL AND trim(source_url) <> ''
+            ORDER BY source_name, source_track_id
+            """,
+            (recording_id,),
+        )
+        return [
+            {
+                "source": str(row["source_name"]),
+                "track_id": str(row["source_track_id"]),
+                "title": row["source_title"],
+                "artist": row["source_artist_credit"],
+                "url": str(row["source_url"]),
+            }
+            for row in rows
+        ]
+
     # -- reads ------------------------------------------------------------
 
     def status(self) -> dict[str, Any]:
@@ -1488,6 +1593,10 @@ class MusicKBRepository:
                 "SELECT COUNT(*) FROM campaign_delivery_provenance"
             ).fetchone()[0],
             "tags": self.connection.execute("SELECT COUNT(*) FROM tag").fetchone()[0],
+            "source_tracks": self.connection.execute("SELECT COUNT(*) FROM source_track").fetchone()[0],
+            "source_links": self.connection.execute(
+                "SELECT COUNT(*) FROM source_track WHERE source_url IS NOT NULL AND trim(source_url) <> ''"
+            ).fetchone()[0],
         }
         return {
             "path": str(self.path),
@@ -1539,6 +1648,7 @@ class MusicKBRepository:
         results: list[dict[str, Any]] = []
         for row in rows:
             recording_id = str(row["id"])
+            source_links = self._source_links(recording_id)
             results.append(
                 {
                     "recording_id": recording_id,
@@ -1548,6 +1658,8 @@ class MusicKBRepository:
                     "tags": self._public_tag_names(recording_id),
                     "summary": str(row["summary"]),
                     "canonical_created_at": str(row["created_at"]),
+                    "listen_url": source_links[0]["url"] if source_links else None,
+                    "source_links": source_links,
                 }
             )
         return results
@@ -1707,12 +1819,15 @@ class MusicKBRepository:
         for item in delivery_provenance:
             raw_provenance = item.pop("provenance_json")
             item["provenance"] = json.loads(str(raw_provenance)) if raw_provenance else None
+        source_links = self._source_links(str(row["id"]))
         return {
             "recording_id": str(row["id"]),
             "title": str(row["canonical_title"]),
             "version_label": str(row["version_label"]),
             "audio_sha256": row["audio_sha256"],
             "artists": self._artist_names(str(row["id"])),
+            "listen_url": source_links[0]["url"] if source_links else None,
+            "source_links": source_links,
             "title_aliases": [
                 str(alias["alias"])
                 for alias in self.connection.execute(

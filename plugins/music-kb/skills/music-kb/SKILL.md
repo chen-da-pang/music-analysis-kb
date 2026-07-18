@@ -40,5 +40,11 @@ description: Search the local, read-only Music Flamingo analysis knowledge base.
 - `music_kb_get_canonical_analysis(recording_id="...")`
 - `music_kb_tag_facets(namespace="production", prefix="granular")`
 
+Search and canonical-analysis results include `listen_url` and `source_links`
+when the source platform has a listening URL. When presenting a match to a
+user, render a Markdown link whose target is the runtime value returned in
+`listen_url` (for example, a full `https://www.kugou.com/...` URL); do not
+silently drop the link.
+
 If the local snapshot is missing or stale, tell the user to run the documented
 snapshot update flow. Do not create or edit a database on their behalf.

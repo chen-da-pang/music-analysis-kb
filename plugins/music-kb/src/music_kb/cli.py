@@ -14,6 +14,7 @@ from .repository import MusicKBRepository, iter_import_file
 from .schema import SCHEMA_VERSION, initialize_database
 from .snapshot import create_snapshot, install_snapshot, verify_snapshot
 from .workflow import run_weekly_update
+from .weekly_orchestration import run_weekly_run
 
 
 def default_client_database() -> Path:
@@ -22,6 +23,18 @@ def default_client_database() -> Path:
 
 def default_peer_inventory() -> Path:
     return Path(os.environ.get("MUSIC_KB_PEERS_FILE", "~/.config/music-kb/peers.toml")).expanduser()
+
+
+def default_operations_file() -> Path:
+    return Path(__file__).resolve().parents[2] / "references" / "validated-operations.json"
+
+
+def default_chart_profile() -> Path:
+    return Path(__file__).resolve().parents[2] / "references" / "kugou-chart-profile.json"
+
+
+def default_cnb_storage_policy() -> Path:
+    return Path(__file__).resolve().parents[2] / "references" / "cnb-storage-policy.json"
 
 
 def _add_database_argument(parser: argparse.ArgumentParser, *, required: bool = False) -> None:
@@ -99,6 +112,13 @@ def build_parser() -> argparse.ArgumentParser:
     validator = commands.add_parser("validate", help="Validate canonical and search invariants")
     _add_database_argument(validator, required=True)
 
+    links = commands.add_parser(
+        "backfill-source-links",
+        help="Backfill public listening URLs from the authoritative Kugou chart database",
+    )
+    _add_database_argument(links, required=True)
+    links.add_argument("--chart-db", type=Path, required=True, help="Kugou chart SQLite database")
+
     search = commands.add_parser("search", help="Search canonical analyses, title/artist aliases, and exact tags")
     _add_database_argument(search)
     search.add_argument("--query", default="", help="Full-text or generic alias query")
@@ -175,6 +195,56 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("~/.music-kb/state/publish-state.json").expanduser(),
     )
 
+    weekly_run = commands.add_parser(
+        "weekly-run",
+        help="Run the complete resumable chart-to-publisher weekly workflow",
+    )
+    weekly_run.add_argument("--workspace", type=Path, default=Path.cwd())
+    weekly_run.add_argument("--run-id", required=True)
+    weekly_run.add_argument("--rank-id", action="append", default=[], help="Kugou rank ID; repeat for multiple charts")
+    weekly_run.add_argument("--chart-page", type=int, default=1)
+    weekly_run.add_argument("--chart-size", type=int, default=100)
+    weekly_run.add_argument(
+        "--db",
+        type=Path,
+        default=Path("~/.music-kb/music-master.sqlite").expanduser(),
+        help="Writable publisher master database",
+    )
+    weekly_run.add_argument("--inventory", type=Path, default=Path("data/song_inventory.json"))
+    weekly_run.add_argument("--audio-root", type=Path, default=Path("music_downloads/KugouMusicClient"))
+    weekly_run.add_argument("--legacy-progress", type=Path, default=Path("download_progress.json"))
+    weekly_run.add_argument("--operations-file", type=Path, default=default_operations_file())
+    weekly_run.add_argument(
+        "--chart-profile",
+        type=Path,
+        default=default_chart_profile(),
+        help="Versioned full-chart profile used when --rank-id is omitted",
+    )
+    weekly_run.add_argument("--output-dir", type=Path, default=Path("~/.music-kb/releases").expanduser())
+    weekly_run.add_argument("--release-name", default=None)
+    weekly_run.add_argument("--peers-file", type=Path, default=default_peer_inventory())
+    weekly_run.add_argument("--peer", action="append", default=[])
+    weekly_run.add_argument("--publish", action="store_true")
+    weekly_run.add_argument("--skip-peers", action="store_true", help="Do not create or publish a peer plan")
+    weekly_run.add_argument("--delivery", type=Path, help="Existing CNB canonical delivery JSONL")
+    weekly_run.add_argument("--cnb-command", help="Command that writes $MUSIC_KB_CNB_OUTPUT canonical JSONL")
+    weekly_run.add_argument("--chart-database", type=Path, help="Authoritative chart SQLite used to backfill source links")
+    weekly_run.add_argument("--state-file", type=Path, default=Path("~/.music-kb/state/publish-state.json").expanduser())
+    weekly_run.add_argument("--proxy")
+    weekly_run.add_argument("--download-dry-run", action="store_true")
+    weekly_run.add_argument("--download-max-items", type=int)
+    weekly_run.add_argument("--confirm-delete-audio", action="store_true")
+    weekly_run.add_argument("--cnb-storage-policy", type=Path, default=default_cnb_storage_policy())
+    weekly_run.add_argument(
+        "--cnb-transport",
+        choices=("lfs", "git-objects"),
+        default="lfs",
+        help="CNB campaign audio transport; git-objects is the bounded no-cost fallback for pending orphan LFS GC",
+    )
+    weekly_run.add_argument("--confirm-delete-cnb-storage", action="store_true")
+    weekly_run.add_argument("--expected-count", type=int)
+    weekly_run.add_argument("--timeout-seconds", type=int, default=86_400)
+
     return parser
 
 
@@ -246,6 +316,12 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     if args.command == "validate":
         result = _with_repository(args.db, read_only=True, operation=lambda repo: repo.validate())
         return (0 if result["valid"] else 1), result
+    if args.command == "backfill-source-links":
+        return 0, _with_repository(
+            args.db,
+            read_only=False,
+            operation=lambda repo: repo.backfill_source_links(args.chart_db),
+        )
     if args.command == "search":
         result = _with_repository(
             args.db,
@@ -299,6 +375,40 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             state_file=args.state_file,
         )
         return (0 if result["publish"]["failed_count"] == 0 else 1), result
+    if args.command == "weekly-run":
+        result = run_weekly_run(
+            workspace=args.workspace,
+            run_id=args.run_id,
+            rank_ids=args.rank_id,
+            chart_page=args.chart_page,
+            chart_size=args.chart_size,
+            chart_profile=args.chart_profile,
+            database=args.db,
+            inventory=args.inventory,
+            audio_root=args.audio_root,
+            legacy_progress=args.legacy_progress,
+            operations_file=args.operations_file,
+            output_dir=args.output_dir,
+            release_name=args.release_name,
+            peers_file=args.peers_file,
+            peer_names=args.peer,
+            publish=args.publish,
+            delivery=args.delivery,
+            cnb_command=args.cnb_command,
+            chart_database=args.chart_database,
+            state_file=args.state_file,
+            proxy=args.proxy,
+            download_dry_run=args.download_dry_run,
+            download_max_items=args.download_max_items,
+            confirm_delete_audio=args.confirm_delete_audio,
+            expected_count=args.expected_count,
+            timeout_seconds=args.timeout_seconds,
+            skip_peers=args.skip_peers,
+            cnb_storage_policy=args.cnb_storage_policy,
+            confirm_delete_cnb_storage=args.confirm_delete_cnb_storage,
+            cnb_transport=args.cnb_transport,
+        )
+        return 0, result
     raise AssertionError("unhandled command")
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from .errors import DatabaseNotInitializedError, MusicKBError, ReadOnlyError
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 SCHEMA_SQL = """
@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS source_track (
     source_track_id TEXT NOT NULL,
     source_title TEXT,
     source_artist_credit TEXT,
+    source_url TEXT,
     UNIQUE(source_name, source_track_id)
 );
 CREATE INDEX IF NOT EXISTS idx_source_track_source_track_id ON source_track(source_track_id);
@@ -412,6 +413,27 @@ def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
+    """Add a public listening URL to every source-track identity.
+
+    URLs are source metadata rather than Music Flamingo output, so they belong
+    on ``source_track`` and survive snapshot creation independently of local
+    audio retention.
+    """
+
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(source_track)")
+    }
+    with connection:
+        if "source_url" not in columns:
+            connection.execute("ALTER TABLE source_track ADD COLUMN source_url TEXT")
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("6",),
+        )
+
+
 def initialize_database(path: str | Path) -> Path:
     database = _path(path)
     version: int | None = None
@@ -448,6 +470,9 @@ def initialize_database(path: str | Path) -> Path:
             if version == 4:
                 _migrate_v4_to_v5(connection)
                 version = 5
+            if version == 5:
+                _migrate_v5_to_v6(connection)
+                version = 6
             connection.executescript(SCHEMA_SQL)
         except sqlite3.OperationalError as exc:
             if "fts5" in str(exc).casefold():

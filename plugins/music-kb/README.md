@@ -24,5 +24,21 @@ configuration or production data in this plugin.
 Publisher-only KuGou campaign imports use `music-kb import-campaign-delivery`
 with a strict LF JSONL manifest; see [`../../docs/import-contract.md`](../../docs/import-contract.md).
 
+The complete publisher-side weekly run is `music-kb weekly-run`. It records a
+run state and one receipt per atom under `data/weekly_runs/<run-id>/`, reads the
+versioned final operating decisions from `references/validated-operations.json`,
+and stops at the first failed gate. With no `--rank-id`, it uses the versioned
+`references/kugou-chart-profile.json` to capture all six configured charts and
+their pages; an explicit `--rank-id` is a bounded single-page override. Pass
+either `--delivery <canonical.jsonl>`
+for an already completed CNB delivery or `--cnb-command <command>` for a
+command that writes the run's `MUSIC_KB_CNB_OUTPUT`; a real run without either
+input stops at the CNB atom. Use `--download-dry-run` and omit
+the cleanup confirmations while reviewing a new workflow. Every production
+`--publish` run must include `--confirm-delete-audio` and
+`--confirm-delete-cnb-storage`. The former preserves dedupe metadata while
+removing local audio; the latter removes CNB campaign inputs/assets and checks
+the authoritative object-byte counter before the run may succeed.
+
 Read the repository-level [README](../../README.md) for the publisher/client
 workflow and deployment rules.
