@@ -1,0 +1,16 @@
+# The model image Dockerfile only needs its Dockerfile and the locked runtime
+# requirements. Keep audio, Git history, local secrets, and generated output
+# out of the CNB Docker build context.
+*
+.git
+.env
+data/input
+data/output
+work
+logs
+__pycache__
+*.pyc
+!.dockerignore
+!.cnb/
+!.cnb/Dockerfile.flamingo
+!.cnb/requirements.runtime.txt

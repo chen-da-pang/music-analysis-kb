@@ -1,0 +1,123 @@
+FROM pytorch/pytorch@sha256:39236c0ad9c66baecf01bb2e4f5562543c5b336c0c785887798775d6d6fdbf9a
+
+ARG MUSIC_FLAMINGO_MODEL=nvidia/music-flamingo-think-2601-hf
+ARG MUSIC_FLAMINGO_REVISION=1ea2109
+ARG MUSIC_FLAMINGO_MODEL_DIR=/opt/models/music-flamingo-think-2601-hf
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HF_HOME=/opt/huggingface \
+    CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:${PATH} \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH} \
+    MUSIC_FLAMINGO_MODEL=${MUSIC_FLAMINGO_MODEL} \
+    MUSIC_FLAMINGO_REVISION=${MUSIC_FLAMINGO_REVISION} \
+    MUSIC_FLAMINGO_MODEL_DIR=${MUSIC_FLAMINGO_MODEL_DIR}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ffmpeg ca-certificates curl build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN test -d "$CUDA_HOME" \
+    && test -x "$CUDA_HOME/bin/nvcc" \
+    && nvcc --version
+
+COPY .cnb/requirements.runtime.txt /tmp/requirements.runtime.txt
+
+RUN python -m pip install --no-cache-dir --retries 5 --timeout 60 \
+      -r /tmp/requirements.runtime.txt \
+    && python - <<'PY'
+import importlib.metadata as metadata
+
+for package in ("transformers", "accelerate", "bitsandbytes", "librosa", "soundfile", "huggingface_hub"):
+    print(f"[docker] {package}={metadata.version(package)}", flush=True)
+PY
+
+RUN python - <<'PY'
+import json
+import os
+import threading
+import time
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+
+model_id = os.environ["MUSIC_FLAMINGO_MODEL"]
+revision = os.environ["MUSIC_FLAMINGO_REVISION"]
+target = Path(os.environ["MUSIC_FLAMINGO_MODEL_DIR"])
+target.parent.mkdir(parents=True, exist_ok=True)
+print(f"[model-image] download_start model={model_id} revision={revision} target={target}", flush=True)
+started = time.time()
+stop_heartbeat = threading.Event()
+
+
+def heartbeat():
+    while not stop_heartbeat.wait(30):
+        files = [p for p in target.rglob("*") if p.is_file()] if target.exists() else []
+        total_bytes = sum(p.stat().st_size for p in files)
+        print(
+            "[model-image] download_heartbeat "
+            f"elapsed_seconds={round(time.time() - started, 1)} "
+            f"file_count={len(files)} total_bytes={total_bytes}",
+            flush=True,
+        )
+
+
+threading.Thread(target=heartbeat, daemon=True).start()
+try:
+    path = snapshot_download(
+        repo_id=model_id,
+        revision=revision,
+        local_dir=str(target),
+        max_workers=int(os.environ.get("MUSIC_FLAMINGO_DOWNLOAD_WORKERS", "8")),
+    )
+finally:
+    stop_heartbeat.set()
+
+files = [p for p in Path(path).rglob("*") if p.is_file()]
+weight_files = sorted(
+    [p for p in Path(path).rglob("*.safetensors")]
+    + [p for p in Path(path).rglob("*.bin")]
+)
+report = {
+    "model_id": model_id,
+    "revision": revision,
+    "model_dir": str(Path(path)),
+    "elapsed_seconds": round(time.time() - started, 3),
+    "total_bytes": sum(p.stat().st_size for p in files),
+    "file_count": len(files),
+    "weight_files": [
+        {"name": p.name, "relative_path": str(p.relative_to(path)), "bytes": p.stat().st_size}
+        for p in weight_files
+    ],
+}
+Path("/opt/models").mkdir(parents=True, exist_ok=True)
+Path("/opt/models/music_flamingo_model_report.json").write_text(
+    json.dumps(report, ensure_ascii=False, indent=2),
+    encoding="utf-8",
+)
+print(json.dumps(report, ensure_ascii=False), flush=True)
+PY
+
+RUN python - <<'PY' \
+    && rm -rf /root/.cache/pip /root/.cache/huggingface /opt/huggingface /tmp/*
+import json
+import os
+from pathlib import Path
+
+model_dir = Path(os.environ["MUSIC_FLAMINGO_MODEL_DIR"])
+report_path = Path("/opt/models/music_flamingo_model_report.json")
+weights = sorted(model_dir.rglob("*.safetensors")) + sorted(model_dir.rglob("*.bin"))
+required = ["config.json", "processor_config.json", "chat_template.jinja"]
+missing = [name for name in required if not (model_dir / name).exists()]
+if not model_dir.exists() or not weights:
+    raise SystemExit(f"model weights missing under {model_dir}")
+if missing:
+    raise SystemExit(f"model required files missing under {model_dir}: {missing}")
+if report_path.exists():
+    print(report_path.read_text(encoding="utf-8"), flush=True)
+else:
+    print(json.dumps({"model_dir": str(model_dir), "weight_count": len(weights)}, ensure_ascii=False), flush=True)
+PY
