@@ -176,6 +176,16 @@ def _cleanup_gate_satisfied(
     )
 
 
+def _cnb_cleanup_receipt_is_acceptable(result: dict[str, Any]) -> bool:
+    """Treat visible cleanup plus pending server GC as a completed cleanup atom."""
+
+    return (
+        bool(result.get("visible_cleanup_complete"))
+        and not result.get("failures")
+        and (bool(result.get("clean")) or bool(result.get("server_gc_pending")))
+    )
+
+
 def run_weekly_run(
     *,
     workspace: str | Path,
@@ -229,6 +239,10 @@ def run_weekly_run(
         raise ValueError("cnb_transport must be lfs or git-objects")
     delivery_path: Path | None = _resolve_workspace_path(delivery, root) if delivery else None
     delivery_supplied = delivery is not None
+    resume_reason = "verified supplied delivery resumes after Music Flamingo analysis"
+    required_commands: tuple[str, ...] = () if delivery_supplied else ("kugou-cli", "claude")
+    if publish and not skip_peers:
+        required_commands += ("rsync",)
     explicit_ranks = list(rank_ids)
     profile_path = Path(chart_profile).expanduser().resolve() if chart_profile else DEFAULT_CHART_PROFILE
     profile = None if explicit_ranks else _load_chart_profile(profile_path)
@@ -245,7 +259,7 @@ def run_weekly_run(
                 audio_root=audio_path,
                 peers_file=None if skip_peers else peers_path,
                 publish=publish and not skip_peers,
-                required_commands=("kugou-cli", "claude", *( ("rsync",) if publish and not skip_peers else () )),
+                required_commands=required_commands,
             )
             outputs.update(preflight)
             if not preflight["valid"]:
@@ -268,27 +282,40 @@ def run_weekly_run(
             "cnb_storage_preflight",
             inputs={"policy": str(cnb_storage_policy_path), "transport": cnb_transport},
         ) as outputs:
-            command = [
-                sys.executable,
-                str(scripts_dir / "cnb_storage_lifecycle.py"),
-                "inspect",
-                "--policy",
-                str(cnb_storage_policy_path),
-                "--transport",
-                cnb_transport,
-            ]
-            completed = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
-            lines = [line for line in completed.stdout.splitlines() if line.strip()]
-            if lines:
-                try:
-                    outputs.update(json.loads(lines[-1]))
-                except json.JSONDecodeError:
-                    outputs["stdout"] = completed.stdout[-2000:]
-            if completed.returncode != 0:
-                raise RuntimeError(
-                    "CNB object storage is not clean before this weekly-run invocation: "
-                    f"{completed.stderr.strip() or outputs}"
+            if delivery_supplied:
+                if delivery_path is None or not delivery_path.is_file():
+                    raise RuntimeError(f"supplied canonical delivery does not exist: {delivery_path}")
+                entries = load_campaign_delivery_file(delivery_path, expected_count=expected_count)
+                outputs.update(
+                    {
+                        "status": "skipped",
+                        "reason": resume_reason,
+                        "delivery": str(delivery_path),
+                        "delivery_count": len(entries),
+                    }
                 )
+            else:
+                command = [
+                    sys.executable,
+                    str(scripts_dir / "cnb_storage_lifecycle.py"),
+                    "inspect",
+                    "--policy",
+                    str(cnb_storage_policy_path),
+                    "--transport",
+                    cnb_transport,
+                ]
+                completed = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
+                lines = [line for line in completed.stdout.splitlines() if line.strip()]
+                if lines:
+                    try:
+                        outputs.update(json.loads(lines[-1]))
+                    except json.JSONDecodeError:
+                        outputs["stdout"] = completed.stdout[-2000:]
+                if completed.returncode != 0:
+                    raise RuntimeError(
+                        "CNB object storage is not clean before this weekly-run invocation: "
+                        f"{completed.stderr.strip() or outputs}"
+                    )
 
         chart_dir = run_dir / "charts"
         capture_results: list[dict[str, Any]] = []
@@ -304,122 +331,134 @@ def run_weekly_run(
                 "termination": profile.get("termination") if profile else "single_page",
             },
         ) as outputs:
-            charts = (
-                [{"rank_id": rank_id} for rank_id in explicit_ranks]
-                if explicit_ranks
-                else profile["charts"]
-            )
-            for chart in charts:
-                rank_id = str(chart["rank_id"])
-                page = chart_page
-                while True:
-                    command = [
-                        sys.executable,
-                        str(scripts_dir / "capture_kugou_chart.py"),
-                        "--run-id",
-                        run_id,
-                        "--rank-id",
-                        rank_id,
-                        "--page",
-                        str(page),
-                        "--size",
-                        str(capture_size),
-                        "--output-dir",
-                        str(chart_dir),
-                        "--operations-file",
-                        str(operations_path),
-                    ]
-                    if proxy:
-                        command.extend(["--proxy", proxy])
-                    result, _ = _json_command(command, cwd=root, timeout_seconds=min(timeout_seconds, 300))
-                    capture_results.append(result)
-                    if capture_mode == "explicit_page":
-                        break
-                    source_records = int(result.get("source_records", 0))
-                    if source_records == 0 or source_records < capture_size:
-                        break
-                    page += 1
-                    if page - chart_page >= int(profile["max_pages"]):
-                        raise RuntimeError(
-                            f"Kugou chart pagination exceeded max_pages={profile['max_pages']}: rank_id={rank_id}"
-                        )
-            total_source_records = sum(int(item.get("source_records", 0)) for item in capture_results)
-            if capture_mode == "full_profile" and total_source_records < int(profile["minimum_total_source_records"]):
-                raise RuntimeError(
-                    "full Kugou chart profile captured too few records: "
-                    f"{total_source_records} < {profile['minimum_total_source_records']}"
+            if delivery_supplied:
+                outputs.update({"status": "skipped", "reason": resume_reason})
+            else:
+                charts = (
+                    [{"rank_id": rank_id} for rank_id in explicit_ranks]
+                    if explicit_ranks
+                    else profile["charts"]
                 )
-            outputs.update(
-                {
-                    "mode": capture_mode,
-                    "profile": str(profile_path) if profile else None,
-                    "captures": capture_results,
-                    "count": len(capture_results),
-                    "source_records": total_source_records,
-                }
-            )
+                for chart in charts:
+                    rank_id = str(chart["rank_id"])
+                    page = chart_page
+                    while True:
+                        command = [
+                            sys.executable,
+                            str(scripts_dir / "capture_kugou_chart.py"),
+                            "--run-id",
+                            run_id,
+                            "--rank-id",
+                            rank_id,
+                            "--page",
+                            str(page),
+                            "--size",
+                            str(capture_size),
+                            "--output-dir",
+                            str(chart_dir),
+                            "--operations-file",
+                            str(operations_path),
+                        ]
+                        if proxy:
+                            command.extend(["--proxy", proxy])
+                        result, _ = _json_command(command, cwd=root, timeout_seconds=min(timeout_seconds, 300))
+                        capture_results.append(result)
+                        if capture_mode == "explicit_page":
+                            break
+                        source_records = int(result.get("source_records", 0))
+                        if source_records == 0 or source_records < capture_size:
+                            break
+                        page += 1
+                        if page - chart_page >= int(profile["max_pages"]):
+                            raise RuntimeError(
+                                f"Kugou chart pagination exceeded max_pages={profile['max_pages']}: rank_id={rank_id}"
+                            )
+                total_source_records = sum(int(item.get("source_records", 0)) for item in capture_results)
+                if capture_mode == "full_profile" and total_source_records < int(profile["minimum_total_source_records"]):
+                    raise RuntimeError(
+                        "full Kugou chart profile captured too few records: "
+                        f"{total_source_records} < {profile['minimum_total_source_records']}"
+                    )
+                outputs.update(
+                    {
+                        "mode": capture_mode,
+                        "profile": str(profile_path) if profile else None,
+                        "captures": capture_results,
+                        "count": len(capture_results),
+                        "source_records": total_source_records,
+                    }
+                )
 
         merged_chart = run_dir / "chart-songs.json"
         with atom(context, "chart_dedupe", inputs={"captures": [item["songs"] for item in capture_results]}) as outputs:
-            summary = _merge_chart_exports(
-                [Path(item["songs"]) for item in capture_results], merged_chart, run_id=run_id
-            )
-            outputs.update({**summary, "songs": str(merged_chart)})
+            if delivery_supplied:
+                outputs.update({"status": "skipped", "reason": resume_reason})
+            else:
+                summary = _merge_chart_exports(
+                    [Path(item["songs"]) for item in capture_results], merged_chart, run_id=run_id
+                )
+                outputs.update({**summary, "songs": str(merged_chart)})
 
         queue_path = run_dir / "download_queue.jsonl"
-        queue_manifest: dict[str, Any]
+        queue_manifest: dict[str, Any] = {}
         with atom(context, "historical_dedupe", inputs={"inventory": str(inventory_path), "source": str(merged_chart)}) as outputs:
-            inventory_command = [
-                sys.executable,
-                str(scripts_dir / "build_song_inventory.py"),
-                "--db",
-                str(root / "data" / "music_trends.sqlite"),
-                "--progress",
-                str(progress_path),
-                "--inventory",
-                str(inventory_path),
-                "--audio-root",
-                str(audio_path),
-            ]
-            inventory_result, _ = _json_command(inventory_command, cwd=root, timeout_seconds=min(timeout_seconds, 600))
-            queue_command = [
-                sys.executable,
-                str(scripts_dir / "prepare_download_queue.py"),
-                "--source",
-                str(merged_chart),
-                "--inventory",
-                str(inventory_path),
-                "--output",
-                str(queue_path),
-                "--audio-root",
-                str(audio_path),
-            ]
-            queue_manifest, _ = _json_command(queue_command, cwd=root, timeout_seconds=min(timeout_seconds, 600))
-            outputs.update({"inventory": inventory_result, "queue": queue_manifest})
+            if delivery_supplied:
+                outputs.update({"status": "skipped", "reason": resume_reason})
+            else:
+                inventory_command = [
+                    sys.executable,
+                    str(scripts_dir / "build_song_inventory.py"),
+                    "--db",
+                    str(root / "data" / "music_trends.sqlite"),
+                    "--progress",
+                    str(progress_path),
+                    "--inventory",
+                    str(inventory_path),
+                    "--audio-root",
+                    str(audio_path),
+                ]
+                inventory_result, _ = _json_command(inventory_command, cwd=root, timeout_seconds=min(timeout_seconds, 600))
+                queue_command = [
+                    sys.executable,
+                    str(scripts_dir / "prepare_download_queue.py"),
+                    "--source",
+                    str(merged_chart),
+                    "--inventory",
+                    str(inventory_path),
+                    "--output",
+                    str(queue_path),
+                    "--audio-root",
+                    str(audio_path),
+                ]
+                queue_manifest, _ = _json_command(queue_command, cwd=root, timeout_seconds=min(timeout_seconds, 600))
+                outputs.update({"inventory": inventory_result, "queue": queue_manifest})
 
         with atom(context, "claude_download", inputs={"queue": str(queue_path), "dry_run": download_dry_run}) as outputs:
-            command = [
-                sys.executable,
-                str(scripts_dir / "run_claude_download.py"),
-                "--workspace",
-                str(root),
-                "--source",
-                str(merged_chart),
-                "--run-id",
-                run_id,
-                "--operations-file",
-                str(operations_path),
-                "--timeout-seconds",
-                str(timeout_seconds),
-            ]
-            if proxy:
-                command.extend(["--proxy", proxy])
-            if download_dry_run:
-                command.append("--dry-run")
-            if download_max_items is not None:
-                command.extend(["--max-items", str(download_max_items)])
-            download_result, _ = _json_command(command, cwd=root, timeout_seconds=timeout_seconds + 30)
-            outputs.update(download_result)
+            if delivery_supplied:
+                outputs.update({"status": "skipped", "reason": resume_reason})
+            else:
+                command = [
+                    sys.executable,
+                    str(scripts_dir / "run_claude_download.py"),
+                    "--workspace",
+                    str(root),
+                    "--source",
+                    str(merged_chart),
+                    "--run-id",
+                    run_id,
+                    "--operations-file",
+                    str(operations_path),
+                    "--timeout-seconds",
+                    str(timeout_seconds),
+                ]
+                if proxy:
+                    command.extend(["--proxy", proxy])
+                if download_dry_run:
+                    command.append("--dry-run")
+                if download_max_items is not None:
+                    command.extend(["--max-items", str(download_max_items)])
+                download_result, _ = _json_command(command, cwd=root, timeout_seconds=timeout_seconds + 30)
+                outputs.update(download_result)
 
         fallback_run_id = f"{run_id}-fallback"
         with atom(
@@ -427,31 +466,48 @@ def run_weekly_run(
             "fallback_download",
             inputs={"run_id": fallback_run_id, "dry_run": download_dry_run},
         ) as outputs:
-            fallback_command = [
-                sys.executable,
-                str(scripts_dir / "run_claude_fallback.py"),
-                "--workspace",
-                str(root),
-                "--run-id",
-                fallback_run_id,
-                "--operations-file",
-                str(operations_path),
-                "--timeout-seconds",
-                str(timeout_seconds),
-            ]
-            if proxy:
-                fallback_command.extend(["--proxy", proxy])
-            if download_dry_run:
-                fallback_command.append("--dry-run")
-            fallback_result, _ = _json_command(fallback_command, cwd=root, timeout_seconds=timeout_seconds + 30)
-            outputs.update(fallback_result)
+            if delivery_supplied:
+                outputs.update({"status": "skipped", "reason": resume_reason})
+            else:
+                fallback_command = [
+                    sys.executable,
+                    str(scripts_dir / "run_claude_fallback.py"),
+                    "--workspace",
+                    str(root),
+                    "--run-id",
+                    fallback_run_id,
+                    "--operations-file",
+                    str(operations_path),
+                    "--timeout-seconds",
+                    str(timeout_seconds),
+                ]
+                if proxy:
+                    fallback_command.extend(["--proxy", proxy])
+                if download_dry_run:
+                    fallback_command.append("--dry-run")
+                fallback_result, _ = _json_command(fallback_command, cwd=root, timeout_seconds=timeout_seconds + 30)
+                outputs.update(fallback_result)
+
+        if delivery_supplied:
+            with atom(
+                context,
+                "cnb_input_materialization",
+                inputs={"delivery": str(delivery_path) if delivery_path else None},
+            ) as outputs:
+                outputs.update({"status": "skipped", "reason": resume_reason})
 
         if delivery_path is None and cnb_command:
             delivery_path = run_dir / "cnb" / "canonical_delivery.jsonl"
         with atom(context, "cnb_analysis", inputs={"delivery": str(delivery_path) if delivery_path else None, "command": cnb_command}) as outputs:
             if delivery_supplied and delivery_path is not None and delivery_path.is_file():
-                entries = load_campaign_delivery_file(delivery_path)
-                outputs.update({"status": "supplied_delivery", "delivery": str(delivery_path), "count": len(entries)})
+                entries = load_campaign_delivery_file(delivery_path, expected_count=expected_count)
+                outputs.update(
+                    {
+                        "status": "supplied_delivery_validated",
+                        "delivery": str(delivery_path),
+                        "count": len(entries),
+                    }
+                )
             elif cnb_command and delivery_path is not None:
                 delivery_path.parent.mkdir(parents=True, exist_ok=True)
                 env = os.environ.copy()
@@ -615,10 +671,13 @@ def run_weekly_run(
                     except json.JSONDecodeError:
                         outputs["stdout"] = completed.stdout[-2000:]
                 if completed.returncode != 0:
-                    raise RuntimeError(
-                        "CNB object storage cleanup did not verify: "
-                        f"{completed.stderr.strip() or outputs}"
-                    )
+                    if _cnb_cleanup_receipt_is_acceptable(outputs):
+                        outputs["status"] = "succeeded_with_server_gc_pending"
+                    else:
+                        raise RuntimeError(
+                            "CNB object storage cleanup did not verify: "
+                            f"{completed.stderr.strip() or outputs}"
+                        )
 
     return {
         "workflow": "weekly-run",

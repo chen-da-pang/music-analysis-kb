@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Delete local audio after the knowledge-base release is verified.
+"""Delete only locally present audio proven to be in the verified knowledge base.
 
 The inventory remains the deduplication authority. Purged records keep their
 identity and historical path but are marked ``purged_after_analysis``; future
 queue preparation therefore skips them without requiring the audio file.
+Downloaded tracks without a matching source-track entry remain untouched for
+future Music Flamingo analysis.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ def atomic_write_json(path: Path, value: Any) -> None:
             os.unlink(name)
 
 
-def validate_release(knowledge_db: Path, expected_count: int) -> dict[str, int]:
+def validate_release(knowledge_db: Path) -> tuple[dict[str, int], dict[str, set[str]]]:
     connection = sqlite3.connect(f"{knowledge_db.resolve().as_uri()}?mode=ro", uri=True)
     try:
         counts = {
@@ -50,14 +52,36 @@ def validate_release(knowledge_db: Path, expected_count: int) -> dict[str, int]:
                 "SELECT COUNT(*) FROM source_track WHERE source_url IS NOT NULL AND trim(source_url) <> ''"
             ).fetchone()[0],
         }
+        source_ids: dict[str, set[str]] = {}
+        for source_name, source_track_id in connection.execute(
+            "SELECT lower(source_name), source_track_id FROM source_track"
+        ):
+            source_ids.setdefault(str(source_name), set()).add(str(source_track_id))
     except sqlite3.Error as exc:
         raise RuntimeError(f"知识库缺少可验证的链接/来源表，不能删除音频: {exc}") from exc
     finally:
         connection.close()
-    for key, value in counts.items():
-        if int(value) < expected_count:
-            raise RuntimeError(f"知识库校验不足: {key}={value}, expected>={expected_count}")
-    return {key: int(value) for key, value in counts.items()}
+    normalized = {key: int(value) for key, value in counts.items()}
+    if normalized["campaign_delivery_provenance"] <= 0:
+        raise RuntimeError("知识库没有 campaign delivery provenance，不能删除音频")
+    if normalized["source_tracks"] <= 0 or normalized["source_links"] != normalized["source_tracks"]:
+        raise RuntimeError(
+            "知识库 source link 不完整，不能删除音频: "
+            f"source_tracks={normalized['source_tracks']} source_links={normalized['source_links']}"
+        )
+    return normalized, source_ids
+
+
+def source_track_is_analyzed(song: dict[str, Any], source_ids: dict[str, set[str]]) -> bool:
+    platform = str(song.get("platform") or "kugou").strip().lower()
+    raw_id = str(song.get("platform_track_key") or "").strip()
+    identity_key = str(song.get("identity_key") or "").strip()
+    if not raw_id and ":" in identity_key:
+        raw_id = identity_key.split(":", 1)[1]
+    candidates = {identity_key, raw_id}
+    if raw_id:
+        candidates.update({f"{platform}-{raw_id}", f"{platform}:{raw_id}"})
+    return any(candidate in source_ids.get(platform, set()) for candidate in candidates if candidate)
 
 
 def prune(
@@ -71,23 +95,66 @@ def prune(
     songs = [song for song in inventory.get("songs", []) if isinstance(song, dict)]
     if len(songs) != expected_count:
         raise RuntimeError(f"inventory 歌曲数为 {len(songs)}，不是预期的 {expected_count}")
-    incomplete = [
-        song.get("identity_key")
-        for song in songs
-        if song.get("download", {}).get("status") != "downloaded"
-    ]
-    if incomplete:
-        raise RuntimeError(f"仍有 {len(incomplete)} 首歌曲未完成入库，不能删除音频")
-    release_counts = validate_release(knowledge_db, expected_count)
+    release_counts, source_ids = validate_release(knowledge_db)
     root = audio_root.expanduser().resolve()
-    files = [path for path in root.rglob("*") if path.is_file()] if root.exists() else []
-    bytes_total = sum(path.stat().st_size for path in files)
+    present_paths: dict[int, Path] = {}
+    directory_owners: dict[Path, set[int]] = {}
+    for index, song in enumerate(songs):
+        relative_path = str(song.get("download", {}).get("path") or "").strip()
+        if not relative_path:
+            continue
+        path = (root / relative_path).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeError(f"inventory 音频路径越界，拒绝删除: {path}") from exc
+        if path.is_file():
+            present_paths[index] = path
+            directory_owners.setdefault(path.parent, set()).add(index)
+
+    eligible_indexes = {
+        index
+        for index, song in enumerate(songs)
+        if index in present_paths
+        and song.get("download", {}).get("status") == "downloaded"
+        and source_track_is_analyzed(song, source_ids)
+    }
+    retained_indexes = set(present_paths) - eligible_indexes
+    already_purged_indexes = {
+        index
+        for index, song in enumerate(songs)
+        if index not in present_paths
+        and song.get("download", {}).get("retention") == "purged_after_analysis"
+    }
+    selected_directories = {
+        directory
+        for directory, owners in directory_owners.items()
+        if owners and owners <= eligible_indexes and directory != root
+    }
+    selected_files = {
+        present_paths[index]
+        for index in eligible_indexes
+        if present_paths[index].parent not in selected_directories
+    }
+    directory_files = {
+        path
+        for directory in selected_directories
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+    deletion_files = directory_files | selected_files
+    bytes_total = sum(path.stat().st_size for path in deletion_files)
     summary: dict[str, Any] = {
         "inventory": str(inventory_path.resolve()),
         "audio_root": str(root),
         "knowledge_db": str(knowledge_db.resolve()),
         "song_count": len(songs),
-        "file_count": len(files),
+        "eligible_song_count": len(eligible_indexes),
+        "retained_song_count": len(retained_indexes),
+        "already_purged_song_count": len(already_purged_indexes),
+        "selected_directory_count": len(selected_directories),
+        "selected_audio_file_count": len(eligible_indexes),
+        "file_count": len(deletion_files),
         "bytes": bytes_total,
         "release_counts": release_counts,
         "dry_run": not confirm,
@@ -95,11 +162,14 @@ def prune(
     if not confirm:
         return summary
 
-    if root.exists():
-        shutil.rmtree(root)
+    for directory in sorted(selected_directories, key=lambda path: len(path.parts), reverse=True):
+        shutil.rmtree(directory)
+    for path in selected_files:
+        path.unlink(missing_ok=True)
     root.mkdir(parents=True, exist_ok=True)
     deleted_at = now_iso()
-    for song in songs:
+    for index in sorted(eligible_indexes):
+        song = songs[index]
         download = song.setdefault("download", {})
         download.update(
             {
@@ -112,10 +182,19 @@ def prune(
             }
         )
     inventory["generated_at"] = deleted_at
-    inventory["audio_retention"] = "purged_after_analysis"
+    inventory["audio_retention"] = (
+        "partial_purge_after_analysis" if retained_indexes else "purged_after_analysis"
+    )
     inventory["audio_files_deleted_at"] = deleted_at
     atomic_write_json(inventory_path, inventory)
-    summary.update({"dry_run": False, "deleted_at": deleted_at, "inventory_updated": True})
+    summary.update(
+        {
+            "dry_run": False,
+            "deleted_at": deleted_at,
+            "inventory_updated": True,
+            "remaining_present_song_count": len(retained_indexes),
+        }
+    )
     return summary
 
 

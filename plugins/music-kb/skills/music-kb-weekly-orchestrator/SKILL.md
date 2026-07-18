@@ -42,6 +42,13 @@ invocation immediately; it must not start a download or bind compute budget.
 Do not create a daily or weekly CNB polling job for this gate. CNB is queried
 only as an external execution prerequisite when the skill is actually run.
 
+When `--delivery` supplies an already completed local Music Flamingo canonical
+delivery, validate that file and its expected count before any downstream
+write. This is a post-analysis resume: record the CNB execution preflight,
+chart, dedupe, download, fallback, and CNB input atoms as explicitly skipped;
+do not query CNB capacity or repeat any pre-analysis work. Continue with the
+idempotent import, snapshot, peer decision, and cleanup atoms.
+
 When `weekly-run` has no explicit `--rank-id`, the chart-capture atom reads
 `references/kugou-chart-profile.json` and captures all configured charts page by
 page until an empty or short page. Explicit `--rank-id` values remain a
@@ -61,9 +68,11 @@ The intended order for each invocation is:
 9. snapshot creation and verification;
 10. peer dry-run, schema/plugin compatibility check, and SSH fan-out;
 11. after the local release succeeds and either all enabled peers succeed or
-    the publisher explicitly uses `--skip-peers`, purge local audio, delete
-    completed CNB run-input/result/ledger refs and temporary assets, and verify
-    final CNB object bytes.
+    the publisher explicitly uses `--skip-peers`, purge only local audio whose
+    platform track ID is present in the verified knowledge base, preserve any
+    downloaded but not-yet-analyzed audio, delete completed CNB
+    run-input/result/ledger refs and temporary assets, and verify final CNB
+    object bytes.
 
 Use the executable `music-kb weekly-run` entry point. Never bypass the run
 state or call the old full-database downloader for a weekly update.
@@ -94,3 +103,8 @@ Git headroom. Pass the same transport to the final CNB cleanup atom. A visible
 ref cleanup is successful even when `server_gc_pending` remains true, but a
 weekly LFS preflight must stay blocked until the counter is below policy or the
 bounded Git-object route passes.
+
+For final cleanup, `visible_cleanup_complete=true`, no deletion failures, and
+`server_gc_pending=true` is a successful cleanup receipt. It means all visible
+disposable refs/assets are gone and only CNB's asynchronous server reclamation
+remains; it must not fail an otherwise completed post-analysis resume.
