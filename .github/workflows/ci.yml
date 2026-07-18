@@ -18,3 +18,22 @@ jobs:
       - run: uv run pytest
       - name: Validate Codex plugin manifest
         run: python ../../.github/scripts/validate-plugin.py
+
+  cnb-runner:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runners/cnb-music-flamingo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install runner contract dependencies
+        run: python -m pip install --disable-pip-version-check pytest PyYAML
+      - name: Run runner contract tests
+        run: python -m pytest -q tests
+      - name: Compile runner Python sources
+        run: python -m compileall -q scripts tools
+      - name: Check runner shell syntax
+        run: find scripts -type f -name '*.sh' -exec bash -n {} +
