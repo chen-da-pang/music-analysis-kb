@@ -9,7 +9,7 @@ from .campaign_delivery import load_campaign_delivery_file
 from .distribution import CommandRunner, publish_snapshot
 from .publish_state import record_publish_result
 from .repository import MusicKBRepository, iter_import_file
-from .snapshot import create_snapshot, verify_snapshot
+from .snapshot import create_snapshot, install_snapshot, verify_snapshot
 
 
 def _with_repository(path: Path, operation: Any) -> dict[str, Any]:
@@ -26,6 +26,8 @@ def run_weekly_update(
     batch_size: int,
     output_dir: str | Path,
     release_name: str | None,
+    local_snapshot_dir: str | Path | None = None,
+    install_local: bool | None = None,
     peers_file: str | Path,
     peer_names: Sequence[str] = (),
     publish: bool = False,
@@ -40,6 +42,12 @@ def run_weekly_update(
 
     db = Path(database).expanduser().resolve()
     source = Path(input_path).expanduser().resolve()
+    local_target = (
+        Path(local_snapshot_dir).expanduser().resolve()
+        if local_snapshot_dir is not None
+        else db.parent
+    )
+    install_local_enabled = publish if install_local is None else bool(install_local)
     if input_kind == "campaign":
         entries = load_campaign_delivery_file(source, expected_count=expected_count)
         import_result = _with_repository(db, lambda repo: repo.import_campaign_delivery(entries))
@@ -78,6 +86,15 @@ def run_weekly_update(
 
     release = create_snapshot(db, output_dir, release_name=release_name)
     verified = verify_snapshot(Path(release["manifest"]))
+    if install_local_enabled:
+        local_install = install_snapshot(release["release_dir"], local_target)
+        local_install.update({"status": "succeeded"})
+    else:
+        local_install = {
+            "status": "skipped",
+            "reason": "publisher-local install disabled",
+            "target_dir": str(local_target),
+        }
     publish_result = publish_snapshot(
         release["release_dir"],
         peers_file,
@@ -105,6 +122,7 @@ def run_weekly_update(
             "release_name": verified["release_name"],
             "sha256": verified["sha256"],
         },
+        "local_install": local_install,
         "publish": publish_result,
         "state_file": str(Path(state_file).expanduser().resolve()) if publish else None,
     }

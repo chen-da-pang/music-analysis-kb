@@ -24,6 +24,7 @@
     "历史去重依赖 song_inventory.json，不依赖音频文件继续存在。",
     "入库前必须保留歌曲级 source_url；source_links 数量必须等于 source_tracks 数量。",
     "只同步 immutable snapshot，不同步 writable master database。",
+    "snapshot 验证成功后，真实发布运行必须先原子切换发布机本地 current.sqlite，再决定是否执行 peer 发布；dry-run 不应隐式修改本地 current.sqlite。",
     "只有本地 release 验证，且所有启用 peer 发布成功或用户显式选择 --skip-peers 后，才允许清理音频。",
     "默认 LFS 周更前必须通过 CNB 对象存储清洁门禁；每次周更成功后删除本批 campaign 分支和临时附件，并以 CNB charge API 的仓库对象字节数确认是否已回收。",
     "CNB 未提供 orphan LFS 的公开管理员删除或 GC API；CNB 支持说明服务端默认在对象失去引用 7 天后由定时 GC 清理（cnb/feedback#4551）。不得把删除分支误报为已回收；必须记录 server_gc_pending 和当前 charge 计数，并显式使用受 5 GB 总量、256 MiB 单文件和 Git 余量门禁限制的 git-objects 回退。"
@@ -61,6 +62,9 @@
     },
     "snapshot": {
       "effective_method": "创建 immutable snapshot，验证 manifest、SHA-256、SQLite integrity、schema 和 canonical-only counts。"
+    },
+    "local_snapshot_install": {
+      "effective_method": "snapshot 验证成功后，在发布机目标目录默认 ~/.music-kb 使用 install_snapshot 复验 manifest 和 SHA-256，复制 release 并原子切换 current.sqlite；记录旧目标、新目标和 release hash。默认仅在真实 publish 运行启用，dry-run 可显式关闭或显式开启。"
     },
     "peer_publish": {
       "effective_method": "读取 publisher-only peers.toml；只同步 release，远端验证后原子切换 current.sqlite；单个 peer 失败可按名称重试。"

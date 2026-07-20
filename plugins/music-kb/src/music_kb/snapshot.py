@@ -228,6 +228,13 @@ def install_snapshot(release_dir: str | Path, target_dir: str | Path) -> dict[st
     releases_dir.mkdir(parents=True, exist_ok=True)
     incoming_dir.mkdir(parents=True, exist_ok=True)
     release_name = str(verified["release_name"])
+    current_link = target / "current.sqlite"
+    if current_link.is_symlink():
+        previous_current = os.readlink(current_link)
+    elif current_link.exists():
+        previous_current = str(current_link)
+    else:
+        previous_current = None
     destination_database = releases_dir / f"{release_name}.sqlite"
     destination_manifest = releases_dir / f"{release_name}.manifest.json"
     temporary_database = incoming_dir / f"{release_name}.sqlite.partial"
@@ -251,6 +258,9 @@ def install_snapshot(release_dir: str | Path, target_dir: str | Path) -> dict[st
     return {
         "installed": True,
         "release_name": release_name,
+        "target_dir": str(target),
+        "previous_current": previous_current,
+        "current_target": os.readlink(target / "current.sqlite"),
         "current_database": str(target / "current.sqlite"),
         "database": str(destination_database),
         "manifest": str(destination_manifest),

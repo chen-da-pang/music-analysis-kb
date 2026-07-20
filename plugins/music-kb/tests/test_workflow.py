@@ -73,6 +73,7 @@ def test_weekly_update_prepares_release_and_only_dry_runs_publish(tmp_path: Path
     assert result["tags"]["skipped"] is True
     assert result["validation"]["valid"] is True
     assert result["release_verification"]["valid"] is True
+    assert result["local_install"]["status"] == "skipped"
     assert result["publish"]["dry_run"] is True
     assert result["publish"]["peers"][0]["status"] == "planned"
     assert not state.exists()
@@ -104,6 +105,9 @@ def test_weekly_update_publish_records_state_after_verified_fanout(tmp_path: Pat
 
     assert result["publish"]["dry_run"] is False
     assert result["publish"]["succeeded_count"] == 1
+    assert result["local_install"]["status"] == "succeeded"
+    assert (tmp_path / "current.sqlite").is_symlink()
+    assert (tmp_path / "current.sqlite").resolve().name == "music-kb-atom3-publish.sqlite"
     assert len(runner.commands) == 6
     saved = load_publish_state(state)
     assert saved["last_publish"]["release_name"] == "music-kb-atom3-publish"

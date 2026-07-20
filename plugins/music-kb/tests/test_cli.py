@@ -212,6 +212,36 @@ def test_peer_inventory_defaults_to_private_local_path(monkeypatch) -> None:
     assert parsed.peers_file == Path("~/.config/music-kb/peers.toml").expanduser()
 
 
+def test_weekly_commands_expose_local_snapshot_install_controls() -> None:
+    parser = cli.build_parser()
+    weekly = parser.parse_args(
+        [
+            "weekly-run",
+            "--run-id",
+            "fixture-run",
+            "--local-snapshot-dir",
+            "/tmp/publisher-client",
+            "--install-local",
+        ]
+    )
+    assert weekly.local_snapshot_dir == Path("/tmp/publisher-client")
+    assert weekly.install_local is True
+
+    update = parser.parse_args(
+        [
+            "weekly-update",
+            "--db",
+            "/tmp/master.sqlite",
+            "--input",
+            "/tmp/input.jsonl",
+            "--output-dir",
+            "/tmp/releases",
+            "--no-install-local",
+        ]
+    )
+    assert update.install_local is False
+
+
 def test_peer_inventory_environment_override(monkeypatch, tmp_path: Path) -> None:
     override = tmp_path / "custom-peers.toml"
     monkeypatch.setenv("MUSIC_KB_PEERS_FILE", str(override))
