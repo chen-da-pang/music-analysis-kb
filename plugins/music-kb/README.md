@@ -16,6 +16,19 @@ uv run music-kb --json doctor
 uv run music-kb-mcp
 ```
 
+## Ask in natural language
+
+The installed plugin does not require users to learn CLI flags, MCP tool names,
+or canonical English tag spellings. Start with an ordinary request such as:
+
+- `找几首带“侧链”或“人声切片”标签的歌，并给我试听链接`
+- `找 5 首有气声女声、偏忧郁氛围的歌曲`
+- `展示这首歌的完整 Music Flamingo 分析，并说明它为什么匹配`
+
+The retrieval Skill checks the local snapshot first, distinguishes controlled
+tag/alias matches from full-text approximations, and preserves each available
+runtime listening link. It does not turn the result into a generation prompt.
+
 The publisher-only `music-kb publish push` command fans out an immutable
 release over SSH/rsync using a private peer TOML file; see
 [`../../docs/operations.md`](../../docs/operations.md). It never carries peer

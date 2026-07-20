@@ -134,6 +134,11 @@ uv run music-kb get rec_example
 The current MCP workflow uses read tools for status, search, title/artist
 resolution, canonical analysis retrieval, and tag facets.
 
+Plugin users can ask in ordinary language, for example `找 5 首有“侧链”和女声的歌`.
+They do not need to know the canonical English tag or MCP syntax. The retrieval
+Skill labels controlled tag/alias matches separately from full-text
+approximations and includes every available runtime listening link.
+
 Campaign analyses receive deterministic, versioned tags for title, artist,
 section, genre, tempo/meter, rhythm, instrumentation, production/mix, harmony,
 vocal style, mood, structure, and lyric/theme retrieval. The raw model output
