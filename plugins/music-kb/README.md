@@ -35,10 +35,13 @@ for an already completed CNB delivery or `--cnb-command <command>` for a
 command that writes the run's `MUSIC_KB_CNB_OUTPUT`; a real run without either
 input stops at the CNB atom. Use `--download-dry-run` and omit
 the cleanup confirmations while reviewing a new workflow. Every production
-`--publish` run must include `--confirm-delete-audio` and
-`--confirm-delete-cnb-storage`. The former preserves dedupe metadata while
-removing local audio; the latter removes CNB campaign inputs/assets and checks
-the authoritative object-byte counter before the run may succeed.
+`--publish` run must include `--confirm-delete-audio`,
+`--confirm-delete-cnb-storage`, and the separate
+`--confirm-delete-cnb-repositories`. The former preserves dedupe metadata while
+removing local audio; the latter two remove CNB campaign inputs/assets and
+policy-allowlisted completed disposable repositories, with post-delete 404,
+charge, organization-volume, and protected-runtime verification before the run
+may succeed.
 
 On a real publish run, the verified release is also installed atomically as the
 publisher's local `~/.music-kb/current.sqlite` (or `--local-snapshot-dir`),

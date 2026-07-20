@@ -177,11 +177,15 @@ def _cleanup_gate_satisfied(
 
 
 def _cnb_cleanup_receipt_is_acceptable(result: dict[str, Any]) -> bool:
-    """Treat visible cleanup plus pending server GC as a completed cleanup atom."""
+    """Accept async GC only after every explicitly required deletion is proven."""
 
+    repository_cleanup_ok = not bool(result.get("repository_cleanup_required")) or bool(
+        result.get("destructive_repository_cleanup_complete")
+    )
     return (
         bool(result.get("visible_cleanup_complete"))
         and not result.get("failures")
+        and repository_cleanup_ok
         and (bool(result.get("clean")) or bool(result.get("server_gc_pending")))
     )
 
@@ -219,6 +223,7 @@ def run_weekly_run(
     skip_peers: bool = False,
     cnb_storage_policy: str | Path = DEFAULT_CNB_STORAGE_POLICY,
     confirm_delete_cnb_storage: bool = False,
+    confirm_delete_cnb_repositories: bool = False,
     cnb_transport: str = "lfs",
 ) -> dict[str, Any]:
     """Run all safe publisher stages and stop at the first failed atom."""
@@ -280,6 +285,8 @@ def run_weekly_run(
                     missing_cleanup_confirmations.append("--confirm-delete-audio")
                 if not confirm_delete_cnb_storage:
                     missing_cleanup_confirmations.append("--confirm-delete-cnb-storage")
+                if not confirm_delete_cnb_repositories:
+                    missing_cleanup_confirmations.append("--confirm-delete-cnb-repositories")
                 if missing_cleanup_confirmations:
                     outputs["missing_cleanup_confirmations"] = missing_cleanup_confirmations
                     raise RuntimeError(
@@ -702,6 +709,7 @@ def run_weekly_run(
             inputs={
                 "policy": str(cnb_storage_policy_path),
                 "confirm": confirm_delete_cnb_storage,
+                "confirm_delete_repositories": confirm_delete_cnb_repositories,
                 "transport": cnb_transport,
             },
         ) as outputs:
@@ -722,6 +730,8 @@ def run_weekly_run(
                     cnb_transport,
                     "--confirm-cleanup",
                 ]
+                if confirm_delete_cnb_repositories:
+                    command.append("--confirm-delete-cnb-repositories")
                 completed = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
                 lines = [line for line in completed.stdout.splitlines() if line.strip()]
                 if lines:

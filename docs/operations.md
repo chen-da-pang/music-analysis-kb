@@ -90,8 +90,11 @@ uv run music-kb --json weekly-run \
 
 Remove `--download-dry-run` only for the approved Claude Code download. Add
 `--publish` after the peer dry-run has been reviewed. Every production publish
-must also include `--confirm-delete-audio --confirm-delete-cnb-storage`; the
-preflight refuses to download when either cleanup confirmation is absent.
+must also include `--confirm-delete-audio`, `--confirm-delete-cnb-storage`, and
+`--confirm-delete-cnb-repositories`; the preflight refuses to download when
+any cleanup confirmation is absent. The repository flag is a separate
+irreversible authorization for exact `disposable_repositories` entries in the
+CNB policy.
 On a real publish, the verified release is atomically installed into the
 publisher's `~/.music-kb/current.sqlite` before peer publication. Use
 `--local-snapshot-dir` to override the target. `--no-install-local` is rejected
@@ -106,10 +109,28 @@ If all visible refs/assets are gone but the counter remains high, the receipt
 must say `server_gc_pending=true`; CNB support documents a default seven-day
 server-side GC window in `cnb/feedback#4551`, and there is no manual LFS-GC API
 in the public surface. The orchestrator must wait/recheck rather than delete
-the runtime image or repository. It may use the explicitly bounded
+the protected runtime image or repository. A policy-allowlisted completed
+disposable repository may be deleted only by the separate confirmation flag,
+after source/workspace checks; its receipt must prove repository 404/zero
+volume, an organization-volume decrease when bytes existed, and protected
+runtime/main preservation. It may use the explicitly bounded
 Git-object route only when that route's own storage gate passes. The
 orchestrator rejects a missing or incomplete source-link set and never treats a
 dry-run or skipped CNB analysis stage as a completed analysis.
+
+When quota blocks a weekly invocation before analysis, the independent
+destructive cleanup atom can remove completed allowlisted repositories without
+waiting for the post-publication stage:
+
+```bash
+python plugins/music-kb/scripts/cnb_storage_lifecycle.py \
+  delete-disposable-repositories \
+  --policy plugins/music-kb/references/cnb-storage-policy.json \
+  --confirm-delete-cnb-repositories
+```
+
+Its exit status is zero only after every target is 404/zero-volume and the
+protected Music Flamingo repository/main/runtime has been reverified.
 
 When `--rank-id` is omitted, `weekly-run` reads the versioned
 `plugins/music-kb/references/kugou-chart-profile.json` and captures all six

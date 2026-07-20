@@ -271,6 +271,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="CNB campaign audio transport; git-objects is the bounded no-cost fallback for pending orphan LFS GC",
     )
     weekly_run.add_argument("--confirm-delete-cnb-storage", action="store_true")
+    weekly_run.add_argument(
+        "--confirm-delete-cnb-repositories",
+        action="store_true",
+        help="Explicitly authorize deletion of allowlisted disposable CNB repositories during cleanup",
+    )
     weekly_run.add_argument("--expected-count", type=int)
     weekly_run.add_argument("--timeout-seconds", type=int, default=86_400)
 
@@ -439,6 +444,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             skip_peers=args.skip_peers,
             cnb_storage_policy=args.cnb_storage_policy,
             confirm_delete_cnb_storage=args.confirm_delete_cnb_storage,
+            confirm_delete_cnb_repositories=args.confirm_delete_cnb_repositories,
             cnb_transport=args.cnb_transport,
         )
         return 0, result

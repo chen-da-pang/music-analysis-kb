@@ -222,10 +222,12 @@ def test_weekly_commands_expose_local_snapshot_install_controls() -> None:
             "--local-snapshot-dir",
             "/tmp/publisher-client",
             "--install-local",
+            "--confirm-delete-cnb-repositories",
         ]
     )
     assert weekly.local_snapshot_dir == Path("/tmp/publisher-client")
     assert weekly.install_local is True
+    assert weekly.confirm_delete_cnb_repositories is True
 
     update = parser.parse_args(
         [

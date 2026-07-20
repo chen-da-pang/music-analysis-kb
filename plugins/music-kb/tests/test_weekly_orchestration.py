@@ -81,6 +81,26 @@ def test_cnb_cleanup_accepts_visible_cleanup_while_server_gc_is_pending() -> Non
             "server_gc_pending": True,
         }
     )
+    assert not _cnb_cleanup_receipt_is_acceptable(
+        {
+            "visible_cleanup_complete": True,
+            "failures": [],
+            "clean": False,
+            "server_gc_pending": True,
+            "repository_cleanup_required": True,
+            "destructive_repository_cleanup_complete": False,
+        }
+    )
+    assert _cnb_cleanup_receipt_is_acceptable(
+        {
+            "visible_cleanup_complete": True,
+            "failures": [],
+            "clean": False,
+            "server_gc_pending": True,
+            "repository_cleanup_required": True,
+            "destructive_repository_cleanup_complete": True,
+        }
+    )
 
 
 def test_weekly_run_rejects_publish_opt_out(tmp_path: Path) -> None:
@@ -297,6 +317,7 @@ def test_real_publish_defaults_to_local_snapshot_install(
         expected_count=2,
         confirm_delete_audio=True,
         confirm_delete_cnb_storage=True,
+        confirm_delete_cnb_repositories=True,
         skip_peers=True,
     )
 

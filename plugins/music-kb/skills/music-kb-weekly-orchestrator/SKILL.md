@@ -89,15 +89,18 @@ defaults to the directory containing the writable master database and can be
 overridden with `--local-snapshot-dir`.
 
 The storage policy is `plugins/music-kb/references/cnb-storage-policy.json`. Every production
-`--publish` run must include `--confirm-delete-audio` and
-`--confirm-delete-cnb-storage`; the invocation gate fails before chart capture
-or download if either is missing. Actual deletion still occurs only after the
-release and either every enabled peer has succeeded or `--skip-peers` was
-explicitly selected. CNB is a
-runtime mirror, so completed result/ledger refs and temporary run assets are
-disposable after local export. Preserve only the code mirror and required
-runtime image; never store the master database or immutable local releases in
-CNB.
+`--publish` run must include `--confirm-delete-audio`,
+`--confirm-delete-cnb-storage`, and the separate
+`--confirm-delete-cnb-repositories`; the invocation gate fails before chart
+capture or download if any is missing. The repository flag is intentionally
+separate because it authorizes irreversible deletion of an entire allowlisted
+CNB repository, not just campaign refs. Actual deletion still occurs only
+after the release and either every enabled peer has succeeded or `--skip-peers`
+was explicitly selected. CNB is a runtime mirror, so completed result/ledger
+refs, temporary run assets, and policy-allowlisted completed disposable
+repositories are disposable after local export. Preserve only the code mirror
+and required runtime image; never store the master database or immutable local
+releases in CNB.
 
 Use LFS only when `cnb_storage_lifecycle.py inspect --transport lfs` proves
 the object-storage policy clean. When CNB's authoritative counter still shows
@@ -115,7 +118,16 @@ ref cleanup is successful even when `server_gc_pending` remains true, but a
 weekly LFS preflight must stay blocked until the counter is below policy or the
 bounded Git-object route passes.
 
-For final cleanup, `visible_cleanup_complete=true`, no deletion failures, and
-`server_gc_pending=true` is a successful cleanup receipt. It means all visible
-disposable refs/assets are gone and only CNB's asynchronous server reclamation
-remains; it must not fail an otherwise completed post-analysis resume.
+For final cleanup, `visible_cleanup_complete=true`,
+`destructive_repository_cleanup_complete=true` when the policy has any
+disposable repositories, and no deletion failures are required. A
+`server_gc_pending=true` receipt is acceptable only after those explicit
+repository deletions have been verified; it means all visible disposable
+refs/assets are gone and only CNB's asynchronous server reclamation remains.
+If a weekly invocation is blocked before analysis by quota, run
+`cnb_storage_lifecycle.py delete-disposable-repositories` with
+`--confirm-delete-cnb-repositories`. This independent atom performs the same
+allowlist, source, workspace, 404/charge, organization-decrease, and
+protected-runtime checks and returns success only when every disposable target
+is actually absent. It does not pretend that visible ref deletion reclaimed
+orphan LFS in a protected repository.
