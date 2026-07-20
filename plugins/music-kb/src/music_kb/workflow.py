@@ -9,7 +9,7 @@ from .campaign_delivery import load_campaign_delivery_file
 from .distribution import CommandRunner, publish_snapshot
 from .publish_state import record_publish_result
 from .repository import MusicKBRepository, iter_import_file
-from .snapshot import create_snapshot, install_snapshot, verify_snapshot
+from .snapshot import create_snapshot, current_snapshot_target, install_snapshot, verify_snapshot
 
 
 def _with_repository(path: Path, operation: Any) -> dict[str, Any]:
@@ -47,6 +47,8 @@ def run_weekly_update(
         if local_snapshot_dir is not None
         else db.parent
     )
+    if publish and install_local is False:
+        raise ValueError("--no-install-local cannot be combined with --publish")
     install_local_enabled = publish if install_local is None else bool(install_local)
     if input_kind == "campaign":
         entries = load_campaign_delivery_file(source, expected_count=expected_count)
@@ -86,14 +88,30 @@ def run_weekly_update(
 
     release = create_snapshot(db, output_dir, release_name=release_name)
     verified = verify_snapshot(Path(release["manifest"]))
+    verification_receipt = {
+        "valid": bool(verified.get("valid")),
+        "manifest": str(verified.get("manifest") or ""),
+        "sha256": str(verified.get("sha256") or ""),
+    }
+    previous_current = current_snapshot_target(local_target)
     if install_local_enabled:
         local_install = install_snapshot(release["release_dir"], local_target)
-        local_install.update({"status": "succeeded"})
+        local_install.update(
+            {
+                "status": "succeeded",
+                "release_sha256": verification_receipt["sha256"],
+                "verification": verification_receipt,
+            }
+        )
     else:
         local_install = {
             "status": "skipped",
             "reason": "publisher-local install disabled",
             "target_dir": str(local_target),
+            "release_name": verified["release_name"],
+            "release_sha256": verification_receipt["sha256"],
+            "verification": verification_receipt,
+            "previous_current": previous_current,
         }
     publish_result = publish_snapshot(
         release["release_dir"],

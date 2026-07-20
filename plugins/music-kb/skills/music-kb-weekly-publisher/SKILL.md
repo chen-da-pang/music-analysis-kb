@@ -97,8 +97,9 @@ the import command returned zero.
    canonical-only counts, and release name must agree.
 7. **Publisher-local install** — on a real publish, verify and atomically
    switch the publisher's `~/.music-kb/current.sqlite` (or the explicit local
-   snapshot target). A dry-run does not change it unless `--install-local` is
-   explicitly supplied.
+   snapshot target). `--no-install-local` cannot be combined with a real
+   publish. A dry-run does not change it unless `--install-local` is explicitly
+   supplied.
 8. **Peer dry-run review** — list every enabled peer, target directory, and
    intended release. Disabled peers are not included unless explicitly named
    for a retry.

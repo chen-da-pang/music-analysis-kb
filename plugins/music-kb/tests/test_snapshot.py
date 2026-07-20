@@ -101,6 +101,24 @@ def test_failed_install_keeps_previous_current_snapshot(master_database, tmp_pat
     assert current.resolve().name == "first-release.sqlite"
 
 
+def test_install_retries_after_readonly_partial_files(master_database, tmp_path: Path) -> None:
+    release = create_snapshot(master_database, tmp_path / "published", release_name="retry-release")
+    target = tmp_path / "client"
+    incoming = target / "incoming"
+    incoming.mkdir(parents=True)
+    database_partial = incoming / "retry-release.sqlite.partial"
+    manifest_partial = incoming / "retry-release.manifest.json.partial"
+    database_partial.write_bytes(b"stale partial database")
+    manifest_partial.write_text("stale partial manifest", encoding="utf-8")
+    os.chmod(database_partial, 0o444)
+    os.chmod(manifest_partial, 0o444)
+
+    installed = install_snapshot(release["release_dir"], target)
+
+    assert Path(installed["current_database"]).is_symlink()
+    assert Path(installed["current_database"]).resolve().name == "retry-release.sqlite"
+
+
 @pytest.mark.parametrize("release_name", ["release;id #", "release name", "../outside", ".", "-starts-with-dash"])
 def test_snapshot_release_name_rejects_shell_unsafe_values(master_database, tmp_path: Path, release_name: str) -> None:
     with pytest.raises(ValidationError, match="release name"):

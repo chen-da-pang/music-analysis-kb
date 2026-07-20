@@ -94,9 +94,10 @@ must also include `--confirm-delete-audio --confirm-delete-cnb-storage`; the
 preflight refuses to download when either cleanup confirmation is absent.
 On a real publish, the verified release is atomically installed into the
 publisher's `~/.music-kb/current.sqlite` before peer publication. Use
-`--local-snapshot-dir` to override the target; use `--no-install-local` only for
-an explicitly exceptional publisher run. Dry-runs do not switch the local
-snapshot unless `--install-local` is supplied.
+`--local-snapshot-dir` to override the target. `--no-install-local` is rejected
+with `--publish`; this invariant cannot be bypassed by a normal production
+run. Dry-runs do not switch the local snapshot unless `--install-local` is
+supplied.
 Deletion waits until the local release and every enabled peer have succeeded,
 unless `--skip-peers` was explicitly selected. CNB cleanup is not considered
 object-reclaimed merely because a branch was deleted: `cnb charge

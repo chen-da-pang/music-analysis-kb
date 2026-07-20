@@ -14,7 +14,7 @@ from .campaign_delivery import load_campaign_delivery_file
 from .operation_context import RunContext, atom, atomic_write_json
 from .preflight import run_preflight
 from .repository import MusicKBRepository
-from .snapshot import create_snapshot, install_snapshot, verify_snapshot
+from .snapshot import create_snapshot, current_snapshot_target, install_snapshot, verify_snapshot
 
 
 DEFAULT_CHART_PROFILE = Path(__file__).resolve().parents[2] / "references" / "kugou-chart-profile.json"
@@ -238,6 +238,8 @@ def run_weekly_run(
         if local_snapshot_dir is not None
         else database_path.parent
     )
+    if publish and install_local is False:
+        raise ValueError("--no-install-local cannot be combined with --publish")
     install_local_enabled = publish if install_local is None else bool(install_local)
     peers_path = _resolve_workspace_path(peers_file, root) if peers_file else None
     state_path = _resolve_workspace_path(state_file, root)
@@ -585,6 +587,27 @@ def run_weekly_run(
                 "enabled": install_local_enabled,
             },
         ) as outputs:
+            verification_receipt = None
+            release_sha256 = ""
+            release_name = None
+            previous_current = current_snapshot_target(local_snapshot_path)
+            if release_verification is not None:
+                release_sha256 = str(release_verification.get("sha256") or "")
+                release_name = release_verification.get("release_name")
+                verification_receipt = {
+                    "valid": bool(release_verification.get("valid")),
+                    "manifest": str(release_verification.get("manifest") or ""),
+                    "sha256": release_sha256,
+                }
+            outputs.update(
+                {
+                    "release_name": release_name,
+                    "release_sha256": release_sha256,
+                    "verification": verification_receipt,
+                    "target_dir": str(local_snapshot_path),
+                    "previous_current": previous_current,
+                }
+            )
             if release_result is None:
                 outputs.update({"status": "skipped", "reason": "no release in dry-run"})
             elif not install_local_enabled:
@@ -592,11 +615,14 @@ def run_weekly_run(
                     {
                         "status": "skipped",
                         "reason": "publisher-local install disabled",
-                        "target_dir": str(local_snapshot_path),
                     }
                 )
             else:
-                local_install_result = install_snapshot(release_result["release_dir"], local_snapshot_path)
+                try:
+                    local_install_result = install_snapshot(release_result["release_dir"], local_snapshot_path)
+                except Exception:
+                    outputs["current_target"] = current_snapshot_target(local_snapshot_path)
+                    raise
                 outputs.update({"status": "succeeded", **local_install_result})
 
         publish_result: dict[str, Any] = {"status": "skipped", "reason": "no release in dry-run"}

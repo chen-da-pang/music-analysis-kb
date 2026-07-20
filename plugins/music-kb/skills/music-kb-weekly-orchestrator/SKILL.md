@@ -80,12 +80,13 @@ The intended order for each invocation is:
 Use the executable `music-kb weekly-run` entry point. Never bypass the run
 state or call the old full-database downloader for a weekly update.
 
-The publisher-local install is separate from peer publication. A successful
-real publish run switches the publisher's `current.sqlite` even when
-`--skip-peers` is explicitly selected; a dry-run does not switch it unless
-`--install-local` is explicitly supplied. The target defaults to the directory
-containing the writable master database and can be overridden with
-`--local-snapshot-dir`.
+The publisher-local install is separate from peer publication. Every real
+publish run switches the publisher's `current.sqlite`, even when `--skip-peers`
+is explicitly selected. `--no-install-local` is rejected with `--publish` so a
+successful peer/cleanup path cannot leave the publisher stale. A dry-run does
+not switch it unless `--install-local` is explicitly supplied. The target
+defaults to the directory containing the writable master database and can be
+overridden with `--local-snapshot-dir`.
 
 The storage policy is `plugins/music-kb/references/cnb-storage-policy.json`. Every production
 `--publish` run must include `--confirm-delete-audio` and
