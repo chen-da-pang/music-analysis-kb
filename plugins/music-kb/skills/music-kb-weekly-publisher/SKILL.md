@@ -95,13 +95,18 @@ the import command returned zero.
    current search projection.
 6. **Release verification** — snapshot manifest, SHA-256, SQLite integrity,
    canonical-only counts, and release name must agree.
-7. **Peer dry-run review** — list every enabled peer, target directory, and
+7. **Publisher-local install** — on a real publish, verify and atomically
+   switch the publisher's `~/.music-kb/current.sqlite` (or the explicit local
+   snapshot target). `--no-install-local` cannot be combined with a real
+   publish. A dry-run does not change it unless `--install-local` is explicitly
+   supplied.
+8. **Peer dry-run review** — list every enabled peer, target directory, and
    intended release. Disabled peers are not included unless explicitly named
    for a retry.
-8. **Fan-out verification** — each peer's installed music-kb plugin version and
+9. **Fan-out verification** — each peer's installed music-kb plugin version and
    schema are checked remotely before staging; then the release is verified
    and atomically installed. One offline peer does not cancel other peers.
-9. **State review** — `publish-state.json` records release SHA, per-peer
+10. **State review** — `publish-state.json` records release SHA, per-peer
    attempt status, and last successful release without raw command output.
 
 ## Failure and retry rules

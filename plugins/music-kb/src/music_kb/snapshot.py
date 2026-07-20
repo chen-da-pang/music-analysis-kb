@@ -215,6 +215,18 @@ def verify_snapshot(manifest_path: str | Path) -> dict[str, Any]:
     }
 
 
+def current_snapshot_target(target_dir: str | Path) -> str | None:
+    """Return the existing local current target without following the link."""
+
+    target = Path(target_dir).expanduser().resolve()
+    current_link = target / "current.sqlite"
+    if current_link.is_symlink():
+        return os.readlink(current_link)
+    if current_link.exists():
+        return str(current_link)
+    return None
+
+
 def install_snapshot(release_dir: str | Path, target_dir: str | Path) -> dict[str, Any]:
     """Verify first, then atomically switch a local client's current.sqlite."""
 
@@ -228,11 +240,16 @@ def install_snapshot(release_dir: str | Path, target_dir: str | Path) -> dict[st
     releases_dir.mkdir(parents=True, exist_ok=True)
     incoming_dir.mkdir(parents=True, exist_ok=True)
     release_name = str(verified["release_name"])
+    previous_current = current_snapshot_target(target)
     destination_database = releases_dir / f"{release_name}.sqlite"
     destination_manifest = releases_dir / f"{release_name}.manifest.json"
     temporary_database = incoming_dir / f"{release_name}.sqlite.partial"
     temporary_manifest = incoming_dir / f"{release_name}.manifest.json.partial"
 
+    # A process can stop after chmod(0444) but before os.replace(). Remove
+    # both staged files so the next invocation can resume safely.
+    temporary_database.unlink(missing_ok=True)
+    temporary_manifest.unlink(missing_ok=True)
     shutil.copy2(source_database, temporary_database)
     if sha256_file(temporary_database) != str(verified["sha256"]):
         temporary_database.unlink(missing_ok=True)
@@ -251,6 +268,9 @@ def install_snapshot(release_dir: str | Path, target_dir: str | Path) -> dict[st
     return {
         "installed": True,
         "release_name": release_name,
+        "target_dir": str(target),
+        "previous_current": previous_current,
+        "current_target": current_snapshot_target(target),
         "current_database": str(target / "current.sqlite"),
         "database": str(destination_database),
         "manifest": str(destination_manifest),

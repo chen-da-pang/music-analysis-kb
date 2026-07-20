@@ -47,6 +47,29 @@ def _add_database_argument(parser: argparse.ArgumentParser, *, required: bool = 
     )
 
 
+def _add_local_snapshot_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--local-snapshot-dir",
+        type=Path,
+        default=None,
+        help="Publisher snapshot target (default: the directory containing --db)",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--install-local",
+        dest="install_local",
+        action="store_true",
+        help="Install the verified release into the publisher-local current.sqlite",
+    )
+    group.add_argument(
+        "--no-install-local",
+        dest="install_local",
+        action="store_false",
+        help="Do not switch the publisher-local current.sqlite",
+    )
+    parser.set_defaults(install_local=None)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="music-kb",
@@ -182,6 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--batch-size", type=int, default=500)
     weekly.add_argument("--output-dir", type=Path, required=True)
     weekly.add_argument("--release-name", default=None)
+    _add_local_snapshot_arguments(weekly)
     weekly.add_argument("--peers-file", type=Path, default=default_peer_inventory())
     weekly.add_argument("--peer", action="append", default=[])
     weekly.add_argument(
@@ -222,6 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     weekly_run.add_argument("--output-dir", type=Path, default=Path("~/.music-kb/releases").expanduser())
     weekly_run.add_argument("--release-name", default=None)
+    _add_local_snapshot_arguments(weekly_run)
     weekly_run.add_argument("--peers-file", type=Path, default=default_peer_inventory())
     weekly_run.add_argument("--peer", action="append", default=[])
     weekly_run.add_argument("--publish", action="store_true")
@@ -373,6 +398,8 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             batch_size=args.batch_size,
             output_dir=args.output_dir,
             release_name=args.release_name,
+            local_snapshot_dir=args.local_snapshot_dir,
+            install_local=args.install_local,
             peers_file=args.peers_file,
             peer_names=args.peer,
             publish=args.publish,
@@ -394,6 +421,8 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             operations_file=args.operations_file,
             output_dir=args.output_dir,
             release_name=args.release_name,
+            local_snapshot_dir=args.local_snapshot_dir,
+            install_local=args.install_local,
             peers_file=args.peers_file,
             peer_names=args.peer,
             publish=args.publish,

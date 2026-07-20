@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from music_kb.schema import initialize_database
 from music_kb.weekly_orchestration import (
@@ -80,6 +83,34 @@ def test_cnb_cleanup_accepts_visible_cleanup_while_server_gc_is_pending() -> Non
     )
 
 
+def test_weekly_run_rejects_publish_opt_out(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="cannot be combined with --publish"):
+        run_weekly_run(
+            workspace=tmp_path,
+            run_id="publish-opt-out",
+            rank_ids=(),
+            chart_page=1,
+            chart_size=100,
+            chart_profile=None,
+            database=tmp_path / "master.sqlite",
+            inventory=tmp_path / "data" / "song_inventory.json",
+            audio_root=tmp_path / "audio",
+            legacy_progress=tmp_path / "download_progress.json",
+            operations_file=OPERATIONS,
+            output_dir=tmp_path / "releases",
+            release_name="publish-opt-out",
+            local_snapshot_dir=tmp_path / "publisher",
+            install_local=False,
+            peers_file=None,
+            peer_names=(),
+            publish=True,
+            delivery=None,
+            cnb_command=None,
+            chart_database=None,
+            state_file=tmp_path / "publish-state.json",
+        )
+
+
 def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path: Path) -> None:
     delivery = tmp_path / "canonical_delivery.jsonl"
     rows = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines() if line]
@@ -141,5 +172,137 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
     assert state["atoms"]["cnb_analysis"]["outputs"]["count"] == 2
     assert state["atoms"]["knowledge_import"]["status"] == "succeeded"
     assert state["atoms"]["snapshot"]["outputs"]["verification"]["valid"] is True
+    assert state["atoms"]["local_snapshot_install"]["outputs"]["status"] == "skipped"
     assert state["atoms"]["peer_publish"]["outputs"]["reason"] == "peer sync explicitly skipped"
     assert not (tmp_path / "data" / "weekly_runs" / "supplied-delivery-resume" / "charts").exists()
+
+
+def test_supplied_delivery_can_install_publisher_snapshot_explicitly_in_dry_run(tmp_path: Path) -> None:
+    delivery = tmp_path / "canonical_delivery.jsonl"
+    rows = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines() if line]
+    for row in rows:
+        row["source_url"] = f"https://www.kugou.com/mixsong/{row['id']}.html"
+    delivery.write_text(
+        "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    database = tmp_path / "master.sqlite"
+    initialize_database(database)
+    inventory = tmp_path / "data" / "song_inventory.json"
+    inventory.parent.mkdir(parents=True)
+    inventory.write_text('{"schema_version":1,"songs":[]}\n', encoding="utf-8")
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    progress = tmp_path / "download_progress.json"
+    progress.write_text("{}\n", encoding="utf-8")
+    local_target = tmp_path / "publisher-client"
+
+    result = run_weekly_run(
+        workspace=tmp_path,
+        run_id="supplied-delivery-local-install",
+        rank_ids=(),
+        chart_page=1,
+        chart_size=100,
+        chart_profile=None,
+        database=database,
+        inventory=inventory,
+        audio_root=audio_root,
+        legacy_progress=progress,
+        operations_file=OPERATIONS,
+        output_dir=tmp_path / "releases",
+        release_name="fixture-local-install",
+        local_snapshot_dir=local_target,
+        install_local=True,
+        peers_file=None,
+        peer_names=(),
+        publish=False,
+        delivery=delivery,
+        cnb_command=None,
+        chart_database=None,
+        state_file=tmp_path / "publish-state.json",
+        expected_count=2,
+        skip_peers=True,
+    )
+
+    state = json.loads(Path(result["state"]).read_text(encoding="utf-8"))
+    atom = state["atoms"]["local_snapshot_install"]
+    assert atom["status"] == "succeeded"
+    assert atom["outputs"]["installed"] is True
+    assert atom["outputs"]["previous_current"] is None
+    assert atom["outputs"]["release_sha256"] == state["atoms"]["snapshot"]["outputs"]["verification"]["sha256"]
+    assert atom["outputs"]["verification"]["valid"] is True
+    assert (local_target / "current.sqlite").is_symlink()
+    assert (local_target / "current.sqlite").resolve().name == "fixture-local-install.sqlite"
+
+
+def test_real_publish_defaults_to_local_snapshot_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    delivery = tmp_path / "canonical_delivery.jsonl"
+    rows = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines() if line]
+    for row in rows:
+        row["source_url"] = f"https://www.kugou.com/mixsong/{row['id']}.html"
+    delivery.write_text(
+        "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    database = tmp_path / "master.sqlite"
+    initialize_database(database)
+    inventory = tmp_path / "data" / "song_inventory.json"
+    inventory.parent.mkdir(parents=True)
+    inventory.write_text('{"schema_version":1,"songs":[{}]}\n', encoding="utf-8")
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    progress = tmp_path / "download_progress.json"
+    progress.write_text("{}\n", encoding="utf-8")
+
+    def fake_json_command(command, *, cwd, timeout_seconds, env=None):
+        return {"status": "succeeded"}, subprocess.CompletedProcess(command, 0, "", "")
+
+    def fake_subprocess_run(command, **kwargs):
+        payload = {
+            "visible_cleanup_complete": True,
+            "failures": [],
+            "clean": True,
+            "server_gc_pending": False,
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr("music_kb.weekly_orchestration._json_command", fake_json_command)
+    monkeypatch.setattr("music_kb.weekly_orchestration.subprocess.run", fake_subprocess_run)
+
+    result = run_weekly_run(
+        workspace=tmp_path,
+        run_id="supplied-delivery-default-local-install",
+        rank_ids=(),
+        chart_page=1,
+        chart_size=100,
+        chart_profile=None,
+        database=database,
+        inventory=inventory,
+        audio_root=audio_root,
+        legacy_progress=progress,
+        operations_file=OPERATIONS,
+        output_dir=tmp_path / "releases",
+        release_name="default-local-install",
+        peers_file=None,
+        peer_names=(),
+        publish=True,
+        delivery=delivery,
+        cnb_command=None,
+        chart_database=None,
+        state_file=tmp_path / "publish-state.json",
+        expected_count=2,
+        confirm_delete_audio=True,
+        confirm_delete_cnb_storage=True,
+        skip_peers=True,
+    )
+
+    state = json.loads(Path(result["state"]).read_text(encoding="utf-8"))
+    atom = state["atoms"]["local_snapshot_install"]
+    assert atom["inputs"]["enabled"] is True
+    assert atom["outputs"]["status"] == "succeeded"
+    assert (tmp_path / "current.sqlite").is_symlink()
+    assert (tmp_path / "current.sqlite").resolve().name == "default-local-install.sqlite"

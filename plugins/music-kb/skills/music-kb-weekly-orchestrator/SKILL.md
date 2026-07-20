@@ -66,8 +66,11 @@ The intended order for each invocation is:
 7. CNB campaign submission, wait, and quality verification;
 8. canonical import, tag enrichment, and source-link completeness gate;
 9. snapshot creation and verification;
-10. peer dry-run, schema/plugin compatibility check, and SSH fan-out;
-11. after the local release succeeds and either all enabled peers succeed or
+10. on a real publish run, atomically install the verified release into the
+    publisher's local `~/.music-kb/current.sqlite` (or the explicit local
+    snapshot target);
+11. peer dry-run, schema/plugin compatibility check, and SSH fan-out;
+12. after the local release succeeds and either all enabled peers succeed or
     the publisher explicitly uses `--skip-peers`, purge only local audio whose
     platform track ID is present in the verified knowledge base, preserve any
     downloaded but not-yet-analyzed audio, delete completed CNB
@@ -76,6 +79,14 @@ The intended order for each invocation is:
 
 Use the executable `music-kb weekly-run` entry point. Never bypass the run
 state or call the old full-database downloader for a weekly update.
+
+The publisher-local install is separate from peer publication. Every real
+publish run switches the publisher's `current.sqlite`, even when `--skip-peers`
+is explicitly selected. `--no-install-local` is rejected with `--publish` so a
+successful peer/cleanup path cannot leave the publisher stale. A dry-run does
+not switch it unless `--install-local` is explicitly supplied. The target
+defaults to the directory containing the writable master database and can be
+overridden with `--local-snapshot-dir`.
 
 The storage policy is `plugins/music-kb/references/cnb-storage-policy.json`. Every production
 `--publish` run must include `--confirm-delete-audio` and

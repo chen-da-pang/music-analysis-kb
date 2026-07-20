@@ -73,6 +73,7 @@ def test_weekly_update_prepares_release_and_only_dry_runs_publish(tmp_path: Path
     assert result["tags"]["skipped"] is True
     assert result["validation"]["valid"] is True
     assert result["release_verification"]["valid"] is True
+    assert result["local_install"]["status"] == "skipped"
     assert result["publish"]["dry_run"] is True
     assert result["publish"]["peers"][0]["status"] == "planned"
     assert not state.exists()
@@ -104,11 +105,42 @@ def test_weekly_update_publish_records_state_after_verified_fanout(tmp_path: Pat
 
     assert result["publish"]["dry_run"] is False
     assert result["publish"]["succeeded_count"] == 1
+    assert result["local_install"]["status"] == "succeeded"
+    assert (tmp_path / "current.sqlite").is_symlink()
+    assert (tmp_path / "current.sqlite").resolve().name == "music-kb-atom3-publish.sqlite"
     assert len(runner.commands) == 6
     saved = load_publish_state(state)
     assert saved["last_publish"]["release_name"] == "music-kb-atom3-publish"
     assert saved["peers"]["fixture-peer"]["last_success"]["status"] == "succeeded"
     assert saved["peers"]["fixture-peer"]["last_success"]["release_sha256"] == result["release_verification"]["sha256"]
+    assert result["local_install"]["release_sha256"] == result["release_verification"]["sha256"]
+    assert result["local_install"]["verification"]["valid"] is True
+
+
+def test_weekly_update_rejects_publish_opt_out(tmp_path: Path) -> None:
+    database = tmp_path / "master.sqlite"
+    initialize_database(database)
+    key = tmp_path / "id_ed25519"
+    key.write_text("fixture", encoding="utf-8")
+    peers = tmp_path / "peers.toml"
+    _peers(peers, key)
+
+    with pytest.raises(ValueError, match="cannot be combined with --publish"):
+        run_weekly_update(
+            database=database,
+            input_path=FIXTURE,
+            input_kind="generic",
+            expected_count=None,
+            batch_size=1,
+            output_dir=tmp_path / "releases",
+            release_name="publish-opt-out",
+            local_snapshot_dir=tmp_path / "publisher",
+            install_local=False,
+            peers_file=peers,
+            publish=True,
+            state_file=tmp_path / "publish-state.json",
+            runner=NoTransport(),
+        )
 
 
 def test_campaign_weekly_update_rejects_missing_source_links(tmp_path: Path) -> None:

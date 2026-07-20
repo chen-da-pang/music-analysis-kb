@@ -14,7 +14,7 @@ from .campaign_delivery import load_campaign_delivery_file
 from .operation_context import RunContext, atom, atomic_write_json
 from .preflight import run_preflight
 from .repository import MusicKBRepository
-from .snapshot import create_snapshot, verify_snapshot
+from .snapshot import create_snapshot, current_snapshot_target, install_snapshot, verify_snapshot
 
 
 DEFAULT_CHART_PROFILE = Path(__file__).resolve().parents[2] / "references" / "kugou-chart-profile.json"
@@ -201,6 +201,8 @@ def run_weekly_run(
     operations_file: str | Path,
     output_dir: str | Path,
     release_name: str | None,
+    local_snapshot_dir: str | Path | None = None,
+    install_local: bool | None = None,
     peers_file: str | Path | None,
     peer_names: Sequence[str],
     publish: bool,
@@ -231,6 +233,14 @@ def run_weekly_run(
     progress_path = _resolve_workspace_path(legacy_progress, root)
     operations_path = _resolve_workspace_path(operations_file, root)
     output_dir_path = _resolve_workspace_path(output_dir, root)
+    local_snapshot_path = (
+        _resolve_workspace_path(local_snapshot_dir, root)
+        if local_snapshot_dir is not None
+        else database_path.parent
+    )
+    if publish and install_local is False:
+        raise ValueError("--no-install-local cannot be combined with --publish")
+    install_local_enabled = publish if install_local is None else bool(install_local)
     peers_path = _resolve_workspace_path(peers_file, root) if peers_file else None
     state_path = _resolve_workspace_path(state_file, root)
     chart_db_path = _resolve_workspace_path(chart_database, root) if chart_database else None
@@ -566,6 +576,55 @@ def run_weekly_run(
                 release_verification = verify_snapshot(Path(release_result["manifest"]))
                 outputs.update({"release": release_result, "verification": release_verification})
 
+        local_install_result: dict[str, Any] | None = None
+        with atom(
+            context,
+            "local_snapshot_install",
+            inputs={
+                "release_dir": str(release_result["release_dir"]) if release_result else None,
+                "release_sha256": str((release_verification or {}).get("sha256") or ""),
+                "target_dir": str(local_snapshot_path),
+                "enabled": install_local_enabled,
+            },
+        ) as outputs:
+            verification_receipt = None
+            release_sha256 = ""
+            release_name = None
+            previous_current = current_snapshot_target(local_snapshot_path)
+            if release_verification is not None:
+                release_sha256 = str(release_verification.get("sha256") or "")
+                release_name = release_verification.get("release_name")
+                verification_receipt = {
+                    "valid": bool(release_verification.get("valid")),
+                    "manifest": str(release_verification.get("manifest") or ""),
+                    "sha256": release_sha256,
+                }
+            outputs.update(
+                {
+                    "release_name": release_name,
+                    "release_sha256": release_sha256,
+                    "verification": verification_receipt,
+                    "target_dir": str(local_snapshot_path),
+                    "previous_current": previous_current,
+                }
+            )
+            if release_result is None:
+                outputs.update({"status": "skipped", "reason": "no release in dry-run"})
+            elif not install_local_enabled:
+                outputs.update(
+                    {
+                        "status": "skipped",
+                        "reason": "publisher-local install disabled",
+                    }
+                )
+            else:
+                try:
+                    local_install_result = install_snapshot(release_result["release_dir"], local_snapshot_path)
+                except Exception:
+                    outputs["current_target"] = current_snapshot_target(local_snapshot_path)
+                    raise
+                outputs.update({"status": "succeeded", **local_install_result})
+
         publish_result: dict[str, Any] = {"status": "skipped", "reason": "no release in dry-run"}
         with atom(context, "peer_publish", inputs={"publish": publish, "peers_file": str(peers_path) if peers_path else None}) as outputs:
             if release_result is None:
@@ -684,5 +743,6 @@ def run_weekly_run(
         "run_id": run_id,
         "run_dir": str(run_dir),
         "state": str(run_dir / "run-state.json"),
+        "local_install": local_install_result,
         "publish": publish_result,
     }

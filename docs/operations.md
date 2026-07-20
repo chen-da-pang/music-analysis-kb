@@ -70,8 +70,9 @@ when a colleague uses a nonstandard Python installation.
 ### Complete weekly-run orchestration
 
 For a recurring update, use the publisher-only orchestrator so the capture,
-dedupe, Claude Code download, CNB handoff, import, link gate, snapshot, peer
-plan, and cleanup receipts share one run id:
+dedupe, Claude Code download, CNB handoff, import, link gate, snapshot,
+publisher-local current-snapshot install, peer plan, and cleanup receipts share
+one run id:
 
 ```bash
 uv run music-kb --json weekly-run \
@@ -91,6 +92,12 @@ Remove `--download-dry-run` only for the approved Claude Code download. Add
 `--publish` after the peer dry-run has been reviewed. Every production publish
 must also include `--confirm-delete-audio --confirm-delete-cnb-storage`; the
 preflight refuses to download when either cleanup confirmation is absent.
+On a real publish, the verified release is atomically installed into the
+publisher's `~/.music-kb/current.sqlite` before peer publication. Use
+`--local-snapshot-dir` to override the target. `--no-install-local` is rejected
+with `--publish`; this invariant cannot be bypassed by a normal production
+run. Dry-runs do not switch the local snapshot unless `--install-local` is
+supplied.
 Deletion waits until the local release and every enabled peer have succeeded,
 unless `--skip-peers` was explicitly selected. CNB cleanup is not considered
 object-reclaimed merely because a branch was deleted: `cnb charge

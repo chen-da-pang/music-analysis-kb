@@ -38,6 +38,13 @@ def test_snapshot_is_canonical_only_and_installs_atomically(master_database, fix
     current = Path(installed["current_database"])
     assert current.is_symlink()
     assert current.resolve().name == "music-kb-2026w29.sqlite"
+    assert installed["previous_current"] is None
+    assert installed["current_target"] == "releases/music-kb-2026w29.sqlite"
+
+    second = create_snapshot(master_database, tmp_path / "published", release_name="music-kb-2026w29-r2")
+    installed_again = install_snapshot(second["release_dir"], tmp_path / "client")
+    assert installed_again["previous_current"] == "releases/music-kb-2026w29.sqlite"
+    assert Path(installed_again["current_database"]).resolve().name == "music-kb-2026w29-r2.sqlite"
 
 
 def test_snapshot_removes_noncanonical_recording_identity_data(master_database, fixture_payload, tmp_path: Path) -> None:
@@ -73,6 +80,43 @@ def test_verify_rejects_tampered_database(master_database, tmp_path: Path) -> No
         handle.write(b"tampered")
     with pytest.raises(SnapshotVerificationError, match="SHA-256 mismatch"):
         verify_snapshot(release["manifest"])
+
+
+def test_failed_install_keeps_previous_current_snapshot(master_database, tmp_path: Path) -> None:
+    first = create_snapshot(master_database, tmp_path / "published", release_name="first-release")
+    installed = install_snapshot(first["release_dir"], tmp_path / "client")
+    current = Path(installed["current_database"])
+
+    second = create_snapshot(master_database, tmp_path / "published", release_name="second-release")
+    manifest_path = Path(second["manifest"])
+    os.chmod(manifest_path, 0o644)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["database"]["sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(SnapshotVerificationError, match="SHA-256 mismatch"):
+        install_snapshot(second["release_dir"], tmp_path / "client")
+
+    assert current.is_symlink()
+    assert current.resolve().name == "first-release.sqlite"
+
+
+def test_install_retries_after_readonly_partial_files(master_database, tmp_path: Path) -> None:
+    release = create_snapshot(master_database, tmp_path / "published", release_name="retry-release")
+    target = tmp_path / "client"
+    incoming = target / "incoming"
+    incoming.mkdir(parents=True)
+    database_partial = incoming / "retry-release.sqlite.partial"
+    manifest_partial = incoming / "retry-release.manifest.json.partial"
+    database_partial.write_bytes(b"stale partial database")
+    manifest_partial.write_text("stale partial manifest", encoding="utf-8")
+    os.chmod(database_partial, 0o444)
+    os.chmod(manifest_partial, 0o444)
+
+    installed = install_snapshot(release["release_dir"], target)
+
+    assert Path(installed["current_database"]).is_symlink()
+    assert Path(installed["current_database"]).resolve().name == "retry-release.sqlite"
 
 
 @pytest.mark.parametrize("release_name", ["release;id #", "release name", "../outside", ".", "-starts-with-dash"])

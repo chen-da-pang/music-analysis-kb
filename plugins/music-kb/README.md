@@ -40,5 +40,11 @@ the cleanup confirmations while reviewing a new workflow. Every production
 removing local audio; the latter removes CNB campaign inputs/assets and checks
 the authoritative object-byte counter before the run may succeed.
 
+On a real publish run, the verified release is also installed atomically as the
+publisher's local `~/.music-kb/current.sqlite` (or `--local-snapshot-dir`),
+independently of whether peer SSH is explicitly skipped. Dry-runs leave the
+local current snapshot unchanged unless `--install-local` is supplied;
+`--no-install-local` is rejected for real publishes.
+
 Read the repository-level [README](../../README.md) for the publisher/client
 workflow and deployment rules.

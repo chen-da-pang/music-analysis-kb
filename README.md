@@ -80,6 +80,9 @@ uv run music-kb snapshot create \
   --output-dir "$HOME/.music-kb/releases" \
   --name music-kb-2026w29
 
+# A real weekly publish atomically switches the publisher-local current.sqlite
+# after release verification; use snapshot install for a manual fallback.
+
 # Peer details remain in a private local TOML file, never in this repository.
 uv run music-kb --json publish push \
   --release-dir "$HOME/.music-kb/releases/music-kb-2026w29" \
