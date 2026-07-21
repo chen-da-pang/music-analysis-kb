@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import tempfile
 import time
@@ -20,6 +21,9 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+MATCH_POLICY = "exact_title_compatible_artist_v1"
 
 
 def now_iso() -> str:
@@ -53,6 +57,40 @@ def item_timeout(seconds: float):
 def normalize(value: Any) -> str:
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
     return " ".join(text.split())
+
+
+def normalize_title(value: Any) -> str:
+    """Normalize only presentation-equivalent title differences.
+
+    NFKC handles full-width punctuation. Removing whitespace immediately
+    around brackets accepts harmless API formatting differences without
+    collapsing meaningful words or version qualifiers.
+    """
+
+    return re.sub(r"\s*([()\[\]{}])\s*", r"\1", normalize(value))
+
+
+def split_artists(value: Any) -> set[str]:
+    text = normalize(value)
+    if not text or text == "null":
+        return set()
+    return {
+        normalize(part)
+        for part in re.split(r"\s*(?:、|&|/|,|，|;|；)\s*", text)
+        if normalize(part)
+    }
+
+
+def artists_match(target: Any, found: Any) -> bool:
+    wanted = normalize(target)
+    candidate = normalize(found)
+    if not wanted or not candidate:
+        return False
+    if wanted == candidate:
+        return wanted != "null"
+    wanted_artists = split_artists(wanted)
+    candidate_artists = split_artists(candidate)
+    return bool(wanted_artists and candidate_artists) and wanted_artists == candidate_artists
 
 
 def title_artist_key(platform: str, title: Any, artist: Any) -> str:
@@ -121,23 +159,33 @@ def file_record(path: Path, audio_root: Path) -> dict[str, Any]:
 
 
 def choose_match(results: list[Any], title: str, artist: str) -> Any | None:
-    if not results:
-        return None
-    wanted_title = normalize(title)
-    wanted_artist = normalize(artist)
+    """Return only a result that preserves the queue item's song identity."""
+
+    wanted_title = normalize_title(title)
     for item in results:
-        item_title = normalize(getattr(item, "song_name", ""))
-        item_artist = normalize(getattr(item, "singers", ""))
-        if item_title == wanted_title and wanted_artist and wanted_artist in item_artist:
+        item_title = normalize_title(getattr(item, "song_name", ""))
+        if item_title == wanted_title and artists_match(artist, getattr(item, "singers", "")):
             return item
-    for item in results:
-        if normalize(getattr(item, "song_name", "")) == wanted_title:
-            return item
-    for item in results:
-        item_title = normalize(getattr(item, "song_name", ""))
-        if wanted_title in item_title or item_title in wanted_title:
-            return item
-    return results[0]
+    return None
+
+
+def result_metadata(item: Any) -> dict[str, Any]:
+    return {
+        "source": str(getattr(item, "source", None) or "KugouMusicClient"),
+        "matched_title": str(getattr(item, "song_name", "") or ""),
+        "matched_artist": str(getattr(item, "singers", "") or ""),
+        "match_policy": MATCH_POLICY,
+    }
+
+
+def rejected_candidate_metadata(results: list[Any], limit: int = 10) -> list[dict[str, str]]:
+    return [
+        {
+            "title": str(getattr(item, "song_name", "") or ""),
+            "artist": str(getattr(item, "singers", "") or ""),
+        }
+        for item in results[:limit]
+    ]
 
 
 def update_inventory_song(inventory: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
@@ -290,9 +338,26 @@ def run_download(
             continue
 
         best = choose_match(found, title, artist)
+        if best is None:
+            summary["no_results"] += 1
+            audit = {
+                "reason": "no_compatible_title_artist_match",
+                "match_policy": MATCH_POLICY,
+                "candidate_count": len(found),
+                "rejected_candidates": rejected_candidate_metadata(found),
+            }
+            record_attempt(item, "no_results", **audit)
+            progress["results"][identity] = {"status": "no_results", "at": now_iso(), **audit}
+            atomic_write_json(progress_path, progress)
+            inventory["generated_at"] = now_iso()
+            inventory["counts"] = recompute_counts(inventory)
+            atomic_write_json(inventory_path, inventory)
+            continue
+
+        matched = result_metadata(best)
         try:
             with item_timeout(item_timeout_seconds):
-                downloaded = client.download([best]) if best is not None else []
+                downloaded = client.download([best])
             raw_path = None
             if downloaded:
                 result = downloaded[0]
@@ -300,7 +365,7 @@ def run_download(
             path = path_for_download(raw_path, audio_root) if raw_path else None
             if not path or not path.is_file():
                 raise RuntimeError(f"musicdl 未返回已存在的文件路径: {raw_path!r}")
-            item["download"] = file_record(path, audio_root)
+            item["download"] = {**file_record(path, audio_root), **matched}
             progress.setdefault("downloaded", {})[identity] = {
                 "title": title,
                 "artist": artist,
@@ -312,12 +377,14 @@ def run_download(
                 "platform": candidate.get("platform", "kugou"),
                 "platform_track_key": candidate.get("platform_track_key"),
                 "identity_key": candidate.get("identity_key"),
+                **matched,
             }
             summary["downloaded"] += 1
             progress["results"][identity] = {
                 "status": "downloaded",
                 "path": item["download"]["path"],
                 "at": now_iso(),
+                **matched,
             }
             log(f"OK {path}")
         except Exception as exc:  # pragma: no cover - network/filesystem-dependent
