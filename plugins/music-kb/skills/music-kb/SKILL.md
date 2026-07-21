@@ -112,6 +112,25 @@ labels when the actual result evidence supports them.
   direction, or silently broadens the request. Do not make the user repeat the
   original conditions.
 
+### Make follow-up actions learnable in the answer
+
+- When the response offers a representative set or says that the current
+  direction can be expanded, include this short, plain-language guide in the
+  same response, immediately after that offer:
+
+  > 你可以这样继续：
+  > - “再来一些”：保持这个方向，保留已展示的歌，再补充一批之前没展示过的歌。
+  > - “换一批”：保持这个方向，换一批之前没展示过的新歌，替换当前展示；之前的结果仍留在对话记录里。
+
+- Use the exact user-facing phrases “再来一些” and “换一批”; do not expose
+  internal terms such as branch, direction state, cursor, or retrieval limit
+  as prerequisites for using them.
+- If the user invokes one of these phrases, briefly confirm the action in
+  ordinary language when the behavior might otherwise be unclear (for example,
+  “我会沿这个方向补充一批，并保留刚才的结果”); do not silently change the
+  direction. Do not repeat the full guide in unrelated answers or when no
+  continuation is being offered.
+
 ### Keep the conversation recoverable
 
 - When the user selects a branch, set it as the current conversation context
@@ -165,6 +184,10 @@ Keep the answer scannable and evidence-based:
 - For each candidate, show `歌名 — 艺人`, the returned matching evidence, and a
   Markdown listening link when `listen_url` is non-empty. Use the runtime URL
   exactly; never fabricate or substitute a missing link.
+- When a branch is representative or explicitly expandable, include the short
+  “你可以这样继续” guide that defines “再来一些” and “换一批” in the same
+  answer. Keep it adjacent to the continuation offer rather than making the
+  user infer the commands from the Skill's internal rules.
 - Keep recording IDs, full tag dumps, provenance, and raw canonical text hidden
   unless the user asks. Do not claim popularity, mood, genre, or lyric meaning
   that is absent from returned evidence.

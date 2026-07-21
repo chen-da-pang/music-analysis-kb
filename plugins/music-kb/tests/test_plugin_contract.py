@@ -41,6 +41,12 @@ def test_conversation_ux_onboarding_and_contract_are_present() -> None:
         "换一批",
         "currently displayed batch",
         "Neither phrase creates a new interpretation branch",
+        "Make follow-up actions learnable in the answer",
+        "你可以这样继续",
+        "保持这个方向",
+        "保留已展示的歌",
+        "替换当前展示",
+        "之前的结果仍留在对话记录里",
         "listen_url",
         "search_projection_state",
         "ordered for retrieval",
@@ -103,12 +109,37 @@ def test_conversation_ux_metric_pack_catches_withdrawn_fixed_quantity(tmp_path: 
     assert deferred["status"] == "fail"
 
 
+def test_conversation_ux_metric_pack_catches_missing_followup_guidance(tmp_path: Path) -> None:
+    plugin = tmp_path / "plugin"
+    (plugin / ".codex-plugin").mkdir(parents=True)
+    (plugin / "skills" / "music-kb").mkdir(parents=True)
+    (plugin / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps({"interface": {"defaultPrompt": []}}), encoding="utf-8"
+    )
+    (plugin / "skills" / "music-kb" / "SKILL.md").write_text(
+        "Follow-up requests keep the selected direction: 再来一些 换一批 "
+        "current selected direction currently displayed batch Neither phrase creates a new interpretation branch\n",
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[1]
+    emitter = root / "evals" / "conversation-ux" / "emit-conversation-ux.py"
+    completed = subprocess.run(
+        ["python3", str(emitter), str(plugin), "plugin"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+    guidance = next(check for check in result["checks"] if check["id"] == "music-kb-ux-followup-guidance")
+    assert guidance["status"] == "fail"
+
+
 def test_plugin_version_is_kept_in_sync() -> None:
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     lockfile = (root / "uv.lock").read_text(encoding="utf-8")
     version = manifest["version"]
-    assert version == "0.7.2"
+    assert version == "0.7.3"
     assert f'version = "{version}"' in pyproject
     assert f'name = "music-kb"\nversion = "{version}"' in lockfile

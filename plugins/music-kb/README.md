@@ -24,9 +24,16 @@ with a representative, expandable page; small sets can be shown in full.
 The exact first-page quantity and the semantics of “再来一些” versus “换一批”
 now keep the selected direction: “再来一些” appends new results to the current
 list, while “换一批” replaces the displayed batch with new results from that
-same direction. The Skill must not invent a permanent default quantity or
-silently broaden a request. Every listening link shown to a user comes from the
-runtime `listen_url` returned by the read-only MCP path.
+same direction. Whenever a response offers an expandable representative set,
+it also tells the user in plain language:
+
+> 你可以这样继续：
+> - “再来一些”：保持这个方向，保留已展示的歌，再补充一批之前没展示过的歌。
+> - “换一批”：保持这个方向，换一批之前没展示过的新歌，替换当前展示；之前的结果仍留在对话记录里。
+
+The Skill must not invent a permanent default quantity or silently broaden a
+request. Every listening link shown to a user comes from the runtime
+`listen_url` returned by the read-only MCP path.
 
 From this directory:
 

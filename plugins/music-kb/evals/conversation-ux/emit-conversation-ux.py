@@ -150,6 +150,30 @@ def main() -> None:
         )
     )
 
+    guidance_phrases = (
+        "Make follow-up actions learnable in the answer",
+        "你可以这样继续",
+        "“再来一些”",
+        "保持这个方向",
+        "保留已展示的歌",
+        "“换一批”",
+        "替换当前展示",
+        "之前的结果仍留在对话记录里",
+        "Do not repeat the full guide in unrelated answers",
+    )
+    guidance_ok = bool(skill) and all(phrase in normalized_skill for phrase in guidance_phrases)
+    checks.append(
+        _check(
+            "music-kb-ux-followup-guidance",
+            guidance_ok,
+            "Expandable results teach the user the plain-language follow-up actions in the same answer.",
+            evidence=[phrase for phrase in guidance_phrases if phrase in normalized_skill],
+            remediation=[
+                "Add a compact in-answer guide that distinguishes append from replacement while keeping the current direction."
+            ],
+        )
+    )
+
     evidence_phrases = (
         "ordered for retrieval",
         "small shortlist",
