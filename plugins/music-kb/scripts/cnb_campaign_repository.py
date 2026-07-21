@@ -396,6 +396,8 @@ def campaign_receipt_binding_errors(
         errors.append("receipt run_id does not match the requested run")
     if expected_repository and receipt.get("repository") != expected_repository:
         errors.append("receipt repository does not match the strict run-id/prefix mapping")
+    if expected_repository and receipt.get("repository_name") != expected_repository.split("/", 1)[-1]:
+        errors.append("receipt repository_name does not match the strict repository slug")
     expected_prefix = str(policy.get("campaign_repository_prefix", ""))
     if not str(receipt.get("repository_prefix", "")) == expected_prefix:
         errors.append("receipt repository_prefix does not match policy")
