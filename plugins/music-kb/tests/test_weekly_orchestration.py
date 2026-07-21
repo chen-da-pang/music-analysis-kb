@@ -21,7 +21,9 @@ FIXTURE = Path(__file__).parent / "fixtures" / "kugou_canonical_delivery.jsonl"
 OPERATIONS = Path(__file__).parents[1] / "references" / "validated-operations.json"
 
 
-def test_resolve_campaign_repository_root_from_nested_data_workspace(tmp_path: Path) -> None:
+def test_resolve_campaign_repository_root_from_nested_data_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace = tmp_path / "publisher-workspace"
     repository = workspace / "music-analysis-kb"
     repository.mkdir(parents=True)
@@ -29,6 +31,11 @@ def test_resolve_campaign_repository_root_from_nested_data_workspace(tmp_path: P
     subprocess.run(
         ["git", "-C", str(repository), "remote", "add", "origin", "https://github.com/chen-da-pang/music-analysis-kb"],
         check=True,
+    )
+    source_root = Path(__file__).resolve().parents[3]
+    monkeypatch.setattr(
+        "music_kb.weekly_orchestration._git_worktree_clean",
+        lambda path: path != source_root,
     )
 
     assert _resolve_campaign_repository_root(workspace) == repository.resolve()

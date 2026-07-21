@@ -143,7 +143,37 @@ def _canonical_remote(repository_root: Path) -> str:
     return remote
 
 
-def _resolve_campaign_repository_root(workspace: Path) -> Path:
+def _git_worktree_clean(repository_root: Path) -> bool:
+    completed = subprocess.run(
+        ["git", "-C", str(repository_root), "status", "--porcelain"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return completed.returncode == 0 and not completed.stdout.strip()
+
+
+def _git_commit_reachable(repository_root: Path, commit: str | None) -> bool:
+    if not commit:
+        return True
+    exists = subprocess.run(
+        ["git", "-C", str(repository_root), "cat-file", "-e", f"{commit}^{{commit}}"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if exists.returncode != 0:
+        return False
+    reachable = subprocess.run(
+        ["git", "-C", str(repository_root), "merge-base", "--is-ancestor", commit, "refs/remotes/origin/main"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return reachable.returncode == 0
+
+
+def _resolve_campaign_repository_root(workspace: Path, preferred_commit: str | None = None) -> Path:
     """Find the GitHub source repo when data and code use separate roots."""
 
     candidates: list[Path] = [workspace]
@@ -157,7 +187,7 @@ def _resolve_campaign_repository_root(workspace: Path) -> Path:
     if source_root not in candidates:
         candidates.append(source_root)
 
-    discovered: list[tuple[bool, Path]] = []
+    discovered: list[tuple[bool, bool, bool, bool, Path]] = []
     seen: set[Path] = set()
     for candidate in candidates:
         top = _git_toplevel(candidate)
@@ -165,12 +195,21 @@ def _resolve_campaign_repository_root(workspace: Path) -> Path:
             continue
         seen.add(top)
         discovered.append(
-            (_canonical_remote(top) == "https://github.com/chen-da-pang/music-analysis-kb", top)
+            (
+                _canonical_remote(top) == "https://github.com/chen-da-pang/music-analysis-kb",
+                _git_worktree_clean(top),
+                top == source_root,
+                _git_commit_reachable(top, preferred_commit),
+                top,
+            )
         )
-    for is_music_repository, top in discovered:
-        if is_music_repository:
-            return top
-    return discovered[0][1] if discovered else workspace
+    expected = [item for item in discovered if item[0] and item[3]]
+    if not expected and preferred_commit:
+        expected = [item for item in discovered if item[0]]
+    if expected:
+        expected.sort(key=lambda item: (not item[1], not item[2]))
+        return expected[0][4]
+    return discovered[0][4] if discovered else workspace
 
 
 def _inventory_database_path(workspace: Path, chart_database: Path | None) -> Path:
@@ -411,7 +450,7 @@ def run_weekly_run(
     peers_path = _resolve_workspace_path(peers_file, root) if peers_file else None
     state_path = _resolve_workspace_path(state_file, root)
     chart_db_path = _resolve_workspace_path(chart_database, root) if chart_database else None
-    campaign_repository_root = _resolve_campaign_repository_root(root)
+    campaign_repository_root = _resolve_campaign_repository_root(root, cnb_github_commit)
     cnb_storage_policy_path = Path(cnb_storage_policy).expanduser().resolve()
     if cnb_transport not in {"lfs", "git-objects"}:
         raise ValueError("cnb_transport must be lfs or git-objects")
