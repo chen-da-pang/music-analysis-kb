@@ -115,6 +115,68 @@ def _git_head_commit(repository_root: Path) -> str:
     return commit
 
 
+def _git_toplevel(path: Path) -> Path | None:
+    completed = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    return Path(value).expanduser().resolve() if value else None
+
+
+def _canonical_remote(repository_root: Path) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repository_root), "remote", "get-url", "origin"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return ""
+    remote = completed.stdout.strip().lower().removesuffix(".git").rstrip("/")
+    if remote.startswith("git@github.com:"):
+        remote = "https://github.com/" + remote.removeprefix("git@github.com:")
+    return remote
+
+
+def _resolve_campaign_repository_root(workspace: Path) -> Path:
+    """Find the GitHub source repo when data and code use separate roots."""
+
+    candidates: list[Path] = [workspace]
+    try:
+        candidates.extend(
+            child for child in workspace.iterdir() if child.is_dir() and (child / ".git").exists()
+        )
+    except OSError:
+        pass
+    source_root = Path(__file__).resolve().parents[4]
+    if source_root not in candidates:
+        candidates.append(source_root)
+
+    discovered: list[tuple[bool, Path]] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        top = _git_toplevel(candidate)
+        if top is None or top in seen:
+            continue
+        seen.add(top)
+        discovered.append(
+            (_canonical_remote(top) == "https://github.com/chen-da-pang/music-analysis-kb", top)
+        )
+    for is_music_repository, top in discovered:
+        if is_music_repository:
+            return top
+    return discovered[0][1] if discovered else workspace
+
+
+def _inventory_database_path(workspace: Path, chart_database: Path | None) -> Path:
+    return chart_database if chart_database is not None else workspace / "data" / "music_trends.sqlite"
+
+
 def _safe_run_id(value: str) -> str:
     allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
     if not value or any(character not in allowed for character in value):
@@ -349,6 +411,7 @@ def run_weekly_run(
     peers_path = _resolve_workspace_path(peers_file, root) if peers_file else None
     state_path = _resolve_workspace_path(state_file, root)
     chart_db_path = _resolve_workspace_path(chart_database, root) if chart_database else None
+    campaign_repository_root = _resolve_campaign_repository_root(root)
     cnb_storage_policy_path = Path(cnb_storage_policy).expanduser().resolve()
     if cnb_transport not in {"lfs", "git-objects"}:
         raise ValueError("cnb_transport must be lfs or git-objects")
@@ -658,7 +721,7 @@ def run_weekly_run(
                     sys.executable,
                     str(scripts_dir / "build_song_inventory.py"),
                     "--db",
-                    str(root / "data" / "music_trends.sqlite"),
+                    str(_inventory_database_path(root, chart_db_path)),
                     "--progress",
                     str(progress_path),
                     "--inventory",
@@ -786,6 +849,7 @@ def run_weekly_run(
                 "policy": str(cnb_storage_policy_path),
                 "staging": str(campaign_staging_path),
                 "receipt": str(campaign_receipt_path),
+                "repository_root": str(campaign_repository_root),
                 "dry_run": cnb_campaign_dry_run or download_dry_run,
             },
         ) as outputs:
@@ -806,7 +870,7 @@ def run_weekly_run(
             elif not materialization_result or int(materialization_result.get("item_count", 0)) == 0:
                 outputs.update({"status": "skipped", "reason": "no newly downloaded songs"})
             else:
-                github_commit = cnb_github_commit or _git_head_commit(root)
+                github_commit = cnb_github_commit or _git_head_commit(campaign_repository_root)
                 command = [
                     sys.executable,
                     str(campaign_adapter_path),
@@ -816,7 +880,7 @@ def run_weekly_run(
                     "--operations-file",
                     str(operations_path),
                     "--repository-root",
-                    str(root),
+                    str(campaign_repository_root),
                     "--run-id",
                     run_id,
                     "--staging",

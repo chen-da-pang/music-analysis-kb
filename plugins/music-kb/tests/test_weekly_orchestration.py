@@ -11,12 +11,34 @@ from music_kb.schema import initialize_database
 from music_kb.weekly_orchestration import (
     _cleanup_gate_satisfied,
     _cnb_cleanup_receipt_is_acceptable,
+    _inventory_database_path,
+    _resolve_campaign_repository_root,
     run_weekly_run,
 )
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "kugou_canonical_delivery.jsonl"
 OPERATIONS = Path(__file__).parents[1] / "references" / "validated-operations.json"
+
+
+def test_resolve_campaign_repository_root_from_nested_data_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "publisher-workspace"
+    repository = workspace / "music-analysis-kb"
+    repository.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "add", "origin", "https://github.com/chen-da-pang/music-analysis-kb"],
+        check=True,
+    )
+
+    assert _resolve_campaign_repository_root(workspace) == repository.resolve()
+
+
+def test_inventory_database_path_honors_explicit_chart_database(tmp_path: Path) -> None:
+    explicit = tmp_path / "authoritative" / "music_trends.sqlite"
+
+    assert _inventory_database_path(tmp_path, explicit) == explicit
+    assert _inventory_database_path(tmp_path, None) == tmp_path / "data" / "music_trends.sqlite"
 
 
 def test_cleanup_gate_requires_publish_and_release() -> None:
