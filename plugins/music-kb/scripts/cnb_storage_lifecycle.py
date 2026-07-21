@@ -118,6 +118,18 @@ def load_policy(path: Path) -> dict[str, Any]:
         raise ValueError("server_gc.unreferenced_object_grace_days must be positive")
     server_gc.setdefault("support_issue", "cnb/feedback#4551")
     server_gc.setdefault("manual_gc_api", False)
+    protected_runtime_slug = value.get("protected_runtime_repository_slug")
+    if protected_runtime_slug is not None and str(protected_runtime_slug) != str(value["repository_slug"]):
+        raise ValueError("protected_runtime_repository_slug must equal repository_slug")
+    campaign_prefix = value.get("campaign_repository_prefix")
+    if campaign_prefix is not None and (
+        not isinstance(campaign_prefix, str)
+        or not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,59}-", campaign_prefix)
+    ):
+        raise ValueError("campaign_repository_prefix must be a lowercase slug prefix ending in '-'")
+    runtime_digest = value.get("verified_runtime_image_digest")
+    if runtime_digest is not None and not re.fullmatch(r".+@sha256:[0-9a-f]{64}", str(runtime_digest)):
+        raise ValueError("verified_runtime_image_digest must be image@sha256:<64 lowercase hex>")
     for key in ("preserved_branch_patterns", "cleanup_branch_patterns", "cleanup_asset_name_patterns"):
         for pattern in value[key]:
             re.compile(pattern)
@@ -342,11 +354,42 @@ def _protected_runtime_status(policy: dict[str, Any], runner: Runner) -> dict[st
     tag_data = _data(tags_response) or {}
     tags = {str(row.get("name", "")) for row in tag_data.get(runtime["package_type"], [])}
     runtime_present = str(runtime["tag"]) in tags
+    digest_match = True
+    expected_digest_image = policy.get("verified_runtime_image_digest")
+    if expected_digest_image:
+        detail_response = runner(
+            [
+                "cnb",
+                "registries",
+                "get-package-tag-detail",
+                "--slug",
+                str(runtime["registry_slug"]),
+                "--type",
+                str(runtime["package_type"]),
+                "--name",
+                str(runtime["package_name"]),
+                "--tag",
+                str(runtime["tag"]),
+                "--arch",
+                "linux/amd64",
+                "--verbose",
+            ]
+        )
+        detail_data = _data(detail_response) or {}
+        actual_digest = str(((detail_data.get(runtime["package_type"]) or {}).get("image") or {}).get("digest", ""))
+        expected_digest = str(expected_digest_image).split("@", 1)[-1]
+        digest_match = actual_digest == expected_digest
+    else:
+        actual_digest = None
+        expected_digest = None
     return {
         "repository_present": True,
         "main_present": "main" in branches,
         "runtime_present": runtime_present,
-        "protected": "main" in branches and runtime_present,
+        "runtime_digest_match": digest_match,
+        "runtime_expected_digest": expected_digest,
+        "runtime_actual_digest": actual_digest,
+        "protected": "main" in branches and runtime_present and digest_match,
     }
 
 

@@ -270,6 +270,32 @@ def build_parser() -> argparse.ArgumentParser:
         default="lfs",
         help="CNB campaign audio transport; git-objects is the bounded no-cost fallback for pending orphan LFS GC",
     )
+    weekly_run.add_argument(
+        "--cnb-campaign-dry-run",
+        action="store_true",
+        help="Prepare and validate the disposable campaign repository locally without creating, pushing, or starting CNB builds",
+    )
+    weekly_run.add_argument(
+        "--cnb-campaign-poll-seconds",
+        type=float,
+        default=10.0,
+        help="Polling interval for each disposable campaign shard (default: 10s)",
+    )
+    weekly_run.add_argument(
+        "--cnb-campaign-timeout-seconds",
+        type=int,
+        default=None,
+        help="Optional overall timeout for disposable campaign shard submission/recovery",
+    )
+    weekly_run.add_argument(
+        "--cnb-github-commit",
+        help="Full published GitHub commit to export for the disposable runner (default: local HEAD, which must be on origin/main)",
+    )
+    weekly_run.add_argument(
+        "--cnb-campaign-work-dir",
+        type=Path,
+        help="Optional empty directory for the generated disposable campaign checkout",
+    )
     weekly_run.add_argument("--confirm-delete-cnb-storage", action="store_true")
     weekly_run.add_argument(
         "--confirm-delete-cnb-repositories",
@@ -446,6 +472,11 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             confirm_delete_cnb_storage=args.confirm_delete_cnb_storage,
             confirm_delete_cnb_repositories=args.confirm_delete_cnb_repositories,
             cnb_transport=args.cnb_transport,
+            cnb_campaign_dry_run=args.cnb_campaign_dry_run,
+            cnb_campaign_poll_seconds=args.cnb_campaign_poll_seconds,
+            cnb_campaign_timeout_seconds=args.cnb_campaign_timeout_seconds,
+            cnb_github_commit=args.cnb_github_commit,
+            cnb_campaign_work_dir=args.cnb_campaign_work_dir,
         )
         return 0, result
     raise AssertionError("unhandled command")

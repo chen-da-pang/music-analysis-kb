@@ -327,3 +327,144 @@ def test_real_publish_defaults_to_local_snapshot_install(
     assert atom["outputs"]["status"] == "succeeded"
     assert (tmp_path / "current.sqlite").is_symlink()
     assert (tmp_path / "current.sqlite").resolve().name == "default-local-install.sqlite"
+
+
+def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "master.sqlite"
+    initialize_database(database)
+    inventory = tmp_path / "data" / "song_inventory.json"
+    inventory.parent.mkdir(parents=True)
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    audio_file = audio_root / "song.flac"
+    audio_file.write_bytes(b"audio-bytes")
+    inventory.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "songs": [
+                    {
+                        "identity_key": "kugou:1",
+                        "platform_track_key": "1",
+                        "title": "Song",
+                        "artist": "Artist",
+                        "play_link": "https://www.kugou.com/mixsong/1.html",
+                        "download": {"status": "downloaded", "path": "song.flac"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    progress = tmp_path / "download_progress.json"
+    progress.write_text("{}\n", encoding="utf-8")
+    chart_path = tmp_path / "chart.json"
+    queue_path = tmp_path / "queue.jsonl"
+
+    monkeypatch.setattr(
+        "music_kb.weekly_orchestration.run_preflight",
+        lambda **kwargs: {"valid": True, "failed_required": [], "commands": {}},
+    )
+    monkeypatch.setattr(
+        "music_kb.weekly_orchestration._json_command_allow_failure",
+        lambda *args, **kwargs: (
+            {
+                "action": "campaign-preflight",
+                "clean": True,
+                "checks": {},
+            },
+            subprocess.CompletedProcess(args[0], 0, "", ""),
+        ),
+    )
+
+    def fake_json_command(command, *, cwd, timeout_seconds, env=None):
+        name = Path(command[1]).name if len(command) > 1 else ""
+        if name == "capture_kugou_chart.py":
+            chart_path.write_text(
+                json.dumps(
+                    {
+                        "songs": [
+                            {
+                                "identity_key": "kugou:1",
+                                "platform_track_key": "1",
+                                "title": "Song",
+                                "artist": "Artist",
+                                "play_link": "https://www.kugou.com/mixsong/1.html",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return {"songs": str(chart_path), "source_records": 1}, subprocess.CompletedProcess(command, 0, "", "")
+        if name == "build_song_inventory.py":
+            return {"songs": 1}, subprocess.CompletedProcess(command, 0, "", "")
+        if name == "prepare_download_queue.py":
+            queue_path.write_text(json.dumps({"identity_key": "kugou:1"}) + "\n", encoding="utf-8")
+            return {
+                "queue": str(queue_path),
+                "queued": 1,
+                "skipped_existing_download": 0,
+            }, subprocess.CompletedProcess(command, 0, "", "")
+        if name == "run_claude_download.py":
+            return {
+                "queue_manifest": {"queue": str(queue_path), "queued": 1},
+                "worker_progress": {"downloaded": 1},
+            }, subprocess.CompletedProcess(command, 0, "", "")
+        if name == "run_claude_fallback.py":
+            return {"queue_manifest": {"queued": 0}}, subprocess.CompletedProcess(command, 0, "", "")
+        if name == "cnb_campaign_repository.py" and "prepare" in command:
+            receipt = Path(command[command.index("--receipt") + 1])
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "planned",
+                        "run_id": "fresh-campaign",
+                        "repository": "wuyoumusic/music-flamingo-campaign-fresh-campaign",
+                        "runtime_image": "docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:a04cdbc02ef0f0958282e7bbf8c3a15b3a3105f4d17c95db88c98d1fc5f3657b",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return {"status": "planned", "receipt": str(receipt)}, subprocess.CompletedProcess(command, 0, "", "")
+        if name == "cnb_campaign_repository.py" and "submit" in command:
+            return {"status": "submit_planned"}, subprocess.CompletedProcess(command, 0, "", "")
+        raise AssertionError(command)
+
+    monkeypatch.setattr("music_kb.weekly_orchestration._json_command", fake_json_command)
+    result = run_weekly_run(
+        workspace=tmp_path,
+        run_id="fresh-campaign",
+        rank_ids=["1"],
+        chart_page=1,
+        chart_size=100,
+        chart_profile=None,
+        database=database,
+        inventory=inventory,
+        audio_root=audio_root,
+        legacy_progress=progress,
+        operations_file=OPERATIONS,
+        output_dir=tmp_path / "releases",
+        release_name="fresh-campaign-release",
+        peers_file=None,
+        peer_names=(),
+        publish=False,
+        delivery=None,
+        cnb_command=None,
+        chart_database=None,
+        state_file=tmp_path / "publish-state.json",
+        cnb_campaign_dry_run=True,
+        cnb_github_commit="a" * 40,
+        skip_peers=True,
+    )
+    state = json.loads(Path(result["state"]).read_text(encoding="utf-8"))
+    assert state["status"] == "succeeded"
+    assert state["atoms"]["cnb_input_materialization"]["outputs"]["item_count"] == 1
+    assert state["atoms"]["cnb_campaign_repository"]["outputs"]["status"] == "planned"
+    assert state["atoms"]["cnb_campaign_submit"]["outputs"]["status"] == "submit_planned"
+    assert state["atoms"]["cnb_analysis"]["outputs"]["status"] == "skipped"
+    assert (tmp_path / "data" / "weekly_runs" / "fresh-campaign" / "cnb-input" / "manifest.jsonl").is_file()

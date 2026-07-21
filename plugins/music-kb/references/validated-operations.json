@@ -30,8 +30,17 @@
     "CNB 未提供 orphan LFS 的公开管理员删除或 GC API；CNB 支持说明服务端默认在对象失去引用 7 天后由定时 GC 清理（cnb/feedback#4551）。不得把删除分支误报为已回收；必须记录 server_gc_pending 和当前 charge 计数，并显式使用受 5 GB 总量、256 MiB 单文件和 Git 余量门禁限制的 git-objects 回退。对已证明完成且不再被当前工作流依赖的 CNB 仓库，只有命中 cnb-storage-policy.json 的 disposable_repositories 白名单并提供独立的 --confirm-delete-cnb-repositories 时，清理原子才可执行整仓库删除；删除后必须验证仓库 404/对象 volume=0、组织对象用量实际下降（原用量非零时）和受保护 Music Flamingo runtime/main 仍存在。"
   ],
   "operations": {
+    "cnb_campaign_repository": {
+      "effective_method": "每次 fresh weekly-run 都从 GitHub origin/main 的完整 commit 导出 code-only runner，严格按 campaign_repository_prefix + 安全 run_id 生成唯一 CNB disposable repository；创建前确认目标不存在、受保护 runtime/main 健康且组织余量足够，写入本次 manifest/audio/config 后只推送到该仓库。记录 source commit、runtime immutable digest、manifest SHA-256、repo slug 和提交 receipt；任何失败保留同一 repo/receipt，禁止换名重试或自动删除。dry-run 只生成本地计划，不创建仓库、不推送、不启动 build；本地未发布分支只能用适配器的 --allow-unpublished prepare dry-run 做完整性检查，不能与 --execute 共用。"
+    },
+    "cnb_campaign_submit": {
+      "effective_method": "只对已创建且 receipt 绑定 run_id/repo prefix/runtime digest 的 campaign repository 触发 api_trigger_music_flamingo_campaign；每个静态 shard 使用显式 index/id，轮询所有 CNB build 到 terminal status，任一 shard 未成功不得生成 delivery 或进入清理。全部 shard 成功后从同一仓库 ledger branch 恢复 durable ledger，使用 pinned runner 的 build_kugou_canonical_delivery.py 生成并校验本地 canonical delivery；不把 build 日志当作 delivery。"
+    },
+    "cnb_campaign_cleanup": {
+      "effective_method": "只有 canonical delivery 已导入、immutable release 已验证且 peer gate 成功或显式 --skip-peers 后，才可在独立 CNB repository confirmation 下删除 receipt 指定且严格命中 prefix 的 campaign 仓库。删除前复核无 running workspace、目标不是 protected runtime；删除后必须验证 repository 404、对象 volume=0、组织对象用量（原非零时）下降和 protected runtime/main/tag 仍存在。release/peer 未完成、receipt 不匹配、任一 shard 未成功或删除验证不全时保留同一仓库和 receipt，不自动换名或重试。"
+    },
     "cnb_storage_preflight": {
-      "effective_method": "新分析 invocation 读取 cnb-storage-policy.json，并通过 CNB git/assets/registries/charge API 确认 Music Flamingo 必需镜像存在、无 campaign 音频分支和临时附件。默认 --cnb-transport lfs 还要求 moss-music-runner 对象用量和根组织对象余量通过清洁阈值；若 orphan LFS 无法回收，显式 --cnb-transport git-objects 改为检查根组织普通 Git 余量，仍要求所有可见 campaign 残留先清理。显式提供且通过 expected-count 校验的本地 canonical delivery 属于 post-analysis resume，记录本原子 skipped，不读取 CNB 容量。"
+      "effective_method": "每次 fresh weekly-run 在榜单/下载前读取 cnb-storage-policy.json，通过 campaign repository preflight 确认受保护 Music Flamingo runtime/main、不可变 digest、组织余量和严格 prefix 下无遗留 campaign 仓库；不再把受保护 moss 的历史 orphan-LFS 计数作为新 disposable campaign 的上传门禁。legacy --cnb-command 才走旧 moss branch/assets/storage inspect，并继续尊重 lfs/git-objects 门禁。显式提供且通过 expected-count 校验的本地 canonical delivery 属于 post-analysis resume，记录本原子 skipped，不读取 CNB 容量。"
     },
     "preflight": {
       "effective_method": "检查操作记录、工作目录、依赖命令、输入路径、数据库和配置可写性；任一失败立即停止。"
@@ -52,10 +61,10 @@
       "effective_method": "只处理主 Kugou worker 已记录为 no_results 的队列；由 Claude Code 串行运行 download_music_fallback.py，按 fallback-download-profile.json 的 QQ、咪咕、酷我顺序逐来源搜索，严格匹配规范化标题和歌手（含显式艺名别名），下载后必须验证文件大于 1 MB 且 ffprobe 时长至少 60 秒，成功后才更新 song_inventory.json；每来源 90 秒硬超时，失败和 no_results 保留可审计状态。"
     },
     "cnb_input_materialization": {
-      "effective_method": "只消费本周已去重下载队列和 song_inventory.json；逐首确认 downloaded 状态、实际文件存在、唯一 identity、文件 SHA-256 和有效 play_link，使用硬链接优先将音频放入独立 campaign staging，并生成带 source_bytes、sha256、title、artist、source_url 的 LF JSONL manifest；写入 weekly atom receipt，不触发 CNB。"
+      "effective_method": "只消费本周已去重下载队列和 song_inventory.json；逐首确认 downloaded 状态、实际文件存在、唯一 identity、文件 SHA-256 和有效 play_link，使用硬链接优先将音频放入独立 campaign staging，并生成带 source_bytes、sha256、title、artist、source_url 的 LF JSONL manifest；fresh 路径在父 weekly-run atom 内直接调用 materialize，避免子进程重复获取 publisher lock；写入 weekly atom receipt，不触发 CNB。"
     },
     "cnb_analysis": {
-      "effective_method": "只接收带 run identity 的 CNB canonical delivery；使用固定 Music Flamingo 镜像、模型 revision、2048 token 和 240 秒音频时长契约。对于 git-objects，campaign 分支的音频路径禁用 LFS，运行前验证总量不超过 5 GB、单文件不超过 256 MiB、manifest SHA-256 和 durable ledger。若云原生构建 GPU 的预冻结额度不足，改在同一固定镜像的 CNB vscode Dev GPU L40 工作区启动同一分片；只有日志出现 item_generate_start 且至少一首 item_generate_done 才算实际分析启动。"
+      "effective_method": "只接收 cnb_campaign_submit 从完整 shard 集合恢复并校验的 CNB canonical delivery；使用 policy 固定 immutable Music Flamingo 镜像、model revision、2048 token 和 240 秒音频时长契约。campaign 仓库的 LFS/普通 Git 传输由 policy 选择，manifest SHA-256、durable ledger 和 delivery expected-count 必须一致；不得把 build 日志当作分析结果。"
     },
     "knowledge_import": {
       "effective_method": "只导入质量通过的 canonical delivery；幂等导入、重建标签和搜索投影，然后验证 source_links 完整。"
@@ -73,7 +82,7 @@
       "effective_method": "仅在本地 release 已验证，且所有启用 peer 成功或用户显式选择 --skip-peers 后，校验 provenance/source_tracks/source_links 和 inventory；只删除能按平台 track ID 精确匹配知识库 source_track 的本地音频目录，并标记 purged_after_analysis。未匹配、尚未分析的下载音频必须保留。"
     },
     "cnb_storage_cleanup": {
-      "effective_method": "CNB 只作为 GitHub runner 的可丢弃 GPU 运行镜像；仅在 canonical delivery、知识库导入、immutable release 验证和所有启用 peer 发布成功（或显式 --skip-peers）后，按策略删除已导出的 campaign input、result、ledger 分支和临时 run assets。只保留 code-only main 和 Music Flamingo runtime image，绝不删除活跃 Dev GPU 分支；master DB、release 和 canonical 证据已在本地验证后不留在 CNB。对 policy.disposable_repositories 中已完成、无当前 workflow dependency 的独立仓库，只有显式 --confirm-delete-cnb-repositories 才执行整仓库破坏性删除；删除前验证 GitHub 源仓库仍存在、无 running workspace 且目标不是受保护 runtime，删除后重查 CNB 404/charge=0、组织对象用量实际下降和受保护 runtime/main。所有结果写入 receipt；已删除目标以 already_absent 幂等成功。普通可见清理若对象计数仍高，记录 server_gc_pending=true，并按 CNB 默认 7 天服务端 GC 窗口（cnb/feedback#4551）等待复核。后续默认 LFS 周更继续阻断，但通过 Git 余量和全量可见残留门禁的显式 git-objects 周更可以继续。"
+      "effective_method": "CNB 只作为 GitHub runner 的可丢弃 GPU 运行镜像；fresh campaign 的 repository/input/result/ledger 在本周 canonical delivery 和本地 release/peer gate 完成后由 cnb_campaign_cleanup 整仓删除并验证 404/zero charge/group drop/runtime protection。随后仅清理受保护 runtime 仓库中仍命中明确旧分支/附件白名单的可见残留；不删除 main、runtime、master DB、release 或 canonical 本地证据。普通可见清理若 moss 对象计数仍高，记录 server_gc_pending=true，不把它误报成已回收。"
     }
   }
 }
