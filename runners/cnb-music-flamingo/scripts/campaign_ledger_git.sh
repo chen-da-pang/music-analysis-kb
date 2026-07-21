@@ -153,7 +153,13 @@ PYTHON
     # inherited signing policy from turning a completed inference item into a
     # node-local-only result.
     run_git -C "$ledger_repo" config commit.gpgSign false
-    run_git -C "$ledger_repo" add campaign_ledger.jsonl campaign_state.json
+    # The code-only mirror intentionally ignores transient JSONL inputs and
+    # outputs.  The dedicated result branch is the exception: its ledger is
+    # the durability boundary, so force-add it even when the inherited
+    # .gitignore contains *.jsonl.  Without -f a completed inference remains
+    # node-local and the next shard cannot recover it.
+    run_git -C "$ledger_repo" add -f campaign_ledger.jsonl
+    run_git -C "$ledger_repo" add campaign_state.json
     if run_git -C "$ledger_repo" diff --cached --quiet; then
       echo "campaign_ledger_checkpoint_unchanged=$ledger_path"
       exit 0
