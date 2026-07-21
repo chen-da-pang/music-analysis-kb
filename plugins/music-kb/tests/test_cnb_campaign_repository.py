@@ -523,6 +523,7 @@ def test_submit_failure_keeps_same_receipt_and_does_not_delete(monkeypatch: pyte
             poll_seconds=0,
             timeout_seconds=2,
             runner=runner,
+            transport="git-objects",
         )
     saved = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert saved["status"] == "failed"
@@ -577,6 +578,7 @@ def test_submit_resume_reuses_existing_shard_sn_without_duplicate_trigger(
         poll_seconds=0,
         timeout_seconds=2,
         runner=runner,
+        transport="git-objects",
     )
     starts = [command for command in commands if "start-build" in " ".join(command)]
     assert len(starts) == 1
@@ -620,6 +622,7 @@ def test_submit_retries_failed_shard_without_changing_repository_slug(
         poll_seconds=0,
         timeout_seconds=2,
         runner=runner,
+        transport="git-objects",
     )
     starts = [command for command in commands if "start-build" in " ".join(command)]
     assert len(starts) == 1
@@ -756,6 +759,7 @@ def test_cleanup_blocks_completed_status_without_complete_receipt_proof(tmp_path
         release_verified=True,
         peer_gate=True,
         runner=runner,
+        transport="git-objects",
     )
     assert result["status"] == "blocked"
     assert result["clean"] is False
@@ -789,6 +793,7 @@ def test_cleanup_deletes_only_after_complete_receipt_proof(tmp_path: Path) -> No
         release_verified=True,
         peer_gate=True,
         runner=runner,
+        transport="git-objects",
     )
     assert result["status"] == "succeeded"
     assert result["clean"] is True

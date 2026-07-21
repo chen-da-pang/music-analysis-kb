@@ -1288,13 +1288,14 @@ def submit_campaign(
     poll_seconds: float = 10.0,
     runner: JsonRunner = run_cnb,
     require_source_url: bool = False,
+    transport: str | None = None,
 ) -> dict[str, Any]:
     """Trigger all shards for an existing receipt and recover delivery."""
 
     operations = Path(operations_path).expanduser().resolve()
     load_validated_operations(operations, required_atom="cnb_campaign_submit")
     operations_sha256 = sha256_file(operations)
-    policy = load_campaign_policy(policy_path)
+    policy = _policy_with_transport(load_campaign_policy(policy_path), transport)
     receipt_file = Path(receipt_path).expanduser().resolve()
     receipt = _read_json(receipt_file)
     binding = validate_campaign_receipt_binding(policy, receipt, operations_sha256=operations_sha256)
@@ -1522,13 +1523,14 @@ def cleanup_campaign_repository(
     release_verified: bool,
     peer_gate: bool,
     runner: JsonRunner = run_cnb,
+    transport: str | None = None,
 ) -> dict[str, Any]:
     """Delete and verify one receipt-bound disposable repository."""
 
     operations = Path(operations_path).expanduser().resolve()
     load_validated_operations(operations, required_atom="cnb_campaign_cleanup")
     operations_sha256 = sha256_file(operations)
-    policy = load_campaign_policy(policy_path)
+    policy = _policy_with_transport(load_campaign_policy(policy_path), transport)
     receipt_file = Path(receipt_path).expanduser().resolve()
     receipt = _read_json(receipt_file)
     try:
@@ -1701,6 +1703,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_seconds=args.timeout_seconds,
                 poll_seconds=args.poll_seconds,
                 require_source_url=args.require_source_url,
+                transport=args.transport,
             )
         else:
             if not args.receipt:
@@ -1712,6 +1715,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 confirm=args.confirm_delete_cnb_repositories,
                 release_verified=args.release_verified,
                 peer_gate=args.peer_gate,
+                transport=args.transport,
             )
         print(json.dumps(result, ensure_ascii=False))
         if args.action == "preflight":

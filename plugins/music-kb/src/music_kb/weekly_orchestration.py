@@ -865,6 +865,8 @@ def run_weekly_run(
                     str(cnb_campaign_timeout_seconds or timeout_seconds),
                     "--poll-seconds",
                     str(cnb_campaign_poll_seconds),
+                    "--transport",
+                    cnb_transport,
                 ]
                 if materialization_result.get("source_links") == materialization_result.get("item_count"):
                     command.append("--require-source-url")
@@ -1083,6 +1085,8 @@ def run_weekly_run(
                     str(operations_path),
                     "--receipt",
                     str(campaign_receipt_path),
+                    "--transport",
+                    cnb_transport,
                 ]
                 if confirm_delete_cnb_repositories:
                     command.append("--confirm-delete-cnb-repositories")
