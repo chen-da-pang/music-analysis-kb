@@ -27,6 +27,9 @@ data/weekly_runs/<run-id>/run-state.json
 data/weekly_runs/<run-id>/atoms/<atom>.json
 ```
 
+Each atom receipt carries the same `operations_sha256` as `run-state.json`,
+so the validated operation record used for that atom can be audited on its own.
+
 A failed atom stops the run. Resume only from a recorded safe boundary and
 reuse the same run id, campaign repository, and campaign receipt; never create
 a replacement slug to hide a failure.
@@ -40,7 +43,16 @@ actually run.
 With `--delivery`, validate the supplied canonical Music Flamingo JSONL and its
 expected count first. This is a post-analysis resume: mark chart capture,
 download, fallback, CNB input, campaign repository, campaign submit, and CNB
-analysis as skipped; do not query CNB capacity or repeat pre-analysis work.
+analysis as skipped; do not query CNB capacity or repeat pre-analysis work. If
+the same run also has a campaign receipt, bind the supplied delivery to that
+receipt and still run receipt-bound cleanup after the local release and peer
+gates. An external delivery with no campaign receipt has nothing to clean up.
+
+When a run directory already contains a failed or interrupted campaign receipt,
+the next invocation with the same `--run-id` is a campaign resume. It restores
+the on-disk state and receipt, verifies the exact run id/repository prefix,
+GitHub commit, runtime digest, transport, and manifest hash/count, and reuses
+only that repository. A new run still refuses any leftover campaign repository.
 
 Without `--delivery`, a normal run uses the versioned Kugou profile and captures
 all configured charts page by page until the profile's empty/short-page rule.
@@ -88,7 +100,9 @@ be purged, so inventory—not file presence alone—is the dedupe record.
     shard to reach a terminal success, restore the durable ledger from the same
     campaign repository, and run the pinned
     `build_kugou_canonical_delivery.py`. Never use build logs as delivery. Any
-    failed or incomplete shard blocks delivery and cleanup.
+    failed or incomplete shard blocks delivery and cleanup; a later invocation
+    may retry that exact failed shard index in the same receipt, never under a
+    new repository slug.
 11. **`cnb_analysis`** — validate the canonical delivery and expected count.
 12. **`knowledge_import`** — import idempotently, backfill song links, enrich
     retrieval tags, and verify the source-link completeness gate.
@@ -128,9 +142,14 @@ The campaign policy is
 `plugins/music-kb/references/cnb-storage-policy.json`. A campaign repository is
 temporary; GitHub is the only source of runner code. A failed build, ledger
 recovery error, incomplete receipt, release failure, or peer failure leaves the
-same repository and receipt in place. Do not delete, rename, or silently rerun
-a failed shard. Cleanup is irreversible and requires the separate repository
-confirmation flag in addition to audio/CNB-storage confirmations.
+same repository and receipt in place. A retry may reuse the receipt-bound work
+directory and ledger clone, but must pass the immutable identity checks and keep
+the same repository slug. Cleanup is irreversible and requires the separate
+repository confirmation flag in addition to audio/CNB-storage confirmations.
+The cleanup atom blocks unless the receipt also proves repository
+creation/push, every shard's success and index set, complete runtime-export
+provenance, and a delivery file whose hash/count match the manifest; blocked
+and dry-run outcomes are written back to that receipt.
 
 ## Invocation examples
 

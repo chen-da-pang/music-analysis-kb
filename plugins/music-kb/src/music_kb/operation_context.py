@@ -95,6 +95,7 @@ class RunContext:
         self._lock_handle: Any = None
         self.operations: dict[str, Any] = {}
         self.state: dict[str, Any] = {}
+        self.resumed = False
 
     def __enter__(self) -> "RunContext":
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -107,20 +108,63 @@ class RunContext:
             self._lock_handle = None
             raise RuntimeError(f"another weekly run holds the publisher lock: {self.lock_path}") from exc
 
-        self.operations = load_validated_operations(self.operations_file)
-        self.state = {
-            "schema_version": RUN_SCHEMA_VERSION,
-            "run_id": self.run_id,
-            "status": "running",
-            "started_at": now_iso(),
-            "finished_at": None,
-            "operations_file": str(self.operations_file),
-            "operations_sha256": sha256_file(self.operations_file),
-            "atoms": {},
-            "errors": [],
-        }
-        self._write_state()
-        return self
+        try:
+            self.operations = load_validated_operations(self.operations_file)
+            operations_hash = sha256_file(self.operations_file)
+            existing: dict[str, Any] | None = None
+            if self.state_path.is_file():
+                try:
+                    candidate = json.loads(self.state_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise ValueError(f"existing run state is unreadable: {self.state_path}: {exc}") from exc
+                if not isinstance(candidate, dict):
+                    raise ValueError(f"existing run state must be a JSON object: {self.state_path}")
+                existing = candidate
+                if existing.get("schema_version") != RUN_SCHEMA_VERSION:
+                    raise ValueError("existing run state schema is incompatible")
+                if existing.get("run_id") != self.run_id:
+                    raise ValueError("existing run state run_id does not match requested run")
+                if existing.get("operations_sha256") != operations_hash:
+                    raise ValueError(
+                        "validated operations changed since the previous run; refusing to resume: "
+                        f"{self.operations_file}"
+                    )
+                if existing.get("status") == "succeeded":
+                    raise ValueError(
+                        f"weekly run already succeeded: {self.run_id}; choose a new run_id instead of replaying it"
+                    )
+            if existing is None:
+                self.state = {
+                    "schema_version": RUN_SCHEMA_VERSION,
+                    "run_id": self.run_id,
+                    "status": "running",
+                    "started_at": now_iso(),
+                    "finished_at": None,
+                    "operations_file": str(self.operations_file),
+                    "operations_sha256": operations_hash,
+                    "atoms": {},
+                    "errors": [],
+                    "resume_count": 0,
+                }
+            else:
+                self.resumed = True
+                self.state = dict(existing)
+                self.state["status"] = "running"
+                self.state["finished_at"] = None
+                self.state["resumed_at"] = now_iso()
+                self.state["resume_count"] = int(self.state.get("resume_count", 0)) + 1
+                if not isinstance(self.state.get("atoms"), dict):
+                    raise ValueError("existing run state atoms must be an object")
+                if not isinstance(self.state.get("errors"), list):
+                    raise ValueError("existing run state errors must be an array")
+            self._write_state()
+            return self
+        except Exception:
+            if self._lock_handle is not None:
+                fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
+                self._lock_handle.close()
+                self._lock_handle = None
+            raise
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         if exc_value is not None:
@@ -157,6 +201,7 @@ class RunContext:
             "started_at": now_iso(),
             "inputs": dict(inputs),
             "command": list(command or []),
+            "operations_sha256": self.state["operations_sha256"],
         }
         self.state["atoms"][atom] = entry
         self._write_atom(atom, entry)

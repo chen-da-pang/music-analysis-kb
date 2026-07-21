@@ -349,6 +349,109 @@ def _read_manifest(staging: Path, *, expected_count: int | None = None) -> dict[
     }
 
 
+def _manifest_binding_fields(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the immutable manifest fields that bind a retry to its input."""
+
+    return {
+        "sha256": str(summary.get("sha256", "")),
+        "item_count": int(summary.get("item_count", 0)),
+        "source_bytes": int(summary.get("source_bytes", 0)),
+        "source_links": int(summary.get("source_links", 0)),
+        "campaign_id": str(summary.get("campaign_id", "")),
+    }
+
+
+def campaign_receipt_binding_errors(
+    policy: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    run_id: str | None = None,
+    github_commit: str | None = None,
+    manifest: Mapping[str, Any] | None = None,
+    transport: str | None = None,
+    operations_sha256: str | None = None,
+) -> list[str]:
+    """Validate the immutable identity of a campaign receipt.
+
+    This is deliberately separate from the destructive validator below.  It
+    is used before a retry to prove that a receipt belongs to the exact run,
+    source commit, runtime, transport and manifest being resumed.
+    """
+
+    errors: list[str] = []
+    receipt_run_id = str(receipt.get("run_id", "")).strip()
+    expected_run_id = str(run_id if run_id is not None else receipt_run_id).strip()
+    try:
+        _, expected_repository = _full_repository_slug(policy, expected_run_id)
+    except CampaignRepositoryError as exc:
+        errors.append(f"invalid run_id: {exc}")
+        expected_repository = ""
+    if receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION:
+        errors.append("receipt schema_version does not match")
+    if receipt.get("atom") != "cnb_campaign_repository":
+        errors.append("receipt atom is not cnb_campaign_repository")
+    if operations_sha256 is not None and receipt.get("operations_sha256") != operations_sha256:
+        errors.append("receipt operations_sha256 does not match the validated operations file")
+    if not receipt_run_id or receipt_run_id != expected_run_id:
+        errors.append("receipt run_id does not match the requested run")
+    if expected_repository and receipt.get("repository") != expected_repository:
+        errors.append("receipt repository does not match the strict run-id/prefix mapping")
+    expected_prefix = str(policy.get("campaign_repository_prefix", ""))
+    if not str(receipt.get("repository_prefix", "")) == expected_prefix:
+        errors.append("receipt repository_prefix does not match policy")
+    if receipt.get("organization") != policy.get("organization_slug"):
+        errors.append("receipt organization does not match policy")
+    if receipt.get("github_repository") != "chen-da-pang/music-analysis-kb":
+        errors.append("receipt GitHub source repository is not the canonical repository")
+    if github_commit is not None and receipt.get("github_commit") != github_commit:
+        errors.append("receipt github_commit does not match the requested source commit")
+    expected_image = str(policy.get("verified_runtime_image_digest", ""))
+    if receipt.get("runtime_image") != expected_image:
+        errors.append("receipt runtime_image does not match policy")
+    expected_digest = expected_image.split("@", 1)[-1]
+    if receipt.get("runtime_digest") != expected_digest:
+        errors.append("receipt runtime_digest does not match policy")
+    expected_transport = transport or str(policy.get("campaign_repository", {}).get("transport", ""))
+    if receipt.get("transport") != expected_transport:
+        errors.append("receipt transport does not match policy")
+    receipt_manifest = receipt.get("manifest")
+    if not isinstance(receipt_manifest, Mapping):
+        errors.append("receipt manifest is missing")
+    elif manifest is not None:
+        actual = _manifest_binding_fields(receipt_manifest)
+        expected = _manifest_binding_fields(manifest)
+        if actual != expected:
+            errors.append("receipt manifest hash/count/bytes/source-link binding does not match")
+    return errors
+
+
+def validate_campaign_receipt_binding(
+    policy: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    run_id: str | None = None,
+    github_commit: str | None = None,
+    manifest: Mapping[str, Any] | None = None,
+    transport: str | None = None,
+    operations_sha256: str | None = None,
+) -> dict[str, Any]:
+    errors = campaign_receipt_binding_errors(
+        policy,
+        receipt,
+        run_id=run_id,
+        github_commit=github_commit,
+        manifest=manifest,
+        transport=transport,
+        operations_sha256=operations_sha256,
+    )
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "run_id": receipt.get("run_id"),
+        "repository": receipt.get("repository"),
+    }
+
+
 def _repo_exists(repository: str, runner: JsonRunner) -> bool:
     _, absent = _cnb_optional(["cnb", "repositories", "get-by-id", "--repo", repository, "--verbose"], runner)
     return not absent
@@ -442,6 +545,8 @@ def campaign_preflight(
     runner: JsonRunner = run_cnb,
     estimated_bytes: int = 0,
     target_repository: str | None = None,
+    resume_repository: str | None = None,
+    largest_file_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Read-only preflight for the disposable campaign route."""
 
@@ -452,6 +557,25 @@ def campaign_preflight(
     volume = _group_volume(organization, runner)
     quota = _group_quota(organization, runner)
     campaign_repositories = _campaign_repositories(policy, runner)
+    if resume_repository is not None:
+        # A resume may reuse only the exact repository recorded by the same
+        # receipt.  Every other campaign repository remains a hard blocker.
+        organization = str(policy["organization_slug"])
+        expected_prefix = f"{organization}/{policy['campaign_repository_prefix']}"
+        if not resume_repository.startswith(expected_prefix):
+            raise CampaignRepositoryError(
+                f"resume repository does not match the strict campaign prefix: {resume_repository}"
+            )
+        resume_name = resume_repository.split("/", 1)[-1]
+        resume_run_id = resume_name.removeprefix(str(policy["campaign_repository_prefix"]))
+        try:
+            if campaign_repository_name(policy, resume_run_id) != resume_name:
+                raise CampaignRepositoryError("resume repository name does not map to a safe run_id")
+        except CampaignRepositoryError as exc:
+            raise CampaignRepositoryError(f"resume repository is not an exact campaign slug: {resume_repository}") from exc
+    other_campaign_repositories = [
+        value for value in campaign_repositories if value != resume_repository
+    ]
     target_present = bool(target_repository and _repo_exists(target_repository, runner))
     object_free = quota["object"] - volume["object"]
     git_free = quota["git"] - volume["git"]
@@ -459,16 +583,28 @@ def campaign_preflight(
     minimum_object_free = int(policy["minimum_group_object_free_bytes"])
     minimum_git_free = int(policy["minimum_group_git_free_bytes"])
     transport = str(campaign["transport"])
-    checks = {
+    checks: dict[str, bool] = {
         "protected_runtime": bool(protected["protected"]),
-        "no_existing_campaign_repositories": not campaign_repositories,
-        "target_repository_absent": not target_present,
-        "object_headroom": object_free >= minimum_object_free + estimated_bytes,
+        "no_existing_campaign_repositories": not other_campaign_repositories,
         "git_headroom": git_free >= minimum_git_free,
         "runtime_digest_policy_consistent": str(campaign["runtime_image"]) == str(policy["verified_runtime_image_digest"]),
     }
-    if transport == "git-objects":
+    if resume_repository is None:
+        checks["target_repository_absent"] = not target_present
+    else:
+        # A failed create/push may leave the target absent; the receipt-bound
+        # recovery path is allowed to create it again.  An existing target is
+        # also safe because it is the exact receipt slug.
+        checks["target_repository_bound"] = True
+    if transport == "lfs":
+        checks["object_headroom"] = object_free >= minimum_object_free + estimated_bytes
+    else:
         checks["git_headroom_for_transport"] = git_free >= minimum_git_free + estimated_bytes
+        checks["campaign_total_cap"] = estimated_bytes <= int(campaign["max_git_object_bytes"])
+        if largest_file_bytes is not None:
+            if largest_file_bytes < 0:
+                raise CampaignRepositoryError("largest_file_bytes must be non-negative")
+            checks["campaign_file_cap"] = largest_file_bytes <= int(campaign["max_git_object_file_bytes"])
     return {
         "action": "campaign-preflight",
         "transport": transport,
@@ -476,6 +612,7 @@ def campaign_preflight(
         "checks": checks,
         "protected_runtime": protected,
         "existing_campaign_repositories": campaign_repositories,
+        "other_campaign_repositories": other_campaign_repositories,
         "target_repository_present": target_present,
         "object_used_bytes": volume["object"],
         "object_free_bytes": object_free,
@@ -483,6 +620,8 @@ def campaign_preflight(
         "git_free_bytes": git_free,
         "estimated_campaign_bytes": estimated_bytes,
         "target_repository": target_repository,
+        "resume_repository": resume_repository,
+        "largest_file_bytes": largest_file_bytes,
     }
 
 
@@ -672,6 +811,52 @@ def _validate_exported_runtime(output: Path, provenance: Mapping[str, Any], gith
     return {"validated": True, "required_files": verified}
 
 
+def _workspace_stage_complete(
+    workspace: Path,
+    *,
+    run_id: str,
+    manifest_summary: Mapping[str, Any],
+    github_commit: str,
+) -> bool:
+    """Whether a receipt-bound local campaign workspace can be reused."""
+
+    checkout = workspace / "repo"
+    provenance_path = workspace / "runtime-export" / ".github-source.json"
+    metadata_path = checkout / "campaign-input.json"
+    staged_manifest = checkout / "data" / "input" / run_id / "manifest.jsonl"
+    config = checkout / ".cnb.yml"
+    if not all(path.is_file() for path in (provenance_path, metadata_path, staged_manifest, config)):
+        return False
+    try:
+        provenance = _read_json(provenance_path)
+        if provenance.get("source_commit") != github_commit:
+            return False
+        metadata = _read_json(metadata_path)
+        if metadata.get("run_id") != run_id or metadata.get("github_commit") != github_commit:
+            return False
+        staged_sha = sha256_file(staged_manifest)
+        return (
+            staged_sha == manifest_summary.get("sha256")
+            and metadata.get("manifest", {}).get("sha256") == manifest_summary.get("sha256")
+            and metadata.get("manifest", {}).get("item_count") == manifest_summary.get("item_count")
+        )
+    except (CampaignRepositoryError, OSError, TypeError, ValueError):
+        return False
+
+
+def _workspace_is_receipt_bound(workspace: Path, receipt: Mapping[str, Any]) -> bool:
+    return str(receipt.get("workspace", "")).strip() == str(workspace)
+
+
+def _largest_manifest_file_bytes(staging: Path) -> int:
+    rows = [
+        json.loads(line)
+        for line in (staging / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return max(int(row["source_bytes"]) for row in rows)
+
+
 def prepare_campaign_repository(
     *,
     policy_path: str | Path,
@@ -693,6 +878,7 @@ def prepare_campaign_repository(
 
     operations = Path(operations_path).expanduser().resolve()
     load_validated_operations(operations, required_atom="cnb_campaign_repository")
+    operations_sha256 = sha256_file(operations)
     policy = _policy_with_transport(load_campaign_policy(policy_path), transport)
     if allow_unpublished and execute:
         raise CampaignRepositoryError("--allow-unpublished is permitted only for a non-executing dry-run")
@@ -708,15 +894,40 @@ def prepare_campaign_repository(
         raise CampaignRepositoryError(
             f"campaign staging campaign_id {manifest_summary['campaign_id']!r} != run_id {run_id!r}"
         )
+    receipt_file = (
+        Path(receipt_path).expanduser().resolve()
+        if receipt_path
+        else run_dir_path / "cnb" / "campaign-receipt.json"
+    )
+    existing_receipt: dict[str, Any] | None = None
+    resume = receipt_file.is_file()
+    if resume:
+        existing_receipt = _read_json(receipt_file)
+        binding = validate_campaign_receipt_binding(
+            policy,
+            existing_receipt,
+            run_id=run_id,
+            github_commit=commit,
+            manifest=manifest_summary,
+            transport=str(policy["campaign_repository"]["transport"]),
+            operations_sha256=operations_sha256,
+        )
+        if not binding["valid"]:
+            raise CampaignRepositoryError(
+                "same-run campaign receipt cannot be resumed: " + "; ".join(binding["errors"])
+            )
+        if existing_receipt.get("allow_unpublished") is not None and bool(existing_receipt.get("allow_unpublished")) != bool(allow_unpublished):
+            raise CampaignRepositoryError("same-run campaign receipt allow_unpublished mode does not match")
+        if existing_receipt.get("status") == "completed":
+            result = dict(existing_receipt)
+            result["receipt"] = str(receipt_file)
+            return result
+
     campaign = policy["campaign_repository"]
+    largest = _largest_manifest_file_bytes(staging_path)
     if campaign["transport"] == "git-objects":
         if manifest_summary["source_bytes"] > int(campaign["max_git_object_bytes"]):
             raise CampaignRepositoryError("campaign exceeds policy git-object total cap")
-        largest = max(
-            int(json.loads(line)["source_bytes"])
-            for line in (staging_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        )
         if largest > int(campaign["max_git_object_file_bytes"]):
             raise CampaignRepositoryError("campaign exceeds policy git-object per-file cap")
     preflight = campaign_preflight(
@@ -724,145 +935,181 @@ def prepare_campaign_repository(
         runner=runner,
         estimated_bytes=int(manifest_summary["source_bytes"]),
         target_repository=repository,
+        resume_repository=repository if resume else None,
+        largest_file_bytes=largest,
     )
     if execute and not preflight["clean"]:
         raise CampaignRepositoryError(f"campaign preflight failed: {preflight}")
-    if preflight["target_repository_present"]:
+    if preflight["other_campaign_repositories"]:
+        raise CampaignRepositoryError(
+            "existing disposable campaign repositories require the same-receipt cleanup before a new run: "
+            + ", ".join(preflight["other_campaign_repositories"])
+        )
+    if not resume and preflight["target_repository_present"]:
         raise CampaignRepositoryError(
             f"target campaign repository already exists; resume or clean the same receipt: {repository}"
         )
-    if preflight["existing_campaign_repositories"]:
-        raise CampaignRepositoryError(
-            "existing disposable campaign repositories require the same-receipt cleanup before a new run: "
-            + ", ".join(preflight["existing_campaign_repositories"])
-        )
-    workspace = Path(work_dir).expanduser().resolve() if work_dir else run_dir_path / "cnb" / "campaign-repository"
-    if workspace.exists():
+    workspace = (
+        Path(str(existing_receipt["workspace"])).expanduser().resolve()
+        if resume and existing_receipt and existing_receipt.get("workspace")
+        else (Path(work_dir).expanduser().resolve() if work_dir else run_dir_path / "cnb" / "campaign-repository")
+    )
+    if work_dir is not None and resume and existing_receipt and str(Path(work_dir).expanduser().resolve()) != str(workspace):
+        raise CampaignRepositoryError("retry work directory does not match the receipt-bound workspace")
+    if resume and work_dir is None:
+        try:
+            workspace.relative_to(run_dir_path)
+        except ValueError as exc:
+            raise CampaignRepositoryError(
+                "receipt-bound workspace is outside the run directory; repeat the retry with the exact --work-dir"
+            ) from exc
+    if workspace.exists() and not resume:
         raise CampaignRepositoryError(f"campaign work directory already exists; refusing to overwrite: {workspace}")
-    workspace.mkdir(parents=True, exist_ok=False)
+    if workspace.exists() and resume:
+        if not existing_receipt or not _workspace_is_receipt_bound(workspace, existing_receipt):
+            raise CampaignRepositoryError(f"existing campaign work directory is not receipt-bound: {workspace}")
+        if not _workspace_stage_complete(workspace, run_id=run_id, manifest_summary=manifest_summary, github_commit=commit):
+            # Only a workspace named by the exact receipt may be discarded;
+            # this is the recovery path for an interrupted export/stage.
+            shutil.rmtree(workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
     export_dir = workspace / "runtime-export"
     checkout = workspace / "repo"
-    receipt_file = Path(receipt_path).expanduser().resolve() if receipt_path else run_dir_path / "cnb" / "campaign-receipt.json"
-    stage_receipt: dict[str, Any] = {
-        "schema_version": RECEIPT_SCHEMA_VERSION,
-        "atom": "cnb_campaign_repository",
-        "status": "planned" if not execute else "preparing",
-        "run_id": run_id,
-        "repository": repository,
-        "repository_name": name,
-        "organization": str(policy["organization_slug"]),
-        "repository_prefix": str(policy["campaign_repository_prefix"]),
-        "github_repository": "chen-da-pang/music-analysis-kb",
-        "github_commit": commit,
-        "allow_unpublished": allow_unpublished,
-        "runtime_image": str(policy["verified_runtime_image_digest"]),
-        "runtime_digest": str(policy["verified_runtime_image_digest"]).split("@", 1)[-1],
-        "transport": campaign["transport"],
-        "manifest": manifest_summary,
-        "runtime_export": None,
-        "campaign_repository_config": str((checkout / ".cnb.yml").resolve()),
-        "workspace": str(workspace),
-        "checkout": str(checkout),
-        "preflight": preflight,
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-        "builds": [],
-        "delivery": None,
-        "failure": None,
-    }
-    _atomic_write_json(receipt_file, stage_receipt)
-    try:
-        provenance = _export_runtime(root, commit, export_dir, allow_unpublished=allow_unpublished)
-        runtime_export = _validate_exported_runtime(export_dir, provenance, commit)
-        shutil.copytree(export_dir, checkout)
-        input_destination = checkout / "data" / "input" / run_id
-        _copy_tree_with_links(staging_path, input_destination)
-        config = generate_campaign_config(
-            policy,
-            campaign_id=run_id,
-            repository_slug=repository,
-            item_count=int(manifest_summary["item_count"]),
-            source_manifest_sha256=str(manifest_summary["sha256"]),
-        )
-        (checkout / ".cnb.yml").write_text(config, encoding="utf-8")
-        _write_gitattributes(checkout, run_id, str(campaign["transport"]))
-        local_metadata = {
+    receipt: dict[str, Any] = dict(existing_receipt or {})
+    receipt.update(
+        {
             "schema_version": RECEIPT_SCHEMA_VERSION,
+            "atom": "cnb_campaign_repository",
+            "status": "planned" if not execute else "preparing",
             "run_id": run_id,
             "repository": repository,
+            "repository_name": name,
+            "organization": str(policy["organization_slug"]),
+            "repository_prefix": str(policy["campaign_repository_prefix"]),
+            "github_repository": "chen-da-pang/music-analysis-kb",
+            "operations_sha256": operations_sha256,
             "github_commit": commit,
             "allow_unpublished": allow_unpublished,
             "runtime_image": str(policy["verified_runtime_image_digest"]),
-            "manifest": manifest_summary,
-            "provenance": provenance,
-            "runtime_export": runtime_export,
+            "runtime_digest": str(policy["verified_runtime_image_digest"]).split("@", 1)[-1],
             "transport": campaign["transport"],
+            "manifest": manifest_summary,
+            "campaign_repository_config": str((checkout / ".cnb.yml").resolve()),
+            "workspace": str(workspace),
+            "checkout": str(checkout),
+            "preflight": preflight,
+            "updated_at": now_iso(),
+            "builds": receipt.get("builds") if isinstance(receipt.get("builds"), list) else [],
+            "delivery": receipt.get("delivery"),
+            "failure": None,
+            "repository_created": bool(receipt.get("repository_created", False)),
+            "repository_pushed": bool(receipt.get("repository_pushed", False)),
         }
-        (checkout / "campaign-input.json").write_text(json.dumps(local_metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    except Exception as exc:
-        stage_receipt["status"] = "failed"
-        stage_receipt["failure"] = {"message": str(exc), "phase": "export_or_stage"}
-        stage_receipt["updated_at"] = now_iso()
-        _atomic_write_json(receipt_file, stage_receipt)
-        raise
-    receipt = {
-        "schema_version": RECEIPT_SCHEMA_VERSION,
-        "atom": "cnb_campaign_repository",
-        "status": "planned" if not execute else "preparing",
-        "run_id": run_id,
-        "repository": repository,
-        "repository_name": name,
-        "organization": str(policy["organization_slug"]),
-        "repository_prefix": str(policy["campaign_repository_prefix"]),
-        "github_repository": "chen-da-pang/music-analysis-kb",
-        "github_commit": commit,
-        "allow_unpublished": allow_unpublished,
-        "runtime_image": str(policy["verified_runtime_image_digest"]),
-        "runtime_digest": str(policy["verified_runtime_image_digest"]).split("@", 1)[-1],
-        "transport": campaign["transport"],
-        "manifest": manifest_summary,
-        "runtime_export": runtime_export,
-        "campaign_repository_config": str((checkout / ".cnb.yml").resolve()),
-        "workspace": str(workspace),
-        "checkout": str(checkout),
-        "preflight": preflight,
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-        "builds": [],
-        "delivery": None,
-        "failure": None,
-    }
+    )
+    receipt.setdefault("created_at", now_iso())
     _atomic_write_json(receipt_file, receipt)
     try:
-        if execute:
-            create_response = runner(
-                [
-                    "cnb", "repositories", "create-repo", "--slug", str(policy["organization_slug"]),
-                    "--name", name, "--visibility", str(campaign["visibility"]), "--verbose",
-                ]
-            )
-            if _is_not_found(create_response):
-                raise CampaignRepositoryError(f"CNB repository creation returned 404: {repository}")
-            if _repo_exists(repository, runner) is False:
-                raise CampaignRepositoryError(f"CNB repository was not visible after creation: {repository}")
-            env, askpass = _git_push_environment()
-            try:
-                _run_authenticated_git_init(checkout, repository, env, transport=str(campaign["transport"]))
-            finally:
-                if askpass is not None:
-                    askpass.unlink(missing_ok=True)
-            receipt["status"] = "created_and_pushed"
-            receipt["campaign_commit"] = _run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).stdout.strip()
-            receipt["repository_created"] = True
-            receipt["repository_pushed"] = True
+        stage_complete = _workspace_stage_complete(
+            workspace, run_id=run_id, manifest_summary=manifest_summary, github_commit=commit
+        )
+        if stage_complete:
+            provenance = _read_json(export_dir / ".github-source.json")
+            runtime_export = _validate_exported_runtime(export_dir, provenance, commit)
         else:
-            receipt["repository_created"] = False
-            receipt["repository_pushed"] = False
+            provenance = _export_runtime(root, commit, export_dir, allow_unpublished=allow_unpublished)
+            runtime_export = _validate_exported_runtime(export_dir, provenance, commit)
+            shutil.copytree(export_dir, checkout)
+            input_destination = checkout / "data" / "input" / run_id
+            _copy_tree_with_links(staging_path, input_destination)
+            config = generate_campaign_config(
+                policy,
+                campaign_id=run_id,
+                repository_slug=repository,
+                item_count=int(manifest_summary["item_count"]),
+                source_manifest_sha256=str(manifest_summary["sha256"]),
+            )
+            (checkout / ".cnb.yml").write_text(config, encoding="utf-8")
+            _write_gitattributes(checkout, run_id, str(campaign["transport"]))
+            local_metadata = {
+                "schema_version": RECEIPT_SCHEMA_VERSION,
+                "run_id": run_id,
+                "repository": repository,
+                "github_commit": commit,
+                "allow_unpublished": allow_unpublished,
+                "runtime_image": str(policy["verified_runtime_image_digest"]),
+                "manifest": manifest_summary,
+                "provenance": provenance,
+                "runtime_export": runtime_export,
+                "transport": campaign["transport"],
+            }
+            (checkout / "campaign-input.json").write_text(
+                json.dumps(local_metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        receipt["runtime_export"] = runtime_export
+        receipt["status"] = "planned" if not execute else "preparing"
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(receipt_file, receipt)
+    except Exception as exc:
+        receipt["status"] = "failed"
+        receipt["failure"] = {"message": str(exc), "phase": "export_or_stage"}
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(receipt_file, receipt)
+        raise
+    try:
+        if execute:
+            target_present = _repo_exists(repository, runner)
+            if receipt["repository_created"] and not target_present:
+                raise CampaignRepositoryError(
+                    f"receipt says repository was created, but CNB no longer exposes it: {repository}"
+                )
+            if not receipt["repository_created"]:
+                if target_present:
+                    raise CampaignRepositoryError(
+                        "target campaign repository exists without receipt-bound creation evidence; refusing to claim it"
+                    )
+                create_response = runner(
+                    [
+                        "cnb", "repositories", "create-repo", "--slug", str(policy["organization_slug"]),
+                        "--name", name, "--visibility", str(campaign["visibility"]), "--verbose",
+                    ]
+                )
+                if _is_not_found(create_response):
+                    raise CampaignRepositoryError(f"CNB repository creation returned 404: {repository}")
+                if _repo_exists(repository, runner) is False:
+                    raise CampaignRepositoryError(f"CNB repository was not visible after creation: {repository}")
+                receipt["repository_created"] = True
+                receipt["updated_at"] = now_iso()
+                _atomic_write_json(receipt_file, receipt)
+            if not receipt["repository_pushed"]:
+                env, askpass = _git_push_environment()
+                try:
+                    _run_authenticated_git_init(checkout, repository, env, transport=str(campaign["transport"]))
+                finally:
+                    if askpass is not None:
+                        askpass.unlink(missing_ok=True)
+                receipt["repository_pushed"] = True
+                receipt["status"] = "created_and_pushed"
+                receipt["campaign_commit"] = _run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).stdout.strip()
+            else:
+                receipt["status"] = "created_and_pushed"
+        else:
+            receipt["repository_created"] = bool(receipt.get("repository_created", False))
+            receipt["repository_pushed"] = bool(receipt.get("repository_pushed", False))
         receipt["updated_at"] = now_iso()
         _atomic_write_json(receipt_file, receipt)
         receipt["receipt"] = str(receipt_file)
         return receipt
     except Exception as exc:
+        # A create call can succeed while the subsequent push fails.  Query the
+        # exact slug once and preserve that fact so the next invocation resumes
+        # instead of attempting a second repository creation.
+        try:
+            if _repo_exists(repository, runner):
+                receipt["repository_created"] = True
+        except Exception:
+            pass
+        receipt["repository_pushed"] = bool(receipt.get("repository_pushed", False)) and not bool(receipt.get("failure"))
         receipt["status"] = "failed"
         receipt["failure"] = {"message": str(exc), "phase": "create_or_push"}
         receipt["updated_at"] = now_iso()
@@ -871,16 +1118,31 @@ def prepare_campaign_repository(
 
 
 def _run_authenticated_git_init(checkout: Path, repository: str, env: Mapping[str, str], *, transport: str) -> None:
-    _run(["git", "init", "-q"], cwd=checkout)
+    if not (checkout / ".git").is_dir():
+        _run(["git", "init", "-q"], cwd=checkout)
     _run(["git", "config", "user.name", "Music KB Campaign"], cwd=checkout)
     _run(["git", "config", "user.email", "music-kb-campaign@wuyoumusic.invalid"], cwd=checkout)
     _run(["git", "config", "commit.gpgSign", "false"], cwd=checkout)
     if transport == "lfs":
         _run(["git", "lfs", "install", "--local", "--force"], cwd=checkout)
-    _run(["git", "remote", "add", "origin", f"https://cnb.cool/{repository}.git"], cwd=checkout)
-    _run(["git", "add", "-A"], cwd=checkout)
-    _run(["git", "add", "-f", "data", "campaign-input.json"], cwd=checkout)
-    _run(["git", "commit", "-qm", f"campaign input {repository.rsplit('/', 1)[-1]}"], cwd=checkout)
+    expected_remote = f"https://cnb.cool/{repository}.git"
+    remote = subprocess.run(
+        ["git", "remote", "get-url", "origin"], cwd=str(checkout), text=True,
+        capture_output=True, check=False,
+    )
+    if remote.returncode == 0:
+        if remote.stdout.strip() != expected_remote:
+            raise CampaignRepositoryError("receipt-bound checkout origin does not match campaign repository")
+    else:
+        _run(["git", "remote", "add", "origin", expected_remote], cwd=checkout)
+    head = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"], cwd=str(checkout), text=True,
+        capture_output=True, check=False,
+    )
+    if head.returncode != 0:
+        _run(["git", "add", "-A"], cwd=checkout)
+        _run(["git", "add", "-f", "data", "campaign-input.json"], cwd=checkout)
+        _run(["git", "commit", "-qm", f"campaign input {repository.rsplit('/', 1)[-1]}"], cwd=checkout)
     _run_git_authenticated(["git", "push", "-u", "origin", "HEAD:main"], cwd=checkout, env=env)
 
 
@@ -943,15 +1205,36 @@ def _authenticated_clone(repository: str, branch: str, destination: Path) -> Non
             askpass.unlink(missing_ok=True)
 
 
+def _ledger_clone_is_bound(ledger_dir: Path, repository: str) -> bool:
+    expected = f"https://cnb.cool/{repository}.git"
+    remote = subprocess.run(
+        ["git", "-C", str(ledger_dir), "config", "--get", "remote.origin.url"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return remote.returncode == 0 and remote.stdout.strip() == expected
+
+
 def _recover_delivery(receipt: dict[str, Any], *, run_dir: Path, require_source_url: bool = False) -> dict[str, Any]:
     checkout = Path(str(receipt["checkout"])).resolve()
     campaign_id = str(receipt["run_id"])
     ledger_branch = str(receipt["ledger_branch"])
     ledger_dir = run_dir / "cnb" / "ledger-recovery"
     if ledger_dir.exists():
-        raise CampaignRepositoryError(f"ledger recovery directory already exists: {ledger_dir}")
-    ledger_dir.parent.mkdir(parents=True, exist_ok=True)
-    _authenticated_clone(str(receipt["repository"]), ledger_branch, ledger_dir)
+        # A previous builder attempt may have failed after cloning.  Reuse the
+        # receipt-bound clone when it still contains the expected ledger; never
+        # reject a same-run retry merely because that durable recovery folder
+        # remains on disk.
+        if (
+            not (ledger_dir / ".git").is_dir()
+            or not (ledger_dir / "campaign_ledger.jsonl").is_file()
+            or not _ledger_clone_is_bound(ledger_dir, str(receipt["repository"]))
+        ):
+            shutil.rmtree(ledger_dir)
+    if not ledger_dir.exists():
+        ledger_dir.parent.mkdir(parents=True, exist_ok=True)
+        _authenticated_clone(str(receipt["repository"]), ledger_branch, ledger_dir)
     ledger = ledger_dir / "campaign_ledger.jsonl"
     if not ledger.is_file():
         raise CampaignRepositoryError(f"durable ledger branch has no campaign_ledger.jsonl: {ledger_branch}")
@@ -1010,18 +1293,21 @@ def submit_campaign(
 
     operations = Path(operations_path).expanduser().resolve()
     load_validated_operations(operations, required_atom="cnb_campaign_submit")
+    operations_sha256 = sha256_file(operations)
     policy = load_campaign_policy(policy_path)
     receipt_file = Path(receipt_path).expanduser().resolve()
     receipt = _read_json(receipt_file)
-    name, repository = _full_repository_slug(policy, str(receipt.get("run_id", "")))
-    if receipt.get("repository") != repository or not str(repository).split("/", 1)[1].startswith(str(policy["campaign_repository_prefix"])):
-        raise CampaignRepositoryError("campaign receipt repository does not match run_id and strict prefix")
-    if receipt.get("runtime_image") != policy["verified_runtime_image_digest"]:
-        raise CampaignRepositoryError("campaign receipt runtime digest does not match policy")
+    binding = validate_campaign_receipt_binding(policy, receipt, operations_sha256=operations_sha256)
+    if not binding["valid"]:
+        raise CampaignRepositoryError("campaign receipt binding is invalid: " + "; ".join(binding["errors"]))
+    _, repository = _full_repository_slug(policy, str(receipt.get("run_id", "")))
     if receipt.get("repository_created") is not True and execute:
         raise CampaignRepositoryError("cannot submit a repository that was not created and pushed")
+    if execute and receipt.get("repository_pushed") is not True:
+        raise CampaignRepositoryError("cannot submit a campaign repository whose initial push is incomplete")
     receipt["ledger_branch"] = str(policy["campaign_repository"]["ledger_branch_template"]).format(campaign_id=receipt["run_id"])
     receipt["policy_path"] = str(Path(policy_path).expanduser().resolve())
+    receipt["operations_sha256"] = operations_sha256
     if not execute:
         receipt["status"] = "submit_planned"
         receipt["updated_at"] = now_iso()
@@ -1038,6 +1324,7 @@ def submit_campaign(
     if not isinstance(existing_builds, list):
         existing_builds = []
     builds_by_index: dict[int, dict[str, Any]] = {}
+    retry_history: dict[int, list[dict[str, Any]]] = {}
     for raw_build in existing_builds:
         if not isinstance(raw_build, dict):
             raise CampaignRepositoryError("campaign receipt contains a malformed build record")
@@ -1048,12 +1335,11 @@ def submit_campaign(
         if not 1 <= index <= shard_count or index in builds_by_index:
             raise CampaignRepositoryError("campaign receipt contains a duplicate/out-of-range shard index")
         status = str(raw_build.get("status", "")).lower()
-        if status in {"error", "failed", "cancel", "cancelled"}:
-            raise CampaignRepositoryError(
-                f"shard {index} already failed in this receipt; do not implicitly re-run it or change repository slug"
-            )
         if not str(raw_build.get("sn", "")).strip():
             raise CampaignRepositoryError(f"campaign receipt shard {index} has no build SN")
+        if status in {"error", "failed", "cancel", "cancelled", "skipped"}:
+            retry_history.setdefault(index, []).append(dict(raw_build))
+            continue
         builds_by_index[index] = dict(raw_build)
     builds: list[dict[str, Any]] = [builds_by_index[index] for index in sorted(builds_by_index)]
     started = time.monotonic()
@@ -1081,7 +1367,18 @@ def submit_campaign(
             )
             response = runner(["cnb", "build", "start-build", "--repo", repository, "--data", body, "--verbose"])
             sn = _extract_build_sn(response)
-            builds.append({"index": index, "id": shard_id, "sn": sn, "status": "submitted", "env": env})
+            attempts = len(retry_history.get(index, [])) + 1
+            builds.append(
+                {
+                    "index": index,
+                    "id": shard_id,
+                    "sn": sn,
+                    "status": "submitted",
+                    "env": env,
+                    "attempt": attempts,
+                    "previous_failures": retry_history.get(index, []),
+                }
+            )
             builds_by_index[index] = builds[-1]
             receipt["builds"] = builds
             receipt["updated_at"] = now_iso()
@@ -1116,6 +1413,106 @@ def submit_campaign(
         raise
 
 
+def cleanup_receipt_validation_errors(
+    policy: Mapping[str, Any], receipt: Mapping[str, Any], *, operations_sha256: str | None = None
+) -> list[str]:
+    """Return every missing/inconsistent proof that would make deletion unsafe."""
+
+    errors = campaign_receipt_binding_errors(policy, receipt, operations_sha256=operations_sha256)
+    if receipt.get("status") != "completed":
+        errors.append("campaign receipt status is not completed")
+    if receipt.get("repository_created") is not True:
+        errors.append("repository_created proof is missing")
+    if receipt.get("repository_pushed") is not True:
+        errors.append("repository_pushed proof is missing")
+    commit = str(receipt.get("github_commit", ""))
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        errors.append("github_commit provenance is missing or invalid")
+    manifest = receipt.get("manifest")
+    if isinstance(manifest, Mapping):
+        item_count = manifest.get("item_count")
+        source_links = manifest.get("source_links")
+        manifest_sha = str(manifest.get("sha256", ""))
+        if isinstance(item_count, bool) or not isinstance(item_count, int) or item_count <= 0:
+            errors.append("manifest item_count is missing or invalid")
+        if isinstance(source_links, bool) or not isinstance(source_links, int) or source_links != item_count:
+            errors.append("manifest source_links does not equal item_count")
+        if not SHA256.fullmatch(manifest_sha):
+            errors.append("manifest sha256 is missing or invalid")
+        if str(manifest.get("campaign_id", "")) != str(receipt.get("run_id", "")):
+            errors.append("manifest campaign_id does not match run_id")
+        manifest_path = Path(str(manifest.get("path", ""))).expanduser()
+        if not manifest_path.is_file():
+            errors.append("source manifest file is missing for provenance verification")
+        elif SHA256.fullmatch(manifest_sha) and sha256_file(manifest_path) != manifest_sha:
+            errors.append("source manifest sha256 does not match the receipt")
+        elif manifest_path.is_file():
+            try:
+                physical_rows = [line for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+                if len(physical_rows) != item_count:
+                    errors.append("source manifest physical row count does not match item_count")
+            except (OSError, UnicodeDecodeError):
+                errors.append("source manifest cannot be decoded for provenance verification")
+    runtime_export = receipt.get("runtime_export")
+    if not isinstance(runtime_export, Mapping) or runtime_export.get("validated") is not True:
+        errors.append("validated runtime export provenance is missing")
+    else:
+        required = runtime_export.get("required_files")
+        paths = {str(item.get("path")) for item in required if isinstance(item, Mapping)} if isinstance(required, list) else set()
+        if paths != set(REQUIRED_CAMPAIGN_RUNTIME_FILES):
+            errors.append("runtime export required-file provenance is incomplete")
+        if isinstance(required, list):
+            for item in required:
+                if not isinstance(item, Mapping):
+                    continue
+                item_path = str(item.get("path", ""))
+                if not SHA256.fullmatch(str(item.get("sha256", ""))) or not isinstance(item.get("bytes"), int) or int(item.get("bytes", 0)) <= 0:
+                    errors.append(f"runtime export hash/byte provenance is incomplete for {item_path}")
+    builds = receipt.get("builds")
+    expected_shards = int(policy["campaign_repository"]["shard_count"])
+    if not isinstance(builds, list):
+        errors.append("builds list is missing")
+    else:
+        indexes: list[int] = []
+        for raw in builds:
+            if not isinstance(raw, Mapping):
+                errors.append("builds contains a malformed shard record")
+                continue
+            try:
+                index = int(raw.get("index"))
+            except (TypeError, ValueError):
+                errors.append("build shard index is invalid")
+                continue
+            indexes.append(index)
+            if str(raw.get("status", "")).lower() != "success":
+                errors.append(f"shard {index} is not successful")
+            if not str(raw.get("sn", "")).strip() or not str(raw.get("id", "")).strip():
+                errors.append(f"shard {index} lacks durable id/SN")
+        if sorted(indexes) != list(range(1, expected_shards + 1)):
+            errors.append("build shard index set is incomplete or duplicated")
+    delivery = receipt.get("delivery")
+    if not isinstance(delivery, Mapping):
+        errors.append("canonical delivery proof is missing")
+    else:
+        manifest_count = int(manifest.get("item_count", 0)) if isinstance(manifest, Mapping) else 0
+        if delivery.get("count") != manifest_count:
+            errors.append("delivery count does not match manifest item_count")
+        delivery_sha = str(delivery.get("sha256", ""))
+        delivery_path = Path(str(delivery.get("path", ""))).expanduser()
+        if not SHA256.fullmatch(delivery_sha):
+            errors.append("delivery sha256 is missing or invalid")
+        elif not delivery_path.is_file():
+            errors.append("delivery file is missing for hash verification")
+        elif sha256_file(delivery_path) != delivery_sha:
+            errors.append("delivery sha256 does not match the canonical delivery file")
+        if not str(delivery.get("ledger_branch", "")).strip():
+            errors.append("delivery ledger_branch proof is missing")
+    for key in ("campaign_repository_config", "workspace", "checkout"):
+        if not str(receipt.get(key, "")).strip():
+            errors.append(f"receipt {key} provenance is missing")
+    return sorted(set(errors))
+
+
 def cleanup_campaign_repository(
     *,
     policy_path: str | Path,
@@ -1130,14 +1527,14 @@ def cleanup_campaign_repository(
 
     operations = Path(operations_path).expanduser().resolve()
     load_validated_operations(operations, required_atom="cnb_campaign_cleanup")
+    operations_sha256 = sha256_file(operations)
     policy = load_campaign_policy(policy_path)
     receipt_file = Path(receipt_path).expanduser().resolve()
     receipt = _read_json(receipt_file)
-    _, repository = _full_repository_slug(policy, str(receipt.get("run_id", "")))
-    if receipt.get("repository") != repository:
-        raise CampaignRepositoryError("cleanup receipt repository does not match its run_id/prefix")
-    if receipt.get("runtime_image") != policy["verified_runtime_image_digest"]:
-        raise CampaignRepositoryError("cleanup receipt runtime digest does not match policy")
+    try:
+        _, repository = _full_repository_slug(policy, str(receipt.get("run_id", "")))
+    except CampaignRepositoryError:
+        repository = str(receipt.get("repository", ""))
     result: dict[str, Any] = {
         "action": "cnb_campaign_cleanup",
         "repository": repository,
@@ -1160,20 +1557,31 @@ def cleanup_campaign_repository(
         return result
 
     if not confirm:
-        result.update({"status": "dry_run", "present": _repo_exists(repository, runner)})
+        present = None
+        if repository:
+            try:
+                present = _repo_exists(repository, runner)
+            except Exception as exc:
+                result["failures"].append({"kind": "presence", "error": str(exc)})
+        result.update({"status": "dry_run", "present": present, "clean": False})
         return record_result()
-    if receipt.get("status") != "completed":
-        result["failures"].append({"kind": "receipt", "error": "campaign receipt is not completed"})
+    for error in cleanup_receipt_validation_errors(policy, receipt, operations_sha256=operations_sha256):
+        result["failures"].append({"kind": "receipt", "error": error})
     if not release_verified:
         result["failures"].append({"kind": "release-gate", "error": "verified local release is required"})
     if not peer_gate:
         result["failures"].append({"kind": "peer-gate", "error": "peer gate or explicit peer skip is required"})
+    if result["failures"]:
+        result["status"] = "blocked"
+        result["clean"] = False
+        return record_result()
     protected_before = _protected_runtime_status(policy, runner)
     result["protected_runtime_before"] = protected_before
     if not protected_before["protected"]:
         result["failures"].append({"kind": "protected-runtime", "error": "protected runtime/main/digest is unhealthy"})
     if result["failures"]:
         result["status"] = "blocked"
+        result["clean"] = False
         return record_result()
     workspaces_response, absent = _cnb_optional(
         ["cnb", "workspace", "list-workspaces", "--slug", repository, "--status", "running", "--page", "1", "--page-size", "100", "--verbose"],
@@ -1183,6 +1591,7 @@ def cleanup_campaign_repository(
     if workspace_rows:
         result["failures"].append({"kind": "workspace", "error": "running workspace exists"})
         result["status"] = "blocked"
+        result["clean"] = False
         return record_result()
     organization = str(policy["organization_slug"])
     before_group = _group_volume(organization, runner)["object"]
@@ -1230,6 +1639,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--github-commit")
     parser.add_argument("--expected-count", type=int)
     parser.add_argument("--transport", choices=("lfs", "git-objects"))
+    parser.add_argument("--resume-repository", help="Exact receipt-bound campaign repository allowed during resume")
     parser.add_argument("--execute", action="store_true", help="Allow CNB repository/build/delete side effects")
     parser.add_argument(
         "--allow-unpublished",
@@ -1253,7 +1663,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             operations = args.operations_file.expanduser().resolve()
             load_validated_operations(operations, required_atom="cnb_campaign_repository")
             policy = _policy_with_transport(load_campaign_policy(args.policy), args.transport)
-            result = campaign_preflight(policy, runner=run_cnb)
+            result = campaign_preflight(
+                policy,
+                runner=run_cnb,
+                resume_repository=args.resume_repository,
+            )
         elif args.action == "prepare":
             if not args.run_id or not args.staging or not args.run_dir or not args.github_commit:
                 raise CampaignRepositoryError("prepare requires --run-id, --staging, --run-dir, and --github-commit")

@@ -119,8 +119,13 @@ receipt-bound campaign repository, after checking for running workspaces and
 verifying repository 404/zero volume, organization usage decrease when bytes
 existed, and protected runtime/main preservation. Any failed shard, release
 gate, peer gate, receipt check, or deletion verification leaves the same
-repository and receipt for recovery. A dry-run or blocked cleanup is recorded in
-that receipt and does not delete anything.
+repository and receipt for recovery. A retry keeps the exact run/repository
+binding, may retry a failed shard by its original index, and may reuse a
+receipt-bound ledger clone; it never creates a replacement slug. Cleanup also
+requires complete repository-created/pushed proof, a full successful shard
+index set, runtime-export provenance, and a delivery hash/count bound to the
+manifest. A dry-run or blocked cleanup is recorded in that receipt and does
+not delete anything.
 
 The final storage atom handles only visible legacy refs/assets. It is not a
 manual orphan-LFS GC: CNB documents a default seven-day server-side window in

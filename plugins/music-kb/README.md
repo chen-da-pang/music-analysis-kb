@@ -27,12 +27,18 @@ with a strict LF JSONL manifest; see [`../../docs/import-contract.md`](../../doc
 The complete publisher-side weekly run is `music-kb weekly-run`. It records a
 run state and one receipt per atom under `data/weekly_runs/<run-id>/`, reads the
 versioned final operating decisions from `references/validated-operations.json`,
-and stops at the first failed gate. With no `--rank-id`, it uses the versioned
+and stops at the first failed gate. Each atom receipt includes the validated
+operations-file hash. With no `--rank-id`, it uses the versioned
 `references/kugou-chart-profile.json` to capture all six configured charts and
 their pages; an explicit `--rank-id` is a bounded single-page override. A fresh
 run materializes one disposable CNB campaign repository per run id after the
 Claude Code download. Pass `--delivery <canonical.jsonl>` only to resume from
-an already completed CNB delivery; pass `--cnb-command <command>` only for the
+an already completed CNB delivery; when the same run has a campaign receipt,
+the delivery is bound to that receipt and its cleanup still runs after the
+release/peer gates. A delivery without a campaign receipt has no campaign
+cleanup. A failed run can be resumed with the same `--run-id`: the receipt's
+exact repository, GitHub commit, runtime digest, and manifest hash/count are
+verified before any campaign retry. Pass `--cnb-command <command>` only for the
 explicit legacy fallback that writes `MUSIC_KB_CNB_OUTPUT`. Use
 `--download-dry-run` or `--cnb-campaign-dry-run` while reviewing a new workflow;
 neither creates, pushes, or starts a CNB campaign. Every production

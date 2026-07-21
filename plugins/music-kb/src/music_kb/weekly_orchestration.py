@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import importlib.util
 import os
 import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .campaign_delivery import load_campaign_delivery_file
 from .operation_context import RunContext, atom, atomic_write_json
@@ -214,6 +215,43 @@ def _inventory_song_count(path: Path) -> int:
     return len(songs)
 
 
+def _read_optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"campaign receipt is unreadable: {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"campaign receipt must be a JSON object: {path}")
+    return value
+
+
+def _delivery_file_binding(path: Path, *, expected_count: int | None = None) -> dict[str, Any]:
+    entries = load_campaign_delivery_file(path, expected_count=expected_count)
+    return {
+        "path": str(path.resolve()),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "count": len(entries),
+    }
+
+
+def _receipt_delivery_matches(receipt: Mapping[str, Any], delivery: Mapping[str, Any]) -> bool:
+    recorded = receipt.get("delivery")
+    if not isinstance(recorded, Mapping):
+        return False
+    try:
+        recorded_path = Path(str(recorded.get("path", ""))).expanduser().resolve()
+        supplied_path = Path(str(delivery.get("path", ""))).expanduser().resolve()
+        return (
+            recorded_path == supplied_path
+            and str(recorded.get("sha256", "")) == str(delivery.get("sha256", ""))
+            and int(recorded.get("count", -1)) == int(delivery.get("count", -2))
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def _cleanup_gate_satisfied(
     *,
     publish: bool,
@@ -336,8 +374,64 @@ def run_weekly_run(
     campaign_receipt_result: dict[str, Any] | None = None
     materialization_result: dict[str, Any] | None = None
     download_result: dict[str, Any] = {}
+    campaign_resume = False
+    campaign_resume_has_delivery = False
 
     with RunContext(run_id=run_id, run_dir=run_dir, operations_file=operations_path) as context:
+        campaign_adapter = None
+        existing_campaign_receipt = _read_optional_json(campaign_receipt_path)
+        if existing_campaign_receipt is not None:
+            campaign_adapter = _load_script_module(campaign_adapter_path, "music_kb_campaign_resume")
+            resume_policy = campaign_adapter._policy_with_transport(
+                campaign_adapter.load_campaign_policy(cnb_storage_policy_path), cnb_transport
+            )
+            if delivery_supplied:
+                binding = campaign_adapter.validate_campaign_receipt_binding(
+                    resume_policy,
+                    existing_campaign_receipt,
+                    run_id=run_id,
+                    transport=cnb_transport,
+                )
+                if not binding["valid"]:
+                    raise RuntimeError("supplied delivery campaign receipt binding failed: " + "; ".join(binding["errors"]))
+                supplied_binding = _delivery_file_binding(delivery_path, expected_count=expected_count) if delivery_path else None
+                if supplied_binding is not None:
+                    if not _receipt_delivery_matches(existing_campaign_receipt, supplied_binding):
+                        raise RuntimeError("supplied delivery does not match the campaign receipt delivery hash/count/path")
+                    campaign_receipt_result = existing_campaign_receipt
+                    campaign_resume_has_delivery = True
+            else:
+                campaign_resume = True
+                expected_commit = cnb_github_commit or _git_head_commit(root)
+                staging_manifest = campaign_adapter._read_manifest(
+                    campaign_staging_path,
+                    expected_count=int((existing_campaign_receipt.get("manifest") or {}).get("item_count", 0)),
+                )
+                binding = campaign_adapter.validate_campaign_receipt_binding(
+                    resume_policy,
+                    existing_campaign_receipt,
+                    run_id=run_id,
+                    github_commit=expected_commit,
+                    manifest=staging_manifest,
+                    transport=cnb_transport,
+                )
+                if not binding["valid"]:
+                    raise RuntimeError("same-run campaign receipt binding failed: " + "; ".join(binding["errors"]))
+                campaign_receipt_result = existing_campaign_receipt
+                materialization_result = {
+                    "item_count": int(staging_manifest["item_count"]),
+                    "source_links": int(staging_manifest["source_links"]),
+                    "source_bytes": int(staging_manifest["source_bytes"]),
+                    "manifest": str(staging_manifest["path"]),
+                    "manifest_sha256": str(staging_manifest["sha256"]),
+                    "status": "resumed_from_receipt",
+                }
+                delivery_info = existing_campaign_receipt.get("delivery")
+                if isinstance(delivery_info, dict) and delivery_info.get("path"):
+                    candidate_delivery = Path(str(delivery_info["path"])).expanduser().resolve()
+                    if candidate_delivery.is_file():
+                        delivery_path = candidate_delivery
+                        campaign_resume_has_delivery = True
         with atom(context, "preflight", inputs={"workspace": str(root), "publish": publish} ) as outputs:
             preflight = run_preflight(
                 workspace=root,
@@ -384,6 +478,32 @@ def run_weekly_run(
                         "delivery_count": len(entries),
                     }
                 )
+                if campaign_receipt_result is not None:
+                    outputs["campaign_receipt"] = str(campaign_receipt_path)
+                    outputs["campaign_receipt_bound"] = True
+            elif campaign_resume:
+                command = [
+                    sys.executable,
+                    str(campaign_adapter_path),
+                    "preflight",
+                    "--policy",
+                    str(cnb_storage_policy_path),
+                    "--operations-file",
+                    str(operations_path),
+                    "--transport",
+                    cnb_transport,
+                    "--resume-repository",
+                    str(campaign_receipt_result["repository"]),
+                ]
+                payload, completed = _json_command_allow_failure(
+                    command, cwd=root, timeout_seconds=min(timeout_seconds, 300)
+                )
+                outputs.update(payload)
+                if completed.returncode != 0:
+                    raise RuntimeError(
+                        "CNB same-campaign resume preflight failed: "
+                        f"{completed.stderr.strip() or outputs}"
+                    )
             elif cnb_command:
                 # Explicit legacy fallback: it still targets the historical
                 # protected-repository route and therefore keeps the old
@@ -442,7 +562,7 @@ def run_weekly_run(
                 "termination": profile.get("termination") if profile else "single_page",
             },
         ) as outputs:
-            if delivery_supplied:
+            if delivery_supplied or campaign_resume:
                 outputs.update({"status": "skipped", "reason": resume_reason})
             else:
                 charts = (
@@ -502,7 +622,7 @@ def run_weekly_run(
 
         merged_chart = run_dir / "chart-songs.json"
         with atom(context, "chart_dedupe", inputs={"captures": [item["songs"] for item in capture_results]}) as outputs:
-            if delivery_supplied:
+            if delivery_supplied or campaign_resume:
                 outputs.update({"status": "skipped", "reason": resume_reason})
             else:
                 summary = _merge_chart_exports(
@@ -513,7 +633,7 @@ def run_weekly_run(
         queue_path = run_dir / "download_queue.jsonl"
         queue_manifest: dict[str, Any] = {}
         with atom(context, "historical_dedupe", inputs={"inventory": str(inventory_path), "source": str(merged_chart)}) as outputs:
-            if delivery_supplied:
+            if delivery_supplied or campaign_resume:
                 outputs.update({"status": "skipped", "reason": resume_reason})
             else:
                 inventory_command = [
@@ -545,7 +665,7 @@ def run_weekly_run(
                 outputs.update({"inventory": inventory_result, "queue": queue_manifest})
 
         with atom(context, "claude_download", inputs={"queue": str(queue_path), "dry_run": download_dry_run}) as outputs:
-            if delivery_supplied:
+            if delivery_supplied or campaign_resume:
                 outputs.update({"status": "skipped", "reason": resume_reason})
             else:
                 command = [
@@ -577,7 +697,7 @@ def run_weekly_run(
             "fallback_download",
             inputs={"run_id": fallback_run_id, "dry_run": download_dry_run},
         ) as outputs:
-            if delivery_supplied:
+            if delivery_supplied or campaign_resume:
                 outputs.update({"status": "skipped", "reason": resume_reason})
             else:
                 fallback_command = [
@@ -609,7 +729,7 @@ def run_weekly_run(
                 "delivery": str(delivery_path) if delivery_path else None,
             },
         ) as outputs:
-            if delivery_supplied:
+            if delivery_supplied or campaign_resume:
                 outputs.update({"status": "skipped", "reason": resume_reason})
             elif cnb_command:
                 outputs.update({"status": "skipped", "reason": "legacy --cnb-command fallback"})
@@ -653,6 +773,14 @@ def run_weekly_run(
         ) as outputs:
             if delivery_supplied:
                 outputs.update({"status": "skipped", "reason": resume_reason})
+            elif campaign_resume and campaign_resume_has_delivery:
+                outputs.update(
+                    {
+                        "status": "receipt_delivery_reused",
+                        "reason": "same-run receipt already contains a verified delivery",
+                        "delivery": str(delivery_path),
+                    }
+                )
             elif cnb_command:
                 outputs.update({"status": "skipped", "reason": "legacy --cnb-command fallback"})
             elif download_dry_run:
@@ -690,11 +818,16 @@ def run_weekly_run(
                     command.extend(["--work-dir", str(_resolve_workspace_path(cnb_campaign_work_dir, root))])
                 if not cnb_campaign_dry_run:
                     command.append("--execute")
-                campaign_receipt_result, _ = _json_command(
+                command_result, _ = _json_command(
                     command,
                     cwd=root,
                     timeout_seconds=min(timeout_seconds, 3600),
                 )
+                on_disk_receipt = _read_optional_json(campaign_receipt_path)
+                if on_disk_receipt is not None:
+                    campaign_receipt_result = {**on_disk_receipt, **command_result}
+                else:
+                    campaign_receipt_result = command_result
                 outputs.update(campaign_receipt_result)
 
         with atom(
@@ -737,11 +870,16 @@ def run_weekly_run(
                     command.append("--require-source-url")
                 if not cnb_campaign_dry_run:
                     command.append("--execute")
-                campaign_receipt_result, _ = _json_command(
+                command_result, _ = _json_command(
                     command,
                     cwd=root,
                     timeout_seconds=(cnb_campaign_timeout_seconds or timeout_seconds) + 30,
                 )
+                on_disk_receipt = _read_optional_json(campaign_receipt_path)
+                if on_disk_receipt is not None:
+                    campaign_receipt_result = {**on_disk_receipt, **command_result}
+                else:
+                    campaign_receipt_result = command_result
                 outputs.update(campaign_receipt_result)
                 delivery_info = campaign_receipt_result.get("delivery")
                 if isinstance(delivery_info, dict) and delivery_info.get("path"):
@@ -934,12 +1072,6 @@ def run_weekly_run(
             campaign_exists = campaign_receipt_path.is_file() and campaign_receipt_result is not None
             if not campaign_exists:
                 outputs.update({"status": "skipped", "reason": "no disposable campaign receipt"})
-            elif not confirm_delete_cnb_repositories:
-                outputs.update({"status": "skipped", "reason": "repository deletion confirmation not supplied"})
-            elif not cleanup_gate:
-                raise RuntimeError(
-                    "disposable campaign cleanup requires a verified release and either explicit peer skip or successful peer publication"
-                )
             else:
                 command = [
                     sys.executable,
@@ -951,17 +1083,22 @@ def run_weekly_run(
                     str(operations_path),
                     "--receipt",
                     str(campaign_receipt_path),
-                    "--confirm-delete-cnb-repositories",
-                    "--release-verified",
-                    "--peer-gate",
                 ]
-                cleanup_result, _ = _json_command(
+                if confirm_delete_cnb_repositories:
+                    command.append("--confirm-delete-cnb-repositories")
+                if release_result is not None:
+                    command.append("--release-verified")
+                if cleanup_gate:
+                    command.append("--peer-gate")
+                cleanup_result, cleanup_completed = _json_command_allow_failure(
                     command,
                     cwd=root,
                     timeout_seconds=min(timeout_seconds, 600),
                 )
                 outputs.update(cleanup_result)
-                if cleanup_result.get("clean") is not True:
+                if not confirm_delete_cnb_repositories:
+                    outputs.setdefault("status", "dry_run")
+                elif cleanup_result.get("clean") is not True:
                     raise RuntimeError(f"disposable campaign repository cleanup did not verify: {cleanup_result}")
         with atom(
             context,

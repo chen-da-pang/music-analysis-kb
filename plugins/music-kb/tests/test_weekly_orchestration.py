@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -468,3 +469,191 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
     assert state["atoms"]["cnb_campaign_submit"]["outputs"]["status"] == "submit_planned"
     assert state["atoms"]["cnb_analysis"]["outputs"]["status"] == "skipped"
     assert (tmp_path / "data" / "weekly_runs" / "fresh-campaign" / "cnb-input" / "manifest.jsonl").is_file()
+
+
+def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "resume-campaign"
+    run_dir = tmp_path / "data" / "weekly_runs" / run_id
+    staging = run_dir / "cnb-input"
+    (staging / "audio").mkdir(parents=True)
+    rows = [
+        {
+            "id": "kg-1",
+            "relative_audio_path": "audio/one.mp3",
+            "source_bytes": 4,
+            "sha256": hashlib.sha256(b"one!").hexdigest(),
+            "title": "One",
+            "artist": "Artist",
+            "source_url": "https://www.kugou.com/mixsong/1.html",
+            "campaign_id": run_id,
+        },
+        {
+            "id": "kg-2",
+            "relative_audio_path": "audio/two.mp3",
+            "source_bytes": 4,
+            "sha256": hashlib.sha256(b"two!").hexdigest(),
+            "title": "Two",
+            "artist": "Artist",
+            "source_url": "https://www.kugou.com/mixsong/2.html",
+            "campaign_id": run_id,
+        },
+    ]
+    (staging / "audio" / "one.mp3").write_bytes(b"one!")
+    (staging / "audio" / "two.mp3").write_bytes(b"two!")
+    (staging / "manifest.jsonl").write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    operations_hash = hashlib.sha256(OPERATIONS.read_bytes()).hexdigest()
+    (run_dir / "run-state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": run_id,
+                "status": "failed",
+                "started_at": "2026-07-21T00:00:00Z",
+                "finished_at": "2026-07-21T00:01:00Z",
+                "operations_file": str(OPERATIONS),
+                "operations_sha256": operations_hash,
+                "atoms": {},
+                "errors": [{"atom": "cnb_campaign_submit", "message": "simulated"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    delivery = tmp_path / "canonical.jsonl"
+    delivery_rows = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines() if line]
+    for index, row in enumerate(delivery_rows, 1):
+        row["source_url"] = f"https://www.kugou.com/mixsong/{index}.html"
+    delivery.write_text(
+        "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in delivery_rows),
+        encoding="utf-8",
+    )
+    receipt = {
+        "schema_version": 1,
+        "atom": "cnb_campaign_repository",
+        "status": "failed",
+        "run_id": run_id,
+        "repository": f"wuyoumusic/music-flamingo-campaign-{run_id}",
+        "repository_prefix": "music-flamingo-campaign-",
+        "organization": "wuyoumusic",
+        "github_repository": "chen-da-pang/music-analysis-kb",
+        "github_commit": "a" * 40,
+        "runtime_image": "fixture",
+        "runtime_digest": "fixture",
+        "transport": "lfs",
+        "manifest": {
+            "path": str(staging / "manifest.jsonl"),
+            "sha256": hashlib.sha256((staging / "manifest.jsonl").read_bytes()).hexdigest(),
+            "item_count": 2,
+            "source_bytes": 8,
+            "source_links": 2,
+            "campaign_id": run_id,
+        },
+        "workspace": str(run_dir / "cnb" / "campaign-repository"),
+        "checkout": str(run_dir / "cnb" / "campaign-repository" / "repo"),
+        "campaign_repository_config": str(run_dir / "cnb" / "campaign-repository" / "repo" / ".cnb.yml"),
+        "repository_created": True,
+        "repository_pushed": True,
+        "builds": [],
+        "delivery": None,
+    }
+    receipt_path = run_dir / "cnb" / "campaign-receipt.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    class FakeCampaignAdapter:
+        @staticmethod
+        def load_campaign_policy(_path):
+            return {}
+
+        @staticmethod
+        def _policy_with_transport(policy, _transport):
+            return policy
+
+        @staticmethod
+        def _read_manifest(_path, expected_count=None):
+            return {
+                "path": str(staging / "manifest.jsonl"),
+                "sha256": hashlib.sha256((staging / "manifest.jsonl").read_bytes()).hexdigest(),
+                "item_count": 2,
+                "source_bytes": 8,
+                "source_links": 2,
+                "campaign_id": run_id,
+            }
+
+        @staticmethod
+        def validate_campaign_receipt_binding(*_args, **_kwargs):
+            return {"valid": True, "errors": []}
+
+    monkeypatch.setattr(
+        "music_kb.weekly_orchestration._load_script_module",
+        lambda _path, module_name: FakeCampaignAdapter if module_name == "music_kb_campaign_resume" else (_ for _ in ()).throw(AssertionError(module_name)),
+    )
+    monkeypatch.setattr(
+        "music_kb.weekly_orchestration.run_preflight",
+        lambda **kwargs: {"valid": True, "failed_required": [], "commands": {}},
+    )
+    calls: list[str] = []
+
+    def fake_allow(command, *, cwd, timeout_seconds, env=None):
+        calls.append(command[2] if len(command) > 2 else "")
+        if "cleanup" in command:
+            return {"status": "dry_run", "clean": False}, subprocess.CompletedProcess(command, 0, "", "")
+        return {"action": "campaign-preflight", "clean": True}, subprocess.CompletedProcess(command, 0, "", "")
+
+    def fake_json(command, *, cwd, timeout_seconds, env=None):
+        if "capture_kugou_chart.py" in command or "run_claude_download.py" in command:
+            raise AssertionError("resume must not recapture or download")
+        script_name = Path(command[1]).name if len(command) > 1 else ""
+        if script_name == "cnb_campaign_repository.py" and "prepare" in command:
+            return {"status": "created_and_pushed"}, subprocess.CompletedProcess(command, 0, "", "")
+        if script_name == "cnb_campaign_repository.py" and "submit" in command:
+            return {
+                "status": "completed",
+                "delivery": {"path": str(delivery), "count": 2, "sha256": hashlib.sha256(delivery.read_bytes()).hexdigest()},
+            }, subprocess.CompletedProcess(command, 0, "", "")
+        raise AssertionError(command)
+
+    monkeypatch.setattr("music_kb.weekly_orchestration._json_command_allow_failure", fake_allow)
+    monkeypatch.setattr("music_kb.weekly_orchestration._json_command", fake_json)
+    database = tmp_path / "master.sqlite"
+    initialize_database(database)
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text('{"schema_version":1,"songs":[]}\n', encoding="utf-8")
+    progress = tmp_path / "progress.json"
+    progress.write_text("{}\n", encoding="utf-8")
+
+    result = run_weekly_run(
+        workspace=tmp_path,
+        run_id=run_id,
+        rank_ids=["1"],
+        chart_page=1,
+        chart_size=100,
+        chart_profile=None,
+        database=database,
+        inventory=inventory,
+        audio_root=tmp_path / "audio",
+        legacy_progress=progress,
+        operations_file=OPERATIONS,
+        output_dir=tmp_path / "releases",
+        release_name="resume-release",
+        peers_file=None,
+        peer_names=(),
+        publish=False,
+        delivery=None,
+        cnb_command=None,
+        chart_database=None,
+        state_file=tmp_path / "publish-state.json",
+        cnb_github_commit="a" * 40,
+        skip_peers=True,
+    )
+    state = json.loads(Path(result["state"]).read_text(encoding="utf-8"))
+    assert state["status"] == "succeeded"
+    assert state["resume_count"] == 1
+    assert state["atoms"]["chart_capture"]["outputs"]["status"] == "skipped"
+    assert state["atoms"]["cnb_campaign_repository"]["outputs"]["status"] == "created_and_pushed"
+    assert state["atoms"]["cnb_campaign_submit"]["outputs"]["status"] == "completed"
+    assert "preflight" in calls and "cleanup" in calls
