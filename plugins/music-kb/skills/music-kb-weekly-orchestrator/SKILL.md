@@ -53,6 +53,9 @@ the next invocation with the same `--run-id` is a campaign resume. It restores
 the on-disk state and receipt, verifies the exact run id/repository prefix,
 GitHub commit, runtime digest, transport, and manifest hash/count, and reuses
 only that repository. A new run still refuses any leftover campaign repository.
+When that receipt is already `completed` and its delivery path/hash/count still
+match, reuse the verified delivery and skip another campaign submit; only an
+incomplete receipt may trigger a shard retry.
 
 Without `--delivery`, a normal run uses the versioned Kugou profile and captures
 all configured charts page by page until the profile's empty/short-page rule.

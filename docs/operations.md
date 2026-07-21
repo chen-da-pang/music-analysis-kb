@@ -125,7 +125,9 @@ receipt-bound ledger clone; it never creates a replacement slug. Cleanup also
 requires complete repository-created/pushed proof, a full successful shard
 index set, runtime-export provenance, and a delivery hash/count bound to the
 manifest. A dry-run or blocked cleanup is recorded in that receipt and does
-not delete anything.
+not delete anything. If the same receipt is already completed and its delivery
+path/hash/count still verify, a resume consumes that delivery directly instead
+of submitting another campaign.
 
 The final storage atom handles only visible legacy refs/assets. It is not a
 manual orphan-LFS GC: CNB documents a default seven-day server-side window in

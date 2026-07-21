@@ -38,7 +38,9 @@ the delivery is bound to that receipt and its cleanup still runs after the
 release/peer gates. A delivery without a campaign receipt has no campaign
 cleanup. A failed run can be resumed with the same `--run-id`: the receipt's
 exact repository, GitHub commit, runtime digest, and manifest hash/count are
-verified before any campaign retry. Pass `--cnb-command <command>` only for the
+verified before any campaign retry. If the receipt is already completed and
+its delivery hash/count/path still match, the delivery is reused without a
+second campaign submit. Pass `--cnb-command <command>` only for the
 explicit legacy fallback that writes `MUSIC_KB_CNB_OUTPUT`. Use
 `--download-dry-run` or `--cnb-campaign-dry-run` while reviewing a new workflow;
 neither creates, pushes, or starts a CNB campaign. Every production

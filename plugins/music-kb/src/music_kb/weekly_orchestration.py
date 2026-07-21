@@ -359,9 +359,11 @@ def run_weekly_run(
     delivery_path: Path | None = _resolve_workspace_path(delivery, root) if delivery else None
     delivery_supplied = delivery is not None
     resume_reason = "verified supplied delivery resumes after Music Flamingo analysis"
-    required_commands: tuple[str, ...] = () if delivery_supplied else ("kugou-cli", "claude")
-    if publish and not skip_peers:
-        required_commands += ("rsync",)
+    # The exact command set is finalized after we inspect a same-run receipt.
+    # A receipt resume skips chart capture/download entirely, so requiring
+    # those upstream tools would make an otherwise recoverable campaign fail
+    # before it reaches its receipt-bound CNB work.
+    required_commands: tuple[str, ...] = ()
     explicit_ranks = list(rank_ids)
     profile_path = Path(chart_profile).expanduser().resolve() if chart_profile else DEFAULT_CHART_PROFILE
     profile = None if explicit_ranks else _load_chart_profile(profile_path)
@@ -427,11 +429,27 @@ def run_weekly_run(
                     "status": "resumed_from_receipt",
                 }
                 delivery_info = existing_campaign_receipt.get("delivery")
-                if isinstance(delivery_info, dict) and delivery_info.get("path"):
+                if (
+                    existing_campaign_receipt.get("status") == "completed"
+                    and isinstance(delivery_info, dict)
+                    and delivery_info.get("path")
+                ):
                     candidate_delivery = Path(str(delivery_info["path"])).expanduser().resolve()
                     if candidate_delivery.is_file():
+                        candidate_binding = _delivery_file_binding(
+                            candidate_delivery,
+                            expected_count=int(staging_manifest["item_count"]),
+                        )
+                        if not _receipt_delivery_matches(existing_campaign_receipt, candidate_binding):
+                            raise RuntimeError(
+                                "same-run receipt delivery binding failed; refusing to re-use the delivery"
+                            )
                         delivery_path = candidate_delivery
                         campaign_resume_has_delivery = True
+        if not delivery_supplied and not campaign_resume:
+            required_commands = ("kugou-cli", "claude")
+        if publish and not skip_peers:
+            required_commands += ("rsync",)
         with atom(context, "preflight", inputs={"workspace": str(root), "publish": publish} ) as outputs:
             preflight = run_preflight(
                 workspace=root,
@@ -841,6 +859,14 @@ def run_weekly_run(
         ) as outputs:
             if delivery_supplied:
                 outputs.update({"status": "skipped", "reason": resume_reason})
+            elif campaign_resume and campaign_resume_has_delivery:
+                outputs.update(
+                    {
+                        "status": "receipt_delivery_reused",
+                        "reason": "same-run receipt already contains a verified delivery",
+                        "delivery": str(delivery_path),
+                    }
+                )
             elif cnb_command:
                 outputs.update({"status": "skipped", "reason": "legacy --cnb-command fallback"})
             elif download_dry_run:

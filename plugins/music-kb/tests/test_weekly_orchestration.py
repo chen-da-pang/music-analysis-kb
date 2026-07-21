@@ -471,8 +471,9 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
     assert (tmp_path / "data" / "weekly_runs" / "fresh-campaign" / "cnb-input" / "manifest.jsonl").is_file()
 
 
+@pytest.mark.parametrize("receipt_completed", [False, True])
 def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, receipt_completed: bool
 ) -> None:
     run_id = "resume-campaign"
     run_dir = tmp_path / "data" / "weekly_runs" / run_id
@@ -531,10 +532,16 @@ def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
         "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in delivery_rows),
         encoding="utf-8",
     )
+    delivery_binding = {
+        "path": str(delivery),
+        "sha256": hashlib.sha256(delivery.read_bytes()).hexdigest(),
+        "count": 2,
+        "ledger_branch": f"campaign-results/{run_id}",
+    }
     receipt = {
         "schema_version": 1,
         "atom": "cnb_campaign_repository",
-        "status": "failed",
+        "status": "completed" if receipt_completed else "failed",
         "run_id": run_id,
         "repository": f"wuyoumusic/music-flamingo-campaign-{run_id}",
         "repository_prefix": "music-flamingo-campaign-",
@@ -558,7 +565,7 @@ def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
         "repository_created": True,
         "repository_pushed": True,
         "builds": [],
-        "delivery": None,
+        "delivery": delivery_binding if receipt_completed else None,
     }
     receipt_path = run_dir / "cnb" / "campaign-receipt.json"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -592,11 +599,15 @@ def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
         "music_kb.weekly_orchestration._load_script_module",
         lambda _path, module_name: FakeCampaignAdapter if module_name == "music_kb_campaign_resume" else (_ for _ in ()).throw(AssertionError(module_name)),
     )
-    monkeypatch.setattr(
-        "music_kb.weekly_orchestration.run_preflight",
-        lambda **kwargs: {"valid": True, "failed_required": [], "commands": {}},
-    )
+    preflight_commands: list[tuple[str, ...]] = []
+
+    def fake_preflight(**kwargs):
+        preflight_commands.append(tuple(kwargs["required_commands"]))
+        return {"valid": True, "failed_required": [], "commands": {}}
+
+    monkeypatch.setattr("music_kb.weekly_orchestration.run_preflight", fake_preflight)
     calls: list[str] = []
+    campaign_calls: list[list[str]] = []
 
     def fake_allow(command, *, cwd, timeout_seconds, env=None):
         calls.append(command[2] if len(command) > 2 else "")
@@ -605,6 +616,7 @@ def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
         return {"action": "campaign-preflight", "clean": True}, subprocess.CompletedProcess(command, 0, "", "")
 
     def fake_json(command, *, cwd, timeout_seconds, env=None):
+        campaign_calls.append(list(command))
         if "capture_kugou_chart.py" in command or "run_claude_download.py" in command:
             raise AssertionError("resume must not recapture or download")
         script_name = Path(command[1]).name if len(command) > 1 else ""
@@ -653,7 +665,14 @@ def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
     state = json.loads(Path(result["state"]).read_text(encoding="utf-8"))
     assert state["status"] == "succeeded"
     assert state["resume_count"] == 1
+    assert preflight_commands == [()]
     assert state["atoms"]["chart_capture"]["outputs"]["status"] == "skipped"
-    assert state["atoms"]["cnb_campaign_repository"]["outputs"]["status"] == "created_and_pushed"
-    assert state["atoms"]["cnb_campaign_submit"]["outputs"]["status"] == "completed"
+    if receipt_completed:
+        assert state["atoms"]["cnb_campaign_repository"]["outputs"]["status"] == "receipt_delivery_reused"
+        assert state["atoms"]["cnb_campaign_submit"]["outputs"]["status"] == "receipt_delivery_reused"
+        assert not any("submit" in command for command in campaign_calls)
+    else:
+        assert state["atoms"]["cnb_campaign_repository"]["outputs"]["status"] == "created_and_pushed"
+        assert state["atoms"]["cnb_campaign_submit"]["outputs"]["status"] == "completed"
+        assert any("submit" in command for command in campaign_calls)
     assert "preflight" in calls and "cleanup" in calls
