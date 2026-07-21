@@ -7,6 +7,25 @@ It intentionally contains **code, fixtures, and documentation only**. Do not
 put production SQLite files, lyrics, audio, SSH keys, or analysis exports in
 this directory or in Git.
 
+## Natural-language retrieval
+
+The retrieval Skill is designed for a first request in ordinary language. A
+user can say, for example, “我需要一些 R&B、温暖的、关于爱情的歌” or “找一些
+有氛围感的歌”，without learning canonical English tags or MCP syntax.
+
+For a clear request, the Skill searches first and briefly states how it
+understood the request. For a broad subjective request, it may search up to
+three evidence-backed directions in the first answer so the user can compare
+them. The most likely direction is shown first; overlapping songs remain in
+each matching direction. A selected direction becomes the conversation
+context without silently triggering another search. Large result sets start
+with a representative, expandable page; small sets can be shown in full.
+
+The exact first-page quantity and the semantics of “再来一些” versus “换一批”
+remain deliberate calibration decisions. The Skill must not invent a permanent
+default quantity or silently broaden a request. Every listening link shown to a
+user comes from the runtime `listen_url` returned by the read-only MCP path.
+
 From this directory:
 
 ```bash

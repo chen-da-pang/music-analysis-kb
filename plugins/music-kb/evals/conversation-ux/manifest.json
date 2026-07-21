@@ -1,0 +1,6 @@
+{
+  "name": "music-kb-conversation-ux",
+  "version": "0.1.0",
+  "supportedTargetKinds": ["skill", "plugin"],
+  "command": ["python3", "./emit-conversation-ux.py"]
+}
