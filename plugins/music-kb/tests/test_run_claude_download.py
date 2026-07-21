@@ -81,3 +81,12 @@ def test_stale_downloaded_progress_is_retried_when_inventory_file_is_missing(tmp
     )
 
     assert [[module.row_identity(item) for item in chunk] for chunk in chunks] == [["kugou:stale"]]
+
+
+def test_claude_prompt_uses_one_monitor_wait_and_default_chunk_is_bounded() -> None:
+    module = _module()
+    prompt = module.render_prompt("python3 worker.py", chunk_index=1, chunk_total=3)
+
+    assert module.DEFAULT_CHUNK_SIZE == 8
+    assert "Monitor" in prompt
+    assert "while/kill/sleep" in prompt

@@ -17,7 +17,7 @@ from typing import Any
 from music_kb.operation_context import load_validated_operations, sha256_file
 
 
-DEFAULT_CHUNK_SIZE = 25
+DEFAULT_CHUNK_SIZE = 8
 TERMINAL_STATUSES = {"downloaded", "skipped_existing", "failed", "no_results"}
 
 
@@ -150,7 +150,7 @@ def render_prompt(worker_command: str, *, chunk_index: int, chunk_total: int) ->
         "严格运行下面这一条命令；只允许读写这些绝对路径。队列为空时不要初始化 musicdl，直接报告没有新增下载。",
         "绝不能手工修改 inventory、progress、queue 或音频状态；只能让固定 worker 写入。不得把未产生文件的歌曲标记为 downloaded、purged_after_analysis 或 skipped。",
         "单曲超时或 musicdl 返回失败时保留真实 failed/no_results 记录并继续队列；不要重写命令、不要手工跳过、不要伪造成功。",
-        "必须等待 worker 命令真正退出，并确认 progress.json 有本批次的终端结果；不得在命令仍运行时提前返回。",
+        "必须等待 worker 命令真正退出，并确认 progress.json 有本批次的终端结果；不得在命令仍运行时提前返回。若 Bash 将长进程转为后台，只使用一次 Monitor 等待它结束（timeout 至少 600000ms）；禁止用 Bash while/kill/sleep 轮询，也不要重复启动 worker。",
         worker_command,
         "命令完成后读取 stdout 和 progress.json，只返回 JSON 摘要；不要运行旧的 batch_download.py。",
     ]
@@ -177,7 +177,7 @@ def main() -> int:
         "--chunk-size",
         type=int,
         default=DEFAULT_CHUNK_SIZE,
-        help="Maximum queue rows per Claude Code session (serial; default: 25)",
+        help="Maximum queue rows per Claude Code session (serial; default: 8)",
     )
     parser.add_argument(
         "--reuse-queue",
@@ -298,6 +298,7 @@ def main() -> int:
         "--allowedTools",
         "Bash",
         "Read",
+        "Monitor",
         "--add-dir",
         str(workspace),
     ]
