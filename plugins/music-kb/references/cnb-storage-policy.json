@@ -2,6 +2,30 @@
   "schema_version": 2,
   "organization_slug": "wuyoumusic",
   "repository_slug": "wuyoumusic/moss-music-runner",
+  "protected_runtime_repository_slug": "wuyoumusic/moss-music-runner",
+  "campaign_repository_prefix": "music-flamingo-campaign-",
+  "verified_runtime_image_digest": "docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:a04cdbc02ef0f0958282e7bbf8c3a15b3a3105f4d17c95db88c98d1fc5f3657b",
+  "runtime_digest_verification": {
+    "status": "registry_read_only_verified",
+    "verified_at": "2026-07-20",
+    "source": "CNB registries get-package-tag-detail/get-package-tag-provenance",
+    "functional_gpu_smoke_required": true
+  },
+  "campaign_repository": {
+    "visibility": "private",
+    "branch": "main",
+    "event": "api_trigger_music_flamingo_campaign",
+    "transport": "lfs",
+    "shard_count": 4,
+    "runner_tag": "cnb:arch:amd64:gpu:L40",
+    "ledger_branch_template": "campaign-results/{campaign_id}",
+    "runtime_image": "docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:a04cdbc02ef0f0958282e7bbf8c3a15b3a3105f4d17c95db88c98d1fc5f3657b",
+    "max_new_tokens": 2048,
+    "audio_clip_seconds": 240,
+    "max_git_object_bytes": 5000000000,
+    "max_git_object_file_bytes": 268435456,
+    "delete_after_release": true
+  },
   "clean_repo_object_bytes_max": 25000000000,
   "clean_repo_git_bytes_max": 500000000,
   "minimum_group_object_free_bytes": 10000000000,
@@ -33,5 +57,20 @@
   ],
   "cleanup_asset_name_patterns": [
     "^music-flamingo-run\\.tar\\.gz$"
+  ],
+  "disposable_repositories": [
+    {
+      "repository_slug": "wuyoumusic/guohang-asr-benchmark",
+      "github_source_repository": "chen-da-pang/guohang-asr-benchmark",
+      "reason": "上次独立 ASR 基准实验已完成，当前 Music Flamingo 周更不再依赖该 CNB 仓库",
+      "retained_source": "GitHub main 保留 675 条成功结果和筛选审计",
+      "allow_repository_delete": true,
+      "current_workflow_dependency": false,
+      "evidence": {
+        "completed_result_count": 675,
+        "failed_result_count": 0,
+        "verified_at": "2026-07-20"
+      }
+    }
   ]
 }

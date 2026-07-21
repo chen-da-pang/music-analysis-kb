@@ -57,7 +57,31 @@ run_git() {
   fi
 }
 
-run_git clone --quiet --depth 1 --branch "$branch" "$repo_url" "$work_dir/repo"
+if ! run_git clone --quiet --depth 1 --branch "$branch" "$repo_url" "$work_dir/repo"; then
+  if run_git ls-remote --quiet --exit-code --heads "$repo_url" "refs/heads/$branch" >/dev/null 2>&1; then
+    echo "Ledger branch exists but could not be cloned; refusing to initialize an empty ledger: $branch" >&2
+    exit 2
+  else
+    branch_probe_rc=$?
+    if [[ "$branch_probe_rc" -ne 2 ]]; then
+      echo "Unable to prove that ledger branch is absent (ls-remote exit=$branch_probe_rc): $branch" >&2
+      exit 2
+    fi
+  fi
+  if ! run_git ls-remote --quiet --exit-code --heads "$repo_url" refs/heads/main >/dev/null 2>&1; then
+    echo 'Unable to verify the campaign repository main branch before ledger initialization.' >&2
+    exit 2
+  fi
+  # A fresh disposable campaign repository starts with only main.  Restore an
+  # empty local ledger from that pinned code branch; the first checkpoint will
+  # create the dedicated result branch with a normal fast-forward push.  Do
+  # not try another campaign slug or silently reuse a different ledger ref.
+  rm -rf "$work_dir/repo"
+  run_git clone --quiet --depth 1 --branch main "$repo_url" "$work_dir/repo"
+  mkdir -p "$work_dir/repo"
+  : > "$work_dir/repo/campaign_ledger.jsonl"
+  printf '%s\n' "campaign_ledger_branch_missing_initialized=$branch" >&2
+fi
 ledger_repo="$work_dir/repo"
 remote_ledger="$ledger_repo/campaign_ledger.jsonl"
 [[ -f "$remote_ledger" ]] || { echo "Ledger branch is missing campaign_ledger.jsonl" >&2; exit 2; }

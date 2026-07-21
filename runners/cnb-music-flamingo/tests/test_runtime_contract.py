@@ -375,6 +375,21 @@ class CNBConfigurationContractTests(unittest.TestCase):
         self.assertIn("MUSIC_FLAMINGO_CAMPAIGN_MAX_PENDING_ITEMS=1", hydrate)
         self.assertIn("campaign_ledger_git.sh checkpoint", hydrate)
 
+    def test_generated_disposable_campaign_route_has_no_weekly_hardcoding(self) -> None:
+        campaign = self.load_config()["$"]["api_trigger_music_flamingo_campaign"][0]
+        self.assertFalse(campaign["git"]["lfs"])
+        self.assertEqual(campaign["runner"]["tags"], "cnb:arch:amd64:gpu:L40")
+        self.assertIn("@sha256:", campaign["docker"]["image"])
+        self.assertEqual(campaign["env"]["CNB_RUNTIME_IMAGE"], campaign["docker"]["image"])
+        self.assertEqual(campaign["stages"][0]["script"], "bash scripts/run_music_flamingo_campaign.sh")
+        text = (REPO_ROOT / "scripts/run_music_flamingo_campaign.sh").read_text(encoding="utf-8")
+        self.assertIn("MUSIC_FLAMINGO_CAMPAIGN_SHARD_ID", text)
+        self.assertIn("MUSIC_FLAMINGO_CAMPAIGN_MANIFEST_SHA256", text)
+        self.assertIn("Campaign manifest SHA-256 mismatch", text)
+        self.assertIn("campaign_ledger_git.sh restore", text)
+        self.assertIn("prepare_kugou_campaign_shard.sh", text)
+        self.assertNotIn("20260716", text)
+
     def test_kugou_quality_rerun_is_isolated_and_uses_anti_repetition_controls(self) -> None:
         rerun = self.load_config()["$"]["api_trigger_kugou_quality_rerun_12"][0]
         self.assertFalse(rerun["git"]["lfs"])

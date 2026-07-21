@@ -222,10 +222,12 @@ def test_weekly_commands_expose_local_snapshot_install_controls() -> None:
             "--local-snapshot-dir",
             "/tmp/publisher-client",
             "--install-local",
+            "--confirm-delete-cnb-repositories",
         ]
     )
     assert weekly.local_snapshot_dir == Path("/tmp/publisher-client")
     assert weekly.install_local is True
+    assert weekly.confirm_delete_cnb_repositories is True
 
     update = parser.parse_args(
         [
@@ -240,6 +242,31 @@ def test_weekly_commands_expose_local_snapshot_install_controls() -> None:
         ]
     )
     assert update.install_local is False
+
+
+def test_weekly_run_exposes_disposable_campaign_controls() -> None:
+    parser = cli.build_parser()
+    parsed = parser.parse_args(
+        [
+            "weekly-run",
+            "--run-id",
+            "fixture-run",
+            "--cnb-campaign-dry-run",
+            "--cnb-campaign-poll-seconds",
+            "0.5",
+            "--cnb-campaign-timeout-seconds",
+            "120",
+            "--cnb-github-commit",
+            "a" * 40,
+            "--cnb-campaign-work-dir",
+            "/tmp/campaign-work",
+        ]
+    )
+    assert parsed.cnb_campaign_dry_run is True
+    assert parsed.cnb_campaign_poll_seconds == 0.5
+    assert parsed.cnb_campaign_timeout_seconds == 120
+    assert parsed.cnb_github_commit == "a" * 40
+    assert parsed.cnb_campaign_work_dir == Path("/tmp/campaign-work")
 
 
 def test_peer_inventory_environment_override(monkeypatch, tmp_path: Path) -> None:

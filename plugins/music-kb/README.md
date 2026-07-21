@@ -27,18 +27,31 @@ with a strict LF JSONL manifest; see [`../../docs/import-contract.md`](../../doc
 The complete publisher-side weekly run is `music-kb weekly-run`. It records a
 run state and one receipt per atom under `data/weekly_runs/<run-id>/`, reads the
 versioned final operating decisions from `references/validated-operations.json`,
-and stops at the first failed gate. With no `--rank-id`, it uses the versioned
+and stops at the first failed gate. Each atom receipt includes the validated
+operations-file hash. With no `--rank-id`, it uses the versioned
 `references/kugou-chart-profile.json` to capture all six configured charts and
-their pages; an explicit `--rank-id` is a bounded single-page override. Pass
-either `--delivery <canonical.jsonl>`
-for an already completed CNB delivery or `--cnb-command <command>` for a
-command that writes the run's `MUSIC_KB_CNB_OUTPUT`; a real run without either
-input stops at the CNB atom. Use `--download-dry-run` and omit
-the cleanup confirmations while reviewing a new workflow. Every production
-`--publish` run must include `--confirm-delete-audio` and
-`--confirm-delete-cnb-storage`. The former preserves dedupe metadata while
-removing local audio; the latter removes CNB campaign inputs/assets and checks
-the authoritative object-byte counter before the run may succeed.
+their pages; an explicit `--rank-id` is a bounded single-page override. A fresh
+run materializes one disposable CNB campaign repository per run id after the
+Claude Code download. Pass `--delivery <canonical.jsonl>` only to resume from
+an already completed CNB delivery; when the same run has a campaign receipt,
+the delivery is bound to that receipt and its cleanup still runs after the
+release/peer gates. A delivery without a campaign receipt has no campaign
+cleanup. A failed run can be resumed with the same `--run-id`: the receipt's
+exact repository, GitHub commit, runtime digest, and manifest hash/count are
+verified before any campaign retry. If the receipt is already completed and
+its delivery hash/count/path still match, the delivery is reused without a
+second campaign submit. Pass `--cnb-command <command>` only for the
+explicit legacy fallback that writes `MUSIC_KB_CNB_OUTPUT`. Use
+`--download-dry-run` or `--cnb-campaign-dry-run` while reviewing a new workflow;
+neither creates, pushes, or starts a CNB campaign. Every production
+`--publish` run must include `--confirm-delete-audio`,
+`--confirm-delete-cnb-storage`, and the separate
+`--confirm-delete-cnb-repositories`. The former preserves dedupe metadata while
+removing local audio; the latter two remove visible legacy assets and the exact
+completed disposable repository, with post-delete 404, charge,
+organization-volume, and protected-runtime verification before the run may
+succeed. `--cnb-transport` is passed to the disposable campaign and final
+storage-cleanup atoms; `git-objects` is accepted only under its policy gates.
 
 On a real publish run, the verified release is also installed atomically as the
 publisher's local `~/.music-kb/current.sqlite` (or `--local-snapshot-dir`),

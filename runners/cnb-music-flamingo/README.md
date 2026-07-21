@@ -27,7 +27,8 @@ The resulting directory is the complete code-only CNB checkout; do not merge
 CNB commits back into GitHub.
 
 Runtime inputs, outputs, ledgers, canonical deliveries, raw analyses, and run
-receipts belong to the local publisher or a temporary CNB run ref. They are not
+receipts belong to the local publisher or a temporary disposable CNB campaign
+repository. They are not
 fixtures and must never be added under this subtree.
 
 The exported runner performs final-quality Music Flamingo audio analysis on CNB. It preserves
@@ -43,7 +44,7 @@ Flamingo.
 All inference pipelines use one reviewed, immutable CNB Docker Artifact digest:
 
 ```text
-docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:e9c85c9f22efbccaf7c291032a6a85f3103bd8691f6dee45cd80cdbc58413bca
+docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:a04cdbc02ef0f0958282e7bbf8c3a15b3a3105f4d17c95db88c98d1fc5f3657b
 ```
 
 The image contains the CUDA/PyTorch runtime, FFmpeg, the Music Flamingo-compatible
@@ -147,59 +148,48 @@ send hundreds of tracks through one sequential GPU pipeline. CNB's GPU task limi
 four hours, so final batch size must be chosen from measured stage timing, not a fixed
 song count.
 
-## Temporary KuGou campaign runs
+## Disposable KuGou campaign runs
 
-`api_trigger_campaign_kugou_20260706` is the resumable route for a KuGou corpus
-provided by a temporary CNB run ref. Audio, manifests, and result ledgers are
-runtime inputs and are never part of this GitHub subtree or the code-only CNB
-`main`; the runner fetches only the audio needed for one static shard instead of
-downloading the complete corpus at startup.
+The weekly publisher creates a new CNB repository named
+`wuyoumusic/music-flamingo-campaign-<run-id>` for each fresh run. The repository
+contains a code-only export from a commit already reachable from GitHub
+`origin/main`, one generated `.cnb.yml`, and that run's manifest/audio only. The
+protected `wuyoumusic/moss-music-runner` repository remains the runtime source;
+it is never used as the weekly campaign's mutable input/result store.
 
-- static shards are `232 / 232 / 232 / 231` manifest rows, selected in manifest
-  order;
-- the current campaign contract remains `2048` generated tokens and a `240` second
-  audio ceiling;
-- every five outcomes, the runner fsyncs and pushes an append-only result ledger to
-  `campaign-results/kugou-20260706`; a new CNB node restores that ledger before it
-  chooses pending audio;
-- a result is reusable only when its item id, source SHA-256/byte count, runner code,
-  model/image, prompt, and execution profile all match the current contract.
+The generic `api_trigger_music_flamingo_campaign` event is injected into every
+disposable repository. The publisher supplies these identity variables per
+shard, so the runner has no hard-coded week, song count, repository URL, or
+shard:
 
-Before starting a real shard, trigger the same event with both API environment
-overrides below.  This performs no inference: it restores the ledger, installs and
-uses `git-lfs` to hydrate exactly one pending audio object, validates its checksum,
-and checkpoints the ledger branch.  The preflight guard rejects any selection other
-than one object.
+- `MUSIC_FLAMINGO_CAMPAIGN_ID`, source manifest path, and expected count;
+- `MUSIC_FLAMINGO_CAMPAIGN_SHARD_INDEX`, `..._SHARD_COUNT`, and `..._SHARD_ID`;
+- the immutable `CNB_RUNTIME_IMAGE` digest and manifest SHA-256;
+- the campaign ledger repository URL and `campaign-results/<run-id>` branch.
 
-```json
-{
-  "env": {
-    "MUSIC_FLAMINGO_CAMPAIGN_PREFLIGHT_ONLY": "1",
-    "MUSIC_FLAMINGO_CAMPAIGN_MAX_PENDING_ITEMS": "1"
-  }
-}
-```
+`scripts/run_music_flamingo_campaign.sh` restores the same durable ledger,
+prepares one deterministic shard, runs Music Flamingo only for pending items,
+checkpoints the ledger, and packages run evidence. A new campaign repository
+starts with only `main`; the first ledger checkpoint creates its result branch.
+The publisher waits for every configured shard, clones the ledger branch, and
+uses `scripts/build_kugou_canonical_delivery.py` to create the canonical JSONL.
+Build logs are evidence, not a delivery.
 
-For the actual four jobs, leave those two variables at `0`.  Start shard 1 with the
-event defaults; for shards 2–4 override **both** values together, for example:
+The normal contract remains `2048` generated tokens and a `240` second audio
+ceiling. A failed shard or ledger recovery leaves the exact repository and
+receipt for retry; it must not be hidden by creating a new campaign slug. After
+local import/release and the peer gate, the publisher deletes the exact
+receipt-bound repository and verifies 404/zero volume and protected runtime
+survival. Dry-run preparation never creates a repository, pushes objects, or
+starts a build.
 
-```json
-{
-  "env": {
-    "MUSIC_FLAMINGO_CAMPAIGN_SHARD_INDEX": "2",
-    "MUSIC_FLAMINGO_CAMPAIGN_SHARD_ID": "kugou-20260706-927-s2"
-  }
-}
-```
+The older fixed `api_trigger_campaign_kugou_20260706` and quality-rerun events
+remain in `.cnb.yml` only for historical recovery/inspection. They are not the
+weekly route and must not be used to create new campaign data.
 
-Do not call the campaign complete until the durable ledger contains a current-contract
-success record for all 927 manifest ids.  The ledger is authoritative by source id and
-audio SHA-256; several source title/artist fields were found to be questionable, so do
-not use those labels alone as final delivered metadata.
+### Historical quality rerun for token-cap degeneration (not weekly)
 
-### Quality rerun for token-cap degeneration
-
-`api_trigger_kugou_quality_rerun_12` is an isolated recovery route for source-manifest
+For historical recovery only, `api_trigger_kugou_quality_rerun_12` is an isolated route for source-manifest
 rows `24, 25, 39, 165, 414, 463, 470, 483, 545, 598, 667, 847`.  It pulls only those
 12 LFS objects and writes to `campaign-results/kugou-20260706-quality-rerun-12`; it
 never changes the completed 927-item ledger.  The route uses a `1400` token cap plus

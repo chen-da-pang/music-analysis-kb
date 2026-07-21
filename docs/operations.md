@@ -78,38 +78,80 @@ one run id:
 uv run music-kb --json weekly-run \
   --workspace /path/to/music-workspace \
   --run-id kugou-2026w30 \
-  --chart-size 100 \
   --db "$HOME/.music-kb/music-master.sqlite" \
-  --delivery /secure/path/canonical-delivery.jsonl \
   --chart-database /path/to/music-workspace/data/music_trends.sqlite \
   --peers-file "$HOME/.config/music-kb/peers.toml" \
   --output-dir "$HOME/.music-kb/releases" \
   --release-name music-kb-2026w30 \
+  --cnb-transport lfs \
   --download-dry-run
 ```
 
-Remove `--download-dry-run` only for the approved Claude Code download. Add
-`--publish` after the peer dry-run has been reviewed. Every production publish
-must also include `--confirm-delete-audio --confirm-delete-cnb-storage`; the
-preflight refuses to download when either cleanup confirmation is absent.
+This fresh path captures the full configured chart profile, dedupes against the
+inventory, asks Claude Code to download only the queue, materializes a new
+campaign staging directory, and uses one disposable repository named
+`<campaign_repository_prefix><run-id>`. Remove `--download-dry-run` only for the
+approved Claude Code download. `--cnb-campaign-dry-run` exercises the pinned
+GitHub runner export, manifest checks, and generated CNB config without creating
+or pushing a CNB repository or starting a build. For local validation of an
+unpublished branch, the low-level adapter accepts `--allow-unpublished` only
+with a non-executing `prepare` dry-run; it cannot be combined with `--execute`
+and is never a production bypass. `--cnb-command` is an explicit
+legacy fallback and is the only path that uses the protected-repository storage
+gate.
+
+Add `--publish` after the peer dry-run has been reviewed. Every production
+publish must also include `--confirm-delete-audio`,
+`--confirm-delete-cnb-storage`, and `--confirm-delete-cnb-repositories`; the
+preflight refuses to download when any cleanup confirmation is absent. The
+repository flag is a separate irreversible authorization for the exact
+receipt-bound disposable campaign repository.
 On a real publish, the verified release is atomically installed into the
 publisher's `~/.music-kb/current.sqlite` before peer publication. Use
 `--local-snapshot-dir` to override the target. `--no-install-local` is rejected
 with `--publish`; this invariant cannot be bypassed by a normal production
 run. Dry-runs do not switch the local snapshot unless `--install-local` is
 supplied.
-Deletion waits until the local release and every enabled peer have succeeded,
-unless `--skip-peers` was explicitly selected. CNB cleanup is not considered
-object-reclaimed merely because a branch was deleted: `cnb charge
-get-repos-volume` must show the repository below the versioned clean threshold.
-If all visible refs/assets are gone but the counter remains high, the receipt
-must say `server_gc_pending=true`; CNB support documents a default seven-day
-server-side GC window in `cnb/feedback#4551`, and there is no manual LFS-GC API
-in the public surface. The orchestrator must wait/recheck rather than delete
-the runtime image or repository. It may use the explicitly bounded
-Git-object route only when that route's own storage gate passes. The
-orchestrator rejects a missing or incomplete source-link set and never treats a
-dry-run or skipped CNB analysis stage as a completed analysis.
+Deletion waits until the canonical delivery has been imported, the local
+release is verified, and every enabled peer has succeeded, unless `--skip-peers`
+was explicitly selected. The disposable campaign cleanup then deletes only the
+receipt-bound campaign repository, after checking for running workspaces and
+verifying repository 404/zero volume, organization usage decrease when bytes
+existed, and protected runtime/main preservation. Any failed shard, release
+gate, peer gate, receipt check, or deletion verification leaves the same
+repository and receipt for recovery. A retry keeps the exact run/repository
+binding, may retry a failed shard by its original index, and may reuse a
+receipt-bound ledger clone; it never creates a replacement slug. Cleanup also
+requires complete repository-created/pushed proof, a full successful shard
+index set, runtime-export provenance, and a delivery hash/count bound to the
+manifest. A dry-run or blocked cleanup is recorded in that receipt and does
+not delete anything. If the same receipt is already completed and its delivery
+path/hash/count still verify, a resume consumes that delivery directly instead
+of submitting another campaign.
+
+The final storage atom handles only visible legacy refs/assets. It is not a
+manual orphan-LFS GC: CNB documents a default seven-day server-side window in
+`cnb/feedback#4551`, and the public surface has no manual LFS-GC API. If the
+protected repository's counter remains high after visible cleanup, record
+`server_gc_pending=true`; never delete the protected runtime image or `main`.
+The explicitly bounded `git-objects` route is allowed only when its own total,
+per-file, and Git-headroom gates pass. The orchestrator rejects incomplete
+source links and never treats a dry-run or skipped analysis as a completed
+analysis.
+
+When quota blocks a weekly invocation before analysis, the independent
+destructive cleanup atom can remove completed allowlisted repositories without
+waiting for the post-publication stage:
+
+```bash
+python plugins/music-kb/scripts/cnb_storage_lifecycle.py \
+  delete-disposable-repositories \
+  --policy plugins/music-kb/references/cnb-storage-policy.json \
+  --confirm-delete-cnb-repositories
+```
+
+Its exit status is zero only after every target is 404/zero-volume and the
+protected Music Flamingo repository/main/runtime has been reverified.
 
 When `--rank-id` is omitted, `weekly-run` reads the versioned
 `plugins/music-kb/references/kugou-chart-profile.json` and captures all six
