@@ -480,6 +480,7 @@ def run_weekly_run(
     download_result: dict[str, Any] = {}
     campaign_resume = False
     campaign_resume_has_delivery = False
+    download_resume = False
 
     with RunContext(run_id=run_id, run_dir=run_dir, operations_file=operations_path) as context:
         campaign_adapter = None
@@ -548,6 +549,20 @@ def run_weekly_run(
                             )
                         delivery_path = candidate_delivery
                         campaign_resume_has_delivery = True
+        prior_download_atom = context.state.get("atoms", {}).get("claude_download", {})
+        download_run_dir = root / "data" / "download_runs" / run_id
+        download_resume = bool(
+            context.resumed
+            and not delivery_supplied
+            and not campaign_resume
+            # Preserve the exact queue after any downstream failure too;
+            # rebuilding it from the live inventory would drop tracks that
+            # were already downloaded in this run before the failure.
+            and isinstance(prior_download_atom, Mapping)
+            and prior_download_atom.get("status") in {"failed", "running", "succeeded"}
+            and (download_run_dir / "download_queue.jsonl").is_file()
+            and (download_run_dir / "queue_manifest.json").is_file()
+        )
         if not delivery_supplied and not campaign_resume:
             required_commands = ("kugou-cli", "claude")
         if publish and not skip_peers:
@@ -784,7 +799,11 @@ def run_weekly_run(
                 queue_manifest, _ = _json_command(queue_command, cwd=root, timeout_seconds=min(timeout_seconds, 600))
                 outputs.update({"inventory": inventory_result, "queue": queue_manifest})
 
-        with atom(context, "claude_download", inputs={"queue": str(queue_path), "dry_run": download_dry_run}) as outputs:
+        with atom(
+            context,
+            "claude_download",
+            inputs={"queue": str(queue_path), "dry_run": download_dry_run, "reuse_queue": download_resume},
+        ) as outputs:
             if delivery_supplied or campaign_resume:
                 outputs.update({"status": "skipped", "reason": resume_reason})
             else:
@@ -808,6 +827,8 @@ def run_weekly_run(
                     command.append("--dry-run")
                 if download_max_items is not None:
                     command.extend(["--max-items", str(download_max_items)])
+                if download_resume:
+                    command.append("--reuse-queue")
                 download_result, _ = _json_command(command, cwd=root, timeout_seconds=timeout_seconds + 30)
                 outputs.update(download_result)
 

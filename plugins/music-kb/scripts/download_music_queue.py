@@ -264,6 +264,11 @@ def run_download(
                 progress = old
         except (ValueError, OSError):
             pass
+    # A chunk/session retry must not inherit the previous chunk's terminal
+    # marker. The wrapper uses this to distinguish a complete worker exit from
+    # a Claude session that was cut off mid-command.
+    progress.pop("finished_at", None)
+    progress.pop("summary", None)
 
     summary = {"run_id": run_id, "queue": len(queue), "downloaded": 0, "skipped_existing": 0, "failed": 0, "no_results": 0, "dry_run": dry_run}
     selected = queue if max_items is None else queue[:max_items]
@@ -324,6 +329,7 @@ def run_download(
                     time.sleep(3)
         if found is None:
             summary["failed"] += 1
+            progress.setdefault("downloaded", {}).pop(identity, None)
             record_attempt(item, "failed", error=last_error or "search failed")
             progress["results"][identity] = {"status": "failed", "error": last_error, "at": now_iso()}
             atomic_write_json(progress_path, progress)
@@ -331,6 +337,7 @@ def run_download(
             continue
         if not found:
             summary["no_results"] += 1
+            progress.setdefault("downloaded", {}).pop(identity, None)
             record_attempt(item, "no_results")
             progress["results"][identity] = {"status": "no_results", "at": now_iso()}
             atomic_write_json(progress_path, progress)
@@ -340,6 +347,7 @@ def run_download(
         best = choose_match(found, title, artist)
         if best is None:
             summary["no_results"] += 1
+            progress.setdefault("downloaded", {}).pop(identity, None)
             audit = {
                 "reason": "no_compatible_title_artist_match",
                 "match_policy": MATCH_POLICY,
