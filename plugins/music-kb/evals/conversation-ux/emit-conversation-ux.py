@@ -131,6 +131,25 @@ def main() -> None:
         )
     )
 
+    followup_phrases = (
+        "Follow-up requests keep the selected direction",
+        "再来一些",
+        "换一批",
+        "current selected direction",
+        "currently displayed batch",
+        "Neither phrase creates a new interpretation branch",
+    )
+    followup_ok = bool(skill) and all(phrase in normalized_skill for phrase in followup_phrases)
+    checks.append(
+        _check(
+            "music-kb-ux-followup-direction",
+            followup_ok,
+            "Follow-up requests add or replace results without changing the selected direction.",
+            evidence=[phrase for phrase in followup_phrases if phrase in normalized_skill],
+            remediation=["Keep both follow-up actions in the current branch and distinguish append from display replacement."],
+        )
+    )
+
     evidence_phrases = (
         "ordered for retrieval",
         "small shortlist",
@@ -150,11 +169,9 @@ def main() -> None:
     )
 
     deferred_phrases = (
-        "append/replace meanings",
-        "再来一些",
-        "换一批",
-        "deliberately deferred product decisions",
-        "universal intersection or union rule",
+        "default intersection/union semantics",
+        "ambiguous multi-tag wording",
+        "deliberately deferred product decision",
     )
     fixed_default = bool(
         re.search(
@@ -169,10 +186,10 @@ def main() -> None:
         _check(
             "music-kb-ux-deferred-decisions",
             deferred_ok,
-            "Undecided follow-up semantics remain explicitly deferred; no withdrawn fixed quantity returned.",
+            "Ambiguous multi-tag semantics remain deferred; no withdrawn fixed quantity returned.",
             evidence=[phrase for phrase in deferred_phrases if phrase in normalized_skill]
             + (["fixed default detected"] if fixed_default else ["no fixed quantity pattern detected"]),
-            remediation=["Do not encode append/replace or multi-tag defaults before a later product decision."],
+            remediation=["Do not encode a universal intersection/union default before a later product decision."],
         )
     )
 

@@ -99,6 +99,19 @@ labels when the actual result evidence supports them.
   do not encode 3, 5, 10, or another universal constant in this Skill until a
   later real-sample decision.
 
+### Follow-up requests keep the selected direction
+
+- “再来一些” means the user wants more songs that fit the **current selected
+  direction**. Keep the results already shown and append new, not-yet-shown
+  recordings from that same direction where the data permits.
+- “换一批” means the user wants a different batch from the **same current
+  direction**. Replace the currently displayed batch with new, not-yet-shown
+  recordings where the data permits, while keeping the direction and the
+  conversation context.
+- Neither phrase creates a new interpretation branch, switches to another
+  direction, or silently broadens the request. Do not make the user repeat the
+  original conditions.
+
 ### Keep the conversation recoverable
 
 - When the user selects a branch, set it as the current conversation context
@@ -107,11 +120,10 @@ labels when the actual result evidence supports them.
 - When the user only says “不是这个”, acknowledge the mismatch and ask one
   minimal question about the most result-changing axis. Do not guess a new
   branch and do not demand a full restatement.
-- The append/replace meanings of “再来一些” and “换一批”, and the default
-  intersection/union semantics of ambiguous multi-tag wording, are deliberately
-  deferred product decisions. Do not present either choice as an established
-  contract; if the distinction is necessary for the next action, ask one small
-  question or wait for an explicit “追加/替换/换方向” instruction.
+- The default intersection/union semantics of ambiguous multi-tag wording
+  remain a deliberately deferred product decision. Do not present either as an
+  established contract; if the distinction is necessary for the next action,
+  ask one small question or follow the relationship stated by the user.
 
 ## Retrieval procedure
 

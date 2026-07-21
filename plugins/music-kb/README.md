@@ -22,9 +22,11 @@ context without silently triggering another search. Large result sets start
 with a representative, expandable page; small sets can be shown in full.
 
 The exact first-page quantity and the semantics of “再来一些” versus “换一批”
-remain deliberate calibration decisions. The Skill must not invent a permanent
-default quantity or silently broaden a request. Every listening link shown to a
-user comes from the runtime `listen_url` returned by the read-only MCP path.
+now keep the selected direction: “再来一些” appends new results to the current
+list, while “换一批” replaces the displayed batch with new results from that
+same direction. The Skill must not invent a permanent default quantity or
+silently broaden a request. Every listening link shown to a user comes from the
+runtime `listen_url` returned by the read-only MCP path.
 
 From this directory:
 

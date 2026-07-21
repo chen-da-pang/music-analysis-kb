@@ -35,9 +35,12 @@ def test_conversation_ux_onboarding_and_contract_are_present() -> None:
         "numeric confidence",
         "Keep a song in every branch",
         "Progressive result volume (方案 1+)",
+        "Follow-up requests keep the selected direction",
         "不是这个",
         "再来一些",
         "换一批",
+        "currently displayed batch",
+        "Neither phrase creates a new interpretation branch",
         "listen_url",
         "search_projection_state",
         "ordered for retrieval",
@@ -106,6 +109,6 @@ def test_plugin_version_is_kept_in_sync() -> None:
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     lockfile = (root / "uv.lock").read_text(encoding="utf-8")
     version = manifest["version"]
-    assert version == "0.7.1"
+    assert version == "0.7.2"
     assert f'version = "{version}"' in pyproject
     assert f'name = "music-kb"\nversion = "{version}"' in lockfile
