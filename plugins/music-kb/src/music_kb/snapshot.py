@@ -70,7 +70,7 @@ def create_snapshot(
         raise ValidationError(f"Release already exists: {release_dir}")
 
     with MusicKBRepository(source_path, read_only=True) as master:
-        validation = master.validate()
+        validation = master.validate(require_lyrics=True)
         if not validation["valid"]:
             raise ValidationError("Master database failed validation", details=validation)
 
@@ -122,7 +122,7 @@ def create_snapshot(
                 )
             snapshot.rebuild_all_search_projections()
             snapshot.connection.execute("VACUUM")
-            validation = snapshot.validate()
+            validation = snapshot.validate(require_lyrics=True)
             if not validation["valid"]:
                 raise ValidationError("Generated snapshot failed validation", details=validation)
             snapshot_status = snapshot.status()
@@ -196,7 +196,7 @@ def verify_snapshot(manifest_path: str | Path) -> dict[str, Any]:
     try:
         with MusicKBRepository(database_path, read_only=True) as snapshot:
             status = snapshot.status()
-            validation = snapshot.validate()
+            validation = snapshot.validate(require_lyrics=True)
     except Exception as exc:
         raise SnapshotVerificationError(f"Snapshot database cannot be opened safely: {exc}") from exc
     if status["metadata"].get("database_kind") != "snapshot":

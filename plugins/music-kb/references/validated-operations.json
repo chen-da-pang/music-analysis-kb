@@ -69,6 +69,15 @@
     "knowledge_import": {
       "effective_method": "只导入质量通过的 canonical delivery；幂等导入、重建标签和搜索投影，然后验证 source_links 完整。"
     },
+    "lyrics_import": {
+      "effective_method": "只导入 CC 固定 worker 产生的结构化歌词 receipt；按 source_name + source_track_id 精确绑定 canonical source_track，标题和歌手只可用于 worker 候选定位。available、instrumental、platform_unavailable 需有可审计证据；空结果、网络/解析失败和 identity 不一致一律保留 pending，不得伪造平台无歌词。"
+    },
+    "lyrics_backfill": {
+      "effective_method": "历史回填从 writable master 的 unresolved canonical source_track 生成队列，固定 CC worker 以 Kugou exact mix-song identity 读取 SongInfo.lyric，不下载或扫描音频/LRC；回执再由 lyrics_import 幂等写入。"
+    },
+    "lyrics_coverage": {
+      "effective_method": "在 snapshot 前复算 canonical recordings 的 available、instrumental、platform_unavailable、pending 和缺失歌词记录；只有 unresolved=0 才允许 snapshot、发布和音频清理。"
+    },
     "snapshot": {
       "effective_method": "创建 immutable snapshot，验证 manifest、SHA-256、SQLite integrity、schema 和 canonical-only counts。"
     },

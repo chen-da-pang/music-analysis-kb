@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .campaign_delivery import load_campaign_delivery_file
+from .lyrics import load_lyric_receipts
 from .operation_context import RunContext, atom, atomic_write_json
 from .preflight import run_preflight
 from .repository import MusicKBRepository
@@ -407,6 +408,7 @@ def run_weekly_run(
     peer_names: Sequence[str],
     publish: bool,
     delivery: str | Path | None,
+    lyric_receipt_paths: Sequence[str | Path] = (),
     cnb_command: str | None,
     chart_database: str | Path | None,
     state_file: str | Path,
@@ -459,6 +461,9 @@ def run_weekly_run(
     if cnb_campaign_timeout_seconds is not None and cnb_campaign_timeout_seconds <= 0:
         raise ValueError("cnb_campaign_timeout_seconds must be positive")
     delivery_path: Path | None = _resolve_workspace_path(delivery, root) if delivery else None
+    explicit_lyric_receipt_paths = [
+        _resolve_workspace_path(path, root) for path in lyric_receipt_paths
+    ]
     delivery_supplied = delivery is not None
     resume_reason = "verified supplied delivery resumes after Music Flamingo analysis"
     # The exact command set is finalized after we inspect a same-run receipt.
@@ -1110,6 +1115,70 @@ def run_weekly_run(
                     )
                 import_result = {"import": import_result, "links": link_result, "tags": tag_result, "validation": validation, "status": status}
                 outputs.update(import_result)
+
+        receipt_paths: list[Path] = []
+        seen_receipt_paths: set[Path] = set()
+        for candidate in explicit_lyric_receipt_paths:
+            if candidate not in seen_receipt_paths:
+                seen_receipt_paths.add(candidate)
+                receipt_paths.append(candidate)
+        automatic_receipt = download_result.get("lyrics_receipt")
+        if automatic_receipt:
+            candidate = Path(str(automatic_receipt)).expanduser().resolve()
+            if candidate not in seen_receipt_paths:
+                seen_receipt_paths.add(candidate)
+                receipt_paths.append(candidate)
+
+        with atom(
+            context,
+            "lyrics_import",
+            inputs={
+                "receipts": [str(path) for path in receipt_paths],
+                "delivery": str(delivery_path) if delivery_path else None,
+            },
+        ) as outputs:
+            if delivery_path is None or not delivery_path.is_file():
+                outputs.update({"status": "skipped", "reason": "no delivery in dry-run"})
+            elif not receipt_paths:
+                outputs.update(
+                    {
+                        "status": "skipped",
+                        "reason": "no lyric receipts supplied; coverage gate will block release",
+                    }
+                )
+            else:
+                receipts = [receipt for path in receipt_paths for receipt in load_lyric_receipts(path)]
+                with MusicKBRepository(database_path, read_only=False) as repository:
+                    lyric_result = repository.import_lyric_receipts(receipts)
+                    coverage = repository.lyric_coverage()
+                outputs.update(
+                    {
+                        **lyric_result,
+                        "receipt_files": [str(path) for path in receipt_paths],
+                        "coverage": coverage,
+                    }
+                )
+
+        with atom(
+            context,
+            "lyrics_coverage",
+            inputs={"database": str(database_path)},
+        ) as outputs:
+            if delivery_path is None or not delivery_path.is_file():
+                outputs.update({"status": "skipped", "reason": "no delivery in dry-run"})
+            else:
+                with MusicKBRepository(database_path, read_only=True) as repository:
+                    lyric_validation = repository.validate(require_lyrics=True)
+                    lyric_status = repository.status()
+                outputs.update(
+                    {
+                        "validation": lyric_validation,
+                        "coverage": lyric_validation["lyrics_coverage"],
+                        "status": lyric_status,
+                    }
+                )
+                if not lyric_validation["valid"]:
+                    raise RuntimeError(f"lyric coverage gate failed: {lyric_validation}")
 
         release_result: dict[str, Any] | None = None
         release_verification: dict[str, Any] | None = None

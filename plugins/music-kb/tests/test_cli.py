@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import music_kb.cli as cli
+from music_kb.repository import MusicKBRepository
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "analysis.json"
@@ -140,10 +141,12 @@ def test_doctor_reports_missing_default_database(tmp_path: Path, monkeypatch) ->
     assert parsed["result"]["ready"] is False
 
 
-def test_cli_publish_push_dry_run_has_a_machine_readable_plan(tmp_path: Path) -> None:
+def test_cli_publish_push_dry_run_has_a_machine_readable_plan(tmp_path: Path, lyric_seed) -> None:
     database = tmp_path / "master.sqlite"
     assert run_cli("--json", "init", "--db", str(database)).returncode == 0
     assert run_cli("--json", "import-analysis", "--db", str(database), "--input", str(FIXTURE)).returncode == 0
+    with MusicKBRepository(database) as repository:
+        lyric_seed(repository)
     created = run_cli(
         "--json",
         "snapshot",

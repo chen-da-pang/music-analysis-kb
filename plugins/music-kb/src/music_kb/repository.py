@@ -12,6 +12,18 @@ from urllib.parse import urlsplit
 
 from .campaign_delivery import CampaignDeliveryEntry, group_campaign_delivery, to_import_payload
 from .errors import NotFoundError, ValidationError
+from .lyrics import (
+    LYRIC_NORMALIZER_VERSION,
+    LYRIC_STATUS_AVAILABLE,
+    LYRIC_STATUS_INSTRUMENTAL,
+    LYRIC_STATUS_PENDING,
+    LYRIC_STATUS_PLATFORM_UNAVAILABLE,
+    LYRIC_STATUSES,
+    LYRIC_TERMINAL_STATUSES,
+    lyric_text_sha256,
+    load_lyric_receipts,
+    normalize_lyric_text,
+)
 from .normalization import fts_query, normalized, require_text
 from .schema import SCHEMA_VERSION, connect, ensure_initialized
 from .tagging import PARSER_SOURCE, extract_music_flamingo_metadata
@@ -1576,6 +1588,391 @@ class MusicKBRepository:
             for row in rows
         ]
 
+    # -- lyrics ----------------------------------------------------------
+
+    def _resolve_lyric_source_track(
+        self, *, recording_id: str, source_track_row_id: str
+    ) -> sqlite3.Row:
+        row = self.connection.execute(
+            """
+            SELECT st.id, st.recording_id, st.source_name, st.source_track_id,
+                   st.source_title, st.source_artist_credit, st.source_url,
+                   r.canonical_analysis_id
+            FROM source_track st
+            JOIN recording r ON r.id = st.recording_id
+            WHERE st.id = ?
+            """,
+            (source_track_row_id,),
+        ).fetchone()
+        if row is None:
+            raise ValidationError(f"Unknown lyric source-track row {source_track_row_id}")
+        if str(row["recording_id"]) != recording_id:
+            raise ValidationError(
+                "Lyric source track belongs to a different recording",
+                details={
+                    "recording_id": recording_id,
+                    "source_track_row_id": source_track_row_id,
+                    "source_recording_id": str(row["recording_id"]),
+                },
+            )
+        if row["canonical_analysis_id"] is None:
+            raise ValidationError("Lyrics can be imported only for a canonical recording")
+        return row
+
+    @staticmethod
+    def _lyric_evidence(
+        value: object,
+        *,
+        status: str,
+        source_track: sqlite3.Row,
+    ) -> str:
+        if not isinstance(value, Mapping):
+            raise ValidationError("lyric.evidence must be an object")
+        evidence = dict(value)
+        source_name = normalized(
+            require_text(evidence.get("source_name"), "lyric.evidence.source_name")
+        )
+        source_track_id = require_text(
+            evidence.get("source_track_id"), "lyric.evidence.source_track_id"
+        )
+        if source_name != normalized(str(source_track["source_name"])):
+            raise ValidationError("Lyric evidence source_name does not match source track")
+        if source_track_id != str(source_track["source_track_id"]):
+            raise ValidationError("Lyric evidence source_track_id does not match source track")
+        if status in LYRIC_TERMINAL_STATUSES and not str(evidence.get("reason") or "").strip():
+            raise ValidationError("Terminal lyric evidence requires a non-empty reason")
+        try:
+            return json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("lyric.evidence must be JSON serializable") from exc
+
+    def _import_lyric(self, payload: Mapping[str, Any], *, transactional: bool) -> dict[str, Any]:
+        self._require_writer()
+        if not isinstance(payload, Mapping):
+            raise ValidationError("Lyric import payload must be an object")
+        recording_id = require_text(payload.get("recording_id"), "lyric.recording_id")
+        source_track_row_id = require_text(
+            payload.get("source_track_row_id"), "lyric.source_track_row_id"
+        )
+        status = str(payload.get("status") or "").strip().lower()
+        if status not in LYRIC_STATUSES:
+            raise ValidationError(
+                "lyric.status must be pending, available, instrumental, or platform_unavailable"
+            )
+        source_track = self._resolve_lyric_source_track(
+            recording_id=recording_id, source_track_row_id=source_track_row_id
+        )
+        evidence_json = self._lyric_evidence(
+            payload.get("evidence"), status=status, source_track=source_track
+        )
+        normalizer_version = str(
+            payload.get("normalizer_version") or LYRIC_NORMALIZER_VERSION
+        ).strip()
+        if not normalizer_version:
+            raise ValidationError("lyric.normalizer_version must not be empty")
+
+        lyric_text: str | None = None
+        text_sha256: str | None = None
+        raw_text = payload.get("lyric_text")
+        if status == LYRIC_STATUS_AVAILABLE:
+            lyric_text = normalize_lyric_text(raw_text)
+            if not lyric_text:
+                raise ValidationError("Available lyric text is empty after normalization")
+            text_sha256 = lyric_text_sha256(lyric_text)
+        elif raw_text not in (None, ""):
+            raise ValidationError("Only available lyrics may contain lyric_text")
+
+        existing = self.connection.execute(
+            """
+            SELECT source_track_row_id, status, lyric_text, text_sha256,
+                   evidence_json, normalizer_version
+            FROM recording_lyric WHERE recording_id = ?
+            """,
+            (recording_id,),
+        ).fetchone()
+        if existing is not None and str(existing["status"]) in LYRIC_TERMINAL_STATUSES and status == LYRIC_STATUS_PENDING:
+            return {
+                "recording_id": recording_id,
+                "source_track_row_id": str(existing["source_track_row_id"]),
+                "status": str(existing["status"]),
+                "text_sha256": existing["text_sha256"],
+                "idempotent": True,
+                "preserved_terminal": True,
+            }
+        if existing is not None and (
+            str(existing["source_track_row_id"]) == source_track_row_id
+            and str(existing["status"]) == status
+            and existing["lyric_text"] == lyric_text
+            and existing["text_sha256"] == text_sha256
+            and str(existing["evidence_json"]) == evidence_json
+            and str(existing["normalizer_version"]) == normalizer_version
+        ):
+            return {
+                "recording_id": recording_id,
+                "source_track_row_id": source_track_row_id,
+                "status": status,
+                "text_sha256": text_sha256,
+                "idempotent": True,
+                "preserved_terminal": False,
+            }
+
+        transaction = self.connection if transactional else nullcontext()
+        with transaction:
+            self.connection.execute(
+                """
+                INSERT INTO recording_lyric(
+                    recording_id, source_track_row_id, status, lyric_text,
+                    text_sha256, evidence_json, normalizer_version, acquired_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(recording_id) DO UPDATE SET
+                    source_track_row_id = excluded.source_track_row_id,
+                    status = excluded.status,
+                    lyric_text = excluded.lyric_text,
+                    text_sha256 = excluded.text_sha256,
+                    evidence_json = excluded.evidence_json,
+                    normalizer_version = excluded.normalizer_version,
+                    acquired_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    recording_id,
+                    source_track_row_id,
+                    status,
+                    lyric_text,
+                    text_sha256,
+                    evidence_json,
+                    normalizer_version,
+                ),
+            )
+        return {
+            "recording_id": recording_id,
+            "source_track_row_id": source_track_row_id,
+            "status": status,
+            "text_sha256": text_sha256,
+            "idempotent": False,
+            "preserved_terminal": False,
+        }
+
+    def import_lyric(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Write one identity-bound lyric result into the publisher master."""
+
+        return self._import_lyric(payload, transactional=True)
+
+    def import_lyrics(self, payloads: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+        """Import a bounded batch atomically while retaining terminal results."""
+
+        self._require_writer()
+        results: list[dict[str, Any]] = []
+        with self.connection:
+            for payload in payloads:
+                results.append(self._import_lyric(payload, transactional=False))
+        return {
+            "count": len(results),
+            "imported": sum(1 for result in results if not result["idempotent"]),
+            "idempotent": sum(1 for result in results if result["idempotent"]),
+            "results": results,
+        }
+
+    def _resolve_lyric_receipt_source_track(self, receipt: Mapping[str, Any]) -> sqlite3.Row:
+        """Bind a worker receipt to exactly one canonical source-track row.
+
+        The worker is allowed to use title/artist to locate a Kugou result, but
+        the receipt may enter the database only through its platform source ID.
+        Optional row/recording fields are assertions, never alternate lookup
+        keys, so an old or mismatched queue cannot silently attach lyrics to a
+        different recording.
+        """
+
+        source_name = normalized(
+            require_text(receipt.get("source_name"), "lyric receipt.source_name")
+        )
+        source_track_id = require_text(
+            receipt.get("source_track_id"), "lyric receipt.source_track_id"
+        )
+        rows = list(
+            self.connection.execute(
+                """
+                SELECT st.id, st.recording_id, st.source_name, st.source_track_id,
+                       st.source_title, st.source_artist_credit, st.source_url,
+                       r.canonical_analysis_id
+                FROM source_track st
+                JOIN recording r ON r.id = st.recording_id
+                WHERE st.source_track_id = ?
+                """,
+                (source_track_id,),
+            )
+        )
+        matching = [row for row in rows if normalized(str(row["source_name"])) == source_name]
+        if not matching:
+            raise ValidationError(
+                "Lyric receipt source identity is not present in the publisher database",
+                details={"source_name": source_name, "source_track_id": source_track_id},
+            )
+        if len(matching) != 1:
+            raise ValidationError(
+                "Lyric receipt source identity is ambiguous in the publisher database",
+                details={"source_name": source_name, "source_track_id": source_track_id},
+            )
+        source_track = matching[0]
+        expected_recording_id = str(receipt.get("recording_id") or "").strip()
+        if expected_recording_id and expected_recording_id != str(source_track["recording_id"]):
+            raise ValidationError(
+                "Lyric receipt recording_id does not match its source identity",
+                details={
+                    "receipt_recording_id": expected_recording_id,
+                    "source_recording_id": str(source_track["recording_id"]),
+                    "source_track_id": source_track_id,
+                },
+            )
+        expected_row_id = str(receipt.get("source_track_row_id") or "").strip()
+        if expected_row_id and expected_row_id != str(source_track["id"]):
+            raise ValidationError(
+                "Lyric receipt source_track_row_id does not match its source identity",
+                details={
+                    "receipt_source_track_row_id": expected_row_id,
+                    "source_track_row_id": str(source_track["id"]),
+                    "source_track_id": source_track_id,
+                },
+            )
+        if source_track["canonical_analysis_id"] is None:
+            raise ValidationError("Lyrics can be imported only for a canonical recording")
+        return source_track
+
+    def _import_lyric_receipt(
+        self, receipt: Mapping[str, Any], *, transactional: bool
+    ) -> dict[str, Any]:
+        self._require_writer()
+        if not isinstance(receipt, Mapping):
+            raise ValidationError("Lyric receipt must be an object")
+        source_track = self._resolve_lyric_receipt_source_track(receipt)
+        evidence = receipt.get("evidence")
+        if not isinstance(evidence, Mapping):
+            raise ValidationError("Lyric receipt evidence must be an object")
+        payload = {
+            "recording_id": str(source_track["recording_id"]),
+            "source_track_row_id": str(source_track["id"]),
+            "status": receipt.get("status"),
+            "lyric_text": receipt.get("lyric_text"),
+            "evidence": dict(evidence),
+            "normalizer_version": receipt.get("normalizer_version"),
+        }
+        result = self._import_lyric(payload, transactional=transactional)
+        return {
+            **result,
+            "receipt_source_name": normalized(str(receipt.get("source_name") or "")),
+            "receipt_source_track_id": str(receipt.get("source_track_id") or ""),
+        }
+
+    def import_lyric_receipt(self, receipt: Mapping[str, Any]) -> dict[str, Any]:
+        """Import one worker receipt only after source-identity verification."""
+
+        return self._import_lyric_receipt(receipt, transactional=True)
+
+    def import_lyric_receipts(self, receipts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+        """Import an auditable receipt batch atomically and idempotently."""
+
+        self._require_writer()
+        results: list[dict[str, Any]] = []
+        with self.connection:
+            for receipt in receipts:
+                results.append(self._import_lyric_receipt(receipt, transactional=False))
+        return {
+            "count": len(results),
+            "imported": sum(1 for result in results if not result["idempotent"]),
+            "idempotent": sum(1 for result in results if result["idempotent"]),
+            "results": results,
+        }
+
+    def import_lyric_receipt_file(self, path: str | Path) -> dict[str, Any]:
+        """Read a CC JSONL receipt file and bind each row to canonical data."""
+
+        source = Path(path).expanduser().resolve()
+        result = self.import_lyric_receipts(load_lyric_receipts(source))
+        return {**result, "receipt_file": str(source)}
+
+    def lyric_coverage(self) -> dict[str, int]:
+        """Report coverage for the recordings that a public snapshot exposes."""
+
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*) AS canonical_recordings,
+                   COALESCE(SUM(CASE WHEN rl.status = 'available' THEN 1 ELSE 0 END), 0) AS available,
+                   COALESCE(SUM(CASE WHEN rl.status = 'instrumental' THEN 1 ELSE 0 END), 0) AS instrumental,
+                   COALESCE(SUM(CASE WHEN rl.status = 'platform_unavailable' THEN 1 ELSE 0 END), 0) AS platform_unavailable,
+                   COALESCE(SUM(CASE WHEN rl.status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+                   COALESCE(SUM(CASE WHEN rl.recording_id IS NULL THEN 1 ELSE 0 END), 0) AS missing
+            FROM recording r
+            LEFT JOIN recording_lyric rl ON rl.recording_id = r.id
+            WHERE r.canonical_analysis_id IS NOT NULL
+            """
+        ).fetchone()
+        canonical_recordings = int(row["canonical_recordings"] or 0)
+        available = int(row["available"] or 0)
+        instrumental = int(row["instrumental"] or 0)
+        platform_unavailable = int(row["platform_unavailable"] or 0)
+        pending = int(row["pending"] or 0)
+        missing = int(row["missing"] or 0)
+        return {
+            "canonical_recordings": canonical_recordings,
+            "available": available,
+            "instrumental": instrumental,
+            "platform_unavailable": platform_unavailable,
+            "pending": pending,
+            "missing": missing,
+            "unresolved": canonical_recordings - available - instrumental - platform_unavailable,
+        }
+
+    def get_lyrics(self, recording_id: str) -> dict[str, Any]:
+        """Fetch one selected recording's full lyric text without truncation."""
+
+        row = self.connection.execute(
+            """
+            SELECT r.id, r.canonical_title, r.version_label,
+                   rl.source_track_row_id, rl.status, rl.lyric_text,
+                   rl.text_sha256, rl.evidence_json, rl.normalizer_version,
+                   rl.acquired_at, rl.updated_at,
+                   st.source_name, st.source_track_id, st.source_title,
+                   st.source_artist_credit, st.source_url
+            FROM recording r
+            LEFT JOIN recording_lyric rl ON rl.recording_id = r.id
+            LEFT JOIN source_track st ON st.id = rl.source_track_row_id
+            WHERE r.id = ? AND r.canonical_analysis_id IS NOT NULL
+            """,
+            (recording_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"No canonical recording found for lyrics {recording_id}")
+        if row["status"] is None:
+            return {
+                "recording_id": str(row["id"]),
+                "title": str(row["canonical_title"]),
+                "version_label": str(row["version_label"]),
+                "status": LYRIC_STATUS_PENDING,
+                "lyric_text": None,
+                "source": None,
+                "evidence": None,
+            }
+        evidence = json.loads(str(row["evidence_json"]))
+        return {
+            "recording_id": str(row["id"]),
+            "title": str(row["canonical_title"]),
+            "version_label": str(row["version_label"]),
+            "status": str(row["status"]),
+            "lyric_text": row["lyric_text"],
+            "text_sha256": row["text_sha256"],
+            "normalizer_version": str(row["normalizer_version"]),
+            "acquired_at": str(row["acquired_at"]),
+            "updated_at": str(row["updated_at"]),
+            "source": {
+                "source": str(row["source_name"]),
+                "track_id": str(row["source_track_id"]),
+                "title": row["source_title"],
+                "artist": row["source_artist_credit"],
+                "url": row["source_url"],
+            },
+            "evidence": evidence,
+        }
+
     # -- reads ------------------------------------------------------------
 
     def status(self) -> dict[str, Any]:
@@ -1583,11 +1980,13 @@ class MusicKBRepository:
             str(row["key"]): str(row["value"])
             for row in self.connection.execute("SELECT key, value FROM meta ORDER BY key")
         }
+        lyric_coverage = self.lyric_coverage()
         counts = {
             "recordings": self.connection.execute("SELECT COUNT(*) FROM recording").fetchone()[0],
             "canonical_analyses": self.connection.execute(
                 "SELECT COUNT(*) FROM recording WHERE canonical_analysis_id IS NOT NULL"
             ).fetchone()[0],
+            "canonical_recordings": lyric_coverage["canonical_recordings"],
             "analysis_revisions": self.connection.execute("SELECT COUNT(*) FROM analysis_revision").fetchone()[0],
             "campaign_delivery_provenance": self.connection.execute(
                 "SELECT COUNT(*) FROM campaign_delivery_provenance"
@@ -1597,6 +1996,12 @@ class MusicKBRepository:
             "source_links": self.connection.execute(
                 "SELECT COUNT(*) FROM source_track WHERE source_url IS NOT NULL AND trim(source_url) <> ''"
             ).fetchone()[0],
+            "lyrics_available": lyric_coverage["available"],
+            "lyrics_instrumental": lyric_coverage["instrumental"],
+            "lyrics_platform_unavailable": lyric_coverage["platform_unavailable"],
+            "lyrics_pending": lyric_coverage["pending"],
+            "lyrics_missing": lyric_coverage["missing"],
+            "lyrics_unresolved": lyric_coverage["unresolved"],
         }
         return {
             "path": str(self.path),
@@ -1886,7 +2291,7 @@ class MusicKBRepository:
 
     # -- validation -------------------------------------------------------
 
-    def validate(self) -> dict[str, Any]:
+    def validate(self, *, require_lyrics: bool = False) -> dict[str, Any]:
         issues: list[dict[str, Any]] = []
         projection_state = self.connection.execute(
             "SELECT value FROM meta WHERE key = ?", (SEARCH_PROJECTION_STATE_KEY,)
@@ -1982,7 +2387,49 @@ class MusicKBRepository:
         for code, sql in checks:
             for row in self.connection.execute(sql):
                 issues.append({"code": code, "recording_id": str(row[0])})
-        return {"valid": not issues, "issues": issues, "issue_count": len(issues)}
+        lyric_rows = self.connection.execute(
+            """
+            SELECT rl.recording_id, rl.source_track_row_id, rl.status,
+                   rl.lyric_text, rl.text_sha256, rl.evidence_json,
+                   st.recording_id AS source_recording_id, st.source_name,
+                   st.source_track_id
+            FROM recording_lyric rl
+            LEFT JOIN source_track st ON st.id = rl.source_track_row_id
+            """
+        )
+        for row in lyric_rows:
+            recording_id = str(row["recording_id"])
+            if row["source_recording_id"] is None or str(row["source_recording_id"]) != recording_id:
+                issues.append({"code": "lyric_source_track_mismatch", "recording_id": recording_id})
+                continue
+            if row["status"] == LYRIC_STATUS_AVAILABLE:
+                lyric_text = str(row["lyric_text"] or "")
+                if lyric_text_sha256(lyric_text) != str(row["text_sha256"] or ""):
+                    issues.append({"code": "lyric_text_hash_mismatch", "recording_id": recording_id})
+            try:
+                evidence = json.loads(str(row["evidence_json"]))
+            except (TypeError, json.JSONDecodeError):
+                issues.append({"code": "lyric_evidence_invalid_json", "recording_id": recording_id})
+                continue
+            if not isinstance(evidence, Mapping):
+                issues.append({"code": "lyric_evidence_not_object", "recording_id": recording_id})
+                continue
+            evidence_source = str(evidence.get("source_name") or "")
+            evidence_track_id = str(evidence.get("source_track_id") or "")
+            if (
+                normalized(evidence_source) != normalized(str(row["source_name"]))
+                or evidence_track_id != str(row["source_track_id"])
+            ):
+                issues.append({"code": "lyric_evidence_identity_mismatch", "recording_id": recording_id})
+        lyric_coverage = self.lyric_coverage()
+        if require_lyrics and lyric_coverage["unresolved"]:
+            issues.append({"code": "lyrics_coverage_incomplete", **lyric_coverage})
+        return {
+            "valid": not issues,
+            "issues": issues,
+            "issue_count": len(issues),
+            "lyrics_coverage": lyric_coverage,
+        }
 
 
 def _decode_jsonl_object(raw_line: bytes, line_number: int) -> dict[str, Any]:
