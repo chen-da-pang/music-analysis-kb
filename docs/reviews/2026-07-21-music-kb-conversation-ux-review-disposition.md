@@ -63,7 +63,9 @@
 | R24 | 已检索方向最终仍可能平铺成一张歌单 | 已解决 | 最终组数必须与有效分支一致；每个有效分支单独成组，禁止重新合并。 |
 | R25 | 搜索结果缺少紧凑共现证据 | 已解决 | MCP / CLI 搜索新增当前 bounded 返回行的 canonical `facet_counts`；明确排除标题、艺人和 aliases。 |
 | R26 | 12/12 静态覆盖率容易被理解成真实行为通过 | 已解决 | 指标改称 conversation-contract coverage；无 trace 时行为为 unmeasured，只有显式 trace 才产生独立 behavior metrics。 |
-| R27 | 新鲜真实模型复测 | 环境阻塞，非伪通过 | v0.7.5 已加载，但 `music_kb_status` 被 `codex exec` 报为 `user cancelled MCP tool call`；没有产生行为结论，不继续高成本盲重试。 |
+| R27 | 新鲜真实模型复测 | 已补测，核心行为通过 | 最小新鲜环境中的真实回答保留三个方向、三次独立检索并分组三组输出；runtime behavior 5/5、100%。完整证据与 capture 边界见真实对话验收报告。 |
+| R28 | 真实首轮检索的端到端 token 与等待过重 | 阻塞 Ready，待讨论 | 单样本约 163 秒、390,859 input tokens（350,976 cached）；Plugin Eval + observed usage 为 C / 77、high risk。优先讨论“50-row 扫描 + 紧凑返回投影”，本轮不直接修改。 |
+| R29 | 多分支首轮后的“这个方向”引用可能含糊 | 非阻塞观察 | 三组同时展示时没有紧接着要求用户选定组；单独回复“再来一些”可能缺少当前方向。先纳入后续真实样本，不因此否定本次分组行为通过。 |
 
 ## Round 31 追加决策：候选层 → 详情层
 
@@ -149,13 +151,19 @@ benchmark 边界处理，不再新增 UX 议题；本轮脑爆正式结束。
 - Plugin Eval：A / 95、0 fail；invoke estimate 4,414 tokens，比 v0.7.4 增加 181。
 - static conversation-contract：13/13；无 trace 时明确输出 runtime behavior unmeasured。
 - validator 正向期望轨迹：5/5；已知真实结构回归轨迹：3/5，失败项正是遗漏第三方向和最终平铺。
-- 新鲜 `codex exec` 没有获得真实歌曲结果：第一步 `music_kb_status` 被取消。该失败属于
-  测试载体边界，不能写成 v0.7.5 对话行为通过，也不改变代码与契约测试已经通过的事实。
+- 新鲜最小环境真实复测已获得完整回答：三个重要方向全部保留，分别检索并逐组成组；
+  runtime behavior 5/5、100%，旧的“两方向 + 平铺”逃逸没有复现。
+- 真实用量同时暴露新的 Ready 阻塞项：约 163 秒、390,859 input tokens（其中 350,976
+  cached）。Plugin Eval 加入 observed usage 后为 C / 77、high risk；静态 A / 95 不能覆盖
+  这一端到端重量问题。
+- 当前证据指向四次最多 50-row 的完整结果载荷及多轮上下文累积，而不是 facets 的数据库
+  计算成本。是否加入“扫描范围 / 返回投影”分离需先讨论，本轮未修改实现。
 
 ## 相关记录
 
 - [头脑风暴记录](../brainstorms/2026-07-20-music-kb-conversation-ux.md)
 - [详情体量 benchmark](../benchmarks/2026-07-22-music-kb-conversation-ux-full-analysis.md)
+- [v0.7.5 真实对话验收](../benchmarks/2026-07-22-music-kb-live-conversation-acceptance.md)
 - [conversation-UX metric pack](../../plugins/music-kb/evals/conversation-ux/emit-conversation-ux.py)
 - Issue #38 / Draft PR #39：撤回的固定规则方案，仅作为历史证据
 - Issue #41 / Draft PR #46：当前已批准的 UX 实现和讨论记录

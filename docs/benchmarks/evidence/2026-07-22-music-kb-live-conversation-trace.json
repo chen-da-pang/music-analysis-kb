@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "scenario_id": "warm-rnb-love-live-2026-07-22",
+  "base_search": {
+    "tool": "music_kb_search",
+    "arguments": {
+      "tags": ["r&b", "warm", "love"],
+      "limit": 50
+    },
+    "result": {
+      "facet_counts": [
+        {"namespace": "genre", "name": "r&b", "count": 50},
+        {"namespace": "genre", "name": "soul", "count": 7},
+        {"namespace": "lyric_theme", "name": "love", "count": 50},
+        {"namespace": "mood", "name": "warm", "count": 50},
+        {"namespace": "mood", "name": "melancholic", "count": 45},
+        {"namespace": "mood", "name": "romantic", "count": 30}
+      ],
+      "facet_scope": {
+        "kind": "returned_results",
+        "recording_count": 50,
+        "max_per_namespace": 5
+      }
+    }
+  },
+  "supported_directions": [
+    {"id": "warm-romantic", "important": true},
+    {"id": "warm-melancholic", "important": true},
+    {"id": "soul-rnb", "important": true}
+  ],
+  "selected_direction_ids": [
+    "warm-romantic",
+    "warm-melancholic",
+    "soul-rnb"
+  ],
+  "branch_searches": [
+    {
+      "call_id": "live-branch-1",
+      "direction_id": "warm-romantic",
+      "tool": "music_kb_search",
+      "arguments": {
+        "tags": ["r&b", "warm", "love", "romantic"],
+        "limit": 50
+      },
+      "result_count": 33,
+      "credible_results": true
+    },
+    {
+      "call_id": "live-branch-2",
+      "direction_id": "warm-melancholic",
+      "tool": "music_kb_search",
+      "arguments": {
+        "tags": ["r&b", "warm", "love", "melancholic"],
+        "limit": 50
+      },
+      "result_count": 47,
+      "credible_results": true
+    },
+    {
+      "call_id": "live-branch-3",
+      "direction_id": "soul-rnb",
+      "tool": "music_kb_search",
+      "arguments": {
+        "tags": ["soul", "warm", "love"],
+        "limit": 50
+      },
+      "result_count": 7,
+      "credible_results": true
+    }
+  ],
+  "final_response": {
+    "layout": "grouped",
+    "grouped_direction_ids": [
+      "warm-romantic",
+      "warm-melancholic",
+      "soul-rnb"
+    ],
+    "reported_separately_direction_ids": [],
+    "ungrouped_recording_ids": []
+  },
+  "normalization_evidence": {
+    "capture_kind": "filtered-codex-event-stream-plus-deterministic-search-replay",
+    "final_group_size": 4,
+    "branch_first_rows_match_final_answer": true,
+    "raw_command_text_preserved": false,
+    "note": "The compact event filter preserved the model's direction announcement, grouped final answer, and usage but omitted raw command text. Each final group exactly matches the first four rows of the corresponding v0.7.5 bounded search replay."
+  }
+}
