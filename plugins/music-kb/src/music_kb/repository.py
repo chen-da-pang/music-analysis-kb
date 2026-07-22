@@ -1922,6 +1922,295 @@ class MusicKBRepository:
             "unresolved": canonical_recordings - available - instrumental - platform_unavailable,
         }
 
+    @staticmethod
+    def _load_kugou_chart_play_link_map(
+        chart_database: str | Path,
+    ) -> tuple[Path, dict[str, str]]:
+        """Read the immutable chart URL -> MixSongID bridge in read-only mode.
+
+        The first 927 campaign deliveries predate the ``kugou-<MixSongID>``
+        source-track convention.  Their source-track IDs are delivery keys,
+        not Kugou IDs.  Their exact public ``source_url`` is, however, copied
+        verbatim from ``platform_tracks.play_link`` in the authoritative chart
+        database.  This bridge preserves that exact relationship; it never
+        tries to infer an ID from title or artist text.
+        """
+
+        path = Path(chart_database).expanduser().resolve()
+        if not path.is_file():
+            raise ValidationError(f"Kugou chart database does not exist: {path}")
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                """
+                SELECT play_link, platform_track_key
+                FROM platform_tracks
+                WHERE platform = 'kugou'
+                  AND play_link IS NOT NULL
+                  AND trim(play_link) <> ''
+                  AND platform_track_key IS NOT NULL
+                  AND trim(platform_track_key) <> ''
+                ORDER BY play_link, platform_track_key
+                """
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise ValidationError(
+                "Kugou chart database cannot provide platform_tracks play-link identities",
+                details={"chart_database": str(path)},
+            ) from exc
+        finally:
+            connection.close()
+
+        values_by_link: dict[str, set[str]] = {}
+        for row in rows:
+            link = str(row["play_link"])
+            track_key = str(row["platform_track_key"]).strip()
+            values_by_link.setdefault(link, set()).add(track_key)
+        conflicts = {
+            link: sorted(values)
+            for link, values in values_by_link.items()
+            if len(values) != 1
+        }
+        if conflicts:
+            sample = [
+                {"play_link": link, "platform_track_keys": values}
+                for link, values in list(sorted(conflicts.items()))[:20]
+            ]
+            raise ValidationError(
+                "Kugou chart database maps one public play link to multiple platform IDs",
+                details={
+                    "chart_database": str(path),
+                    "conflict_count": len(conflicts),
+                    "conflicts": sample,
+                },
+            )
+        return path, {link: next(iter(values)) for link, values in values_by_link.items()}
+
+    @staticmethod
+    def _kugou_platform_identity(
+        row: sqlite3.Row,
+        *,
+        chart_play_link_map: Mapping[str, str] | None,
+    ) -> tuple[str, str] | None:
+        """Return (MixSongID, audit method) for one exact source-track row."""
+
+        source_track_id = str(row["source_track_id"] or "").strip()
+        if source_track_id.casefold().startswith("kugou-"):
+            mix_song_id = source_track_id[len("kugou-") :].strip()
+            if mix_song_id:
+                return mix_song_id, "source_track_id_kugou_prefix_v1"
+            return None
+        source_url = str(row["source_url"] or "")
+        if chart_play_link_map is None:
+            return None
+        mix_song_id = chart_play_link_map.get(source_url)
+        if not mix_song_id:
+            return None
+        return mix_song_id, "chart_play_link_exact_v1"
+
+    def prepare_lyric_backfill_queue(
+        self,
+        *,
+        unresolved_only: bool = True,
+        chart_database: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """Build the identity-bound no-audio queue for the CC lyric worker.
+
+        The queue deliberately contains one selected, exact Kugou source track
+        for each canonical recording. A title or artist can help the worker
+        discover a result, but it cannot replace the ``MixSongID`` carried in
+        ``platform_track_key``. New rows already carry that ID as
+        ``kugou-<MixSongID>``. Historical rows use the read-only chart
+        database's exact ``play_link`` bridge; they are never mapped by a
+        title/artist guess.
+
+        A small number of canonical recordings have several source identities
+        whose campaign provenance proves that they produced the same canonical
+        audio SHA-256. Those byte-identical aliases may be reduced to the
+        deterministic lowest source-track ID. Any unproven multi-source case
+        remains an explicit queue error rather than an arbitrary selection.
+        """
+
+        coverage = self.lyric_coverage()
+        condition = ""
+        parameters: tuple[str, ...] = ()
+        if unresolved_only:
+            condition = "AND (rl.recording_id IS NULL OR rl.status = ?)"
+            parameters = (LYRIC_STATUS_PENDING,)
+        rows = list(
+            self.connection.execute(
+                f"""
+                SELECT r.id AS recording_id, r.canonical_title, r.version_label,
+                       r.audio_sha256,
+                       rl.status AS lyric_status,
+                       st.id AS source_track_row_id, st.source_name,
+                       st.source_track_id, st.source_title,
+                       st.source_artist_credit, st.source_url,
+                       EXISTS(
+                           SELECT 1
+                           FROM campaign_delivery_provenance c
+                           WHERE c.analysis_id = r.canonical_analysis_id
+                             AND c.delivery_id = st.source_track_id
+                             AND c.source_sha256 = r.audio_sha256
+                       ) AS exact_audio_provenance
+                FROM recording r
+                LEFT JOIN recording_lyric rl ON rl.recording_id = r.id
+                JOIN source_track st ON st.recording_id = r.id
+                WHERE r.canonical_analysis_id IS NOT NULL
+                  {condition}
+                ORDER BY r.id, st.source_name, st.source_track_id, st.id
+                """,
+                parameters,
+            )
+        )
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["recording_id"]), []).append(row)
+
+        legacy_rows = [
+            row
+            for row in rows
+            if normalized(str(row["source_name"] or "")) == "kugou"
+            and not str(row["source_track_id"] or "").strip().casefold().startswith("kugou-")
+        ]
+        chart_path: Path | None = None
+        chart_play_link_map: dict[str, str] | None = None
+        if legacy_rows:
+            if chart_database is not None:
+                chart_path, chart_play_link_map = self._load_kugou_chart_play_link_map(chart_database)
+
+        queue: list[dict[str, Any]] = []
+        source_issues: list[dict[str, Any]] = []
+        resolution_counts: Counter[str] = Counter()
+        platform_recordings: dict[str, set[str]] = {}
+        for recording_id, recording_rows in grouped.items():
+            eligible: list[tuple[sqlite3.Row, str, str]] = []
+            for row in recording_rows:
+                source_name = normalized(str(row["source_name"] or ""))
+                if source_name != "kugou":
+                    continue
+                identity = self._kugou_platform_identity(
+                    row,
+                    chart_play_link_map=chart_play_link_map,
+                )
+                if identity is not None:
+                    mix_song_id, resolution_method = identity
+                    eligible.append((row, mix_song_id, resolution_method))
+            if not eligible:
+                source_issues.append(
+                    {
+                        "recording_id": recording_id,
+                        "candidate_source_tracks": [
+                            {
+                                "source_name": str(row["source_name"]),
+                                "source_track_id": str(row["source_track_id"]),
+                            }
+                            for row in recording_rows
+                        ],
+                        "usable_kugou_source_count": 0,
+                        "reason": (
+                            "legacy source requires --chart-db with an exact Kugou play_link mapping"
+                            if any(
+                                normalized(str(row["source_name"] or "")) == "kugou"
+                                and not str(row["source_track_id"] or "").strip().casefold().startswith("kugou-")
+                                for row in recording_rows
+                            )
+                            else "recording has no exact Kugou platform identity"
+                        ),
+                    }
+                )
+                continue
+            if len(eligible) > 1 and not all(
+                bool(row["exact_audio_provenance"]) for row, _mix_song_id, _method in eligible
+            ):
+                source_issues.append(
+                    {
+                        "recording_id": recording_id,
+                        "candidate_source_tracks": [
+                            {
+                                "source_name": str(row["source_name"]),
+                                "source_track_id": str(row["source_track_id"]),
+                                "platform_track_key": mix_song_id,
+                                "identity_resolution": resolution_method,
+                                "exact_audio_provenance": bool(row["exact_audio_provenance"]),
+                            }
+                            for row, mix_song_id, resolution_method in eligible
+                        ],
+                        "usable_kugou_source_count": len(eligible),
+                        "reason": "multiple Kugou identities lack byte-identical canonical-audio provenance",
+                    }
+                )
+                continue
+            eligible.sort(
+                key=lambda item: (
+                    str(item[0]["source_track_id"]),
+                    str(item[0]["source_track_row_id"]),
+                )
+            )
+            row, mix_song_id, resolution_method = eligible[0]
+            source_track_id = str(row["source_track_id"]).strip()
+            platform_recordings.setdefault(mix_song_id, set()).add(recording_id)
+            title = str(row["source_title"] or row["canonical_title"] or "").strip()
+            artist = str(row["source_artist_credit"] or "").strip()
+            queue.append(
+                {
+                    "schema_version": 1,
+                    "recording_id": recording_id,
+                    "source_track_row_id": str(row["source_track_row_id"]),
+                    "source_name": str(row["source_name"]),
+                    "source_track_id": source_track_id,
+                    "identity_key": f"kugou:{mix_song_id}",
+                    "platform": "kugou",
+                    "platform_track_key": mix_song_id,
+                    "title": title,
+                    "artist": artist,
+                    "source_url": row["source_url"],
+                    "existing_lyric_status": str(row["lyric_status"] or "missing"),
+                    "identity_resolution": resolution_method,
+                    "source_identity_alias_count": len(eligible),
+                }
+            )
+            resolution_counts[resolution_method] += 1
+        conflicting_platform_ids = {
+            mix_song_id: sorted(recording_ids)
+            for mix_song_id, recording_ids in platform_recordings.items()
+            if len(recording_ids) > 1
+        }
+        if conflicting_platform_ids:
+            source_issues.append(
+                {
+                    "reason": "one exact Kugou platform identity resolves to multiple canonical recordings",
+                    "platform_identity_conflicts": [
+                        {"platform_track_key": key, "recording_ids": recording_ids}
+                        for key, recording_ids in list(sorted(conflicting_platform_ids.items()))[:20]
+                    ],
+                    "platform_identity_conflict_count": len(conflicting_platform_ids),
+                }
+            )
+        if source_issues:
+            message = "Cannot prepare lyric backfill queue: canonical recordings lack a safe exact Kugou source identity"
+            if legacy_rows and chart_database is None:
+                message += "; legacy Kugou source rows require --chart-db"
+            raise ValidationError(
+                message,
+                details={
+                    "coverage": coverage,
+                    "unqueueable_count": len(source_issues),
+                    "unqueueable": source_issues,
+                },
+            )
+        return {
+            "schema_version": 1,
+            "database": str(self.path),
+            "unresolved_only": unresolved_only,
+            "coverage": coverage,
+            "queue_count": len(queue),
+            "chart_database": str(chart_path) if chart_path is not None else None,
+            "identity_resolution_counts": dict(sorted(resolution_counts.items())),
+            "rows": queue,
+        }
+
     def get_lyrics(self, recording_id: str) -> dict[str, Any]:
         """Fetch one selected recording's full lyric text without truncation."""
 

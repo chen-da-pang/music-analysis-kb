@@ -24,6 +24,29 @@ configuration or production data in this plugin.
 Publisher-only KuGou campaign imports use `music-kb import-campaign-delivery`
 with a strict LF JSONL manifest; see [`../../docs/import-contract.md`](../../docs/import-contract.md).
 
+Schema v7 stores one identity-bound lyric outcome for every canonical
+recording. `available` retains normalized ordinary text; `instrumental` and
+`platform_unavailable` retain exact-source evidence. Missing/pending lyrics
+block snapshots, peer publication, and audio cleanup. New songs receive their
+receipt from the existing CC/Kugou download worker; the one-time historical
+backfill uses the same worker in no-audio mode:
+
+```bash
+python3 scripts/run_claude_lyrics_backfill.py \
+  --workspace /path/to/music-workspace \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --chart-db /path/to/music-workspace/data/music_trends.sqlite \
+  --run-id kugou-lyrics-backfill-2026w30 \
+  --dry-run
+```
+
+Review the generated exact-identity queue first, then remove `--dry-run`.
+For legacy source rows, the chart database is used only as an exact public
+play-link to MixSongID bridge, never as a title/artist match. The real command
+writes receipts under `data/weekly_runs/<run-id>/lyrics-backfill/` and imports
+them into the supplied publisher master; it never re-downloads or scans
+existing audio/LRC files.
+
 The complete publisher-side weekly run is `music-kb weekly-run`. It records a
 run state and one receipt per atom under `data/weekly_runs/<run-id>/`, reads the
 versioned final operating decisions from `references/validated-operations.json`,

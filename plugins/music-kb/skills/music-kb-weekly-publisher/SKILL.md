@@ -21,6 +21,9 @@ machines.
   Do not import Feigua tags or generate Suno prompts here.
 - A recording exposes one public canonical analysis. Replaced revisions stay
   on the publisher for audit and do not enter client snapshots.
+- Every canonical recording must also have one terminal lyric outcome:
+  `available`, `instrumental`, or `platform_unavailable`. Missing/pending
+  lyrics block snapshots, peer publication, and audio cleanup.
 
 ## Inputs
 
@@ -51,6 +54,7 @@ music-kb weekly-update \
   --input /secure/path/canonical-delivery.jsonl \
   --input-kind campaign \
   --expected-count 232 \
+  --lyrics-receipt /secure/path/cc-lyrics-receipts.jsonl \
   --output-dir "$HOME/.music-kb/releases" \
   --release-name music-kb-2026w30 \
   --state-file "$HOME/.music-kb/state/publish-state.json"
@@ -66,6 +70,7 @@ music-kb weekly-update \
   --input /secure/path/canonical-delivery.jsonl \
   --input-kind campaign \
   --expected-count 232 \
+  --lyrics-receipt /secure/path/cc-lyrics-receipts.jsonl \
   --output-dir "$HOME/.music-kb/releases" \
   --release-name music-kb-2026w30 \
   --state-file "$HOME/.music-kb/state/publish-state.json" \
@@ -84,29 +89,32 @@ the import command returned zero.
 1. **Delivery preflight** — physical-LF JSONL, expected count, unique IDs,
    audio/output hashes, declared model contract, and no malformed records.
 2. **Quality audit** — reject empty output, repeated-tail degeneration,
-   unexpected truncation, hash mismatch, or identity conflict. Lyrics are not
-   rejected by this workflow.
+   unexpected truncation, hash mismatch, or identity conflict.
 3. **Canonical reconcile** — import idempotently and promote only a passed
    analysis. Confirm one canonical pointer per recording.
 4. **Retrieval tag enrichment** — derive title, artist, musical, production,
    structural, mood, and lyric/theme retrieval tags. Do not filter them for
    Suno.
-5. **Master validation** — `music-kb validate` must report `valid=true` and a
-   current search projection.
-6. **Release verification** — snapshot manifest, SHA-256, SQLite integrity,
+5. **Lyrics import and coverage** — import only CC receipts whose
+   `source_name + source_track_id` exactly bind a canonical source track. The
+   resulting coverage must have zero pending/missing records; do not treat an
+   empty result as an exception.
+6. **Master validation** — `music-kb validate` must report `valid=true`, a
+   current search projection, and zero unresolved lyrics.
+7. **Release verification** — snapshot manifest, SHA-256, SQLite integrity,
    canonical-only counts, and release name must agree.
-7. **Publisher-local install** — on a real publish, verify and atomically
+8. **Publisher-local install** — on a real publish, verify and atomically
    switch the publisher's `~/.music-kb/current.sqlite` (or the explicit local
    snapshot target). `--no-install-local` cannot be combined with a real
    publish. A dry-run does not change it unless `--install-local` is explicitly
    supplied.
-8. **Peer dry-run review** — list every enabled peer, target directory, and
+9. **Peer dry-run review** — list every enabled peer, target directory, and
    intended release. Disabled peers are not included unless explicitly named
    for a retry.
-9. **Fan-out verification** — each peer's installed music-kb plugin version and
+10. **Fan-out verification** — each peer's installed music-kb plugin version and
    schema are checked remotely before staging; then the release is verified
    and atomically installed. One offline peer does not cancel other peers.
-10. **State review** — `publish-state.json` records release SHA, per-peer
+11. **State review** — `publish-state.json` records release SHA, per-peer
    attempt status, and last successful release without raw command output.
 
 ## Failure and retry rules

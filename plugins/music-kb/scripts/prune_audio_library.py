@@ -52,6 +52,39 @@ def validate_release(knowledge_db: Path) -> tuple[dict[str, int], dict[str, set[
                 "SELECT COUNT(*) FROM source_track WHERE source_url IS NOT NULL AND trim(source_url) <> ''"
             ).fetchone()[0],
         }
+        lyric_counts = connection.execute(
+            """
+            SELECT COUNT(*) AS canonical_recordings,
+                   COALESCE(SUM(CASE WHEN rl.status = 'available' THEN 1 ELSE 0 END), 0) AS lyrics_available,
+                   COALESCE(SUM(CASE WHEN rl.status = 'instrumental' THEN 1 ELSE 0 END), 0) AS lyrics_instrumental,
+                   COALESCE(SUM(CASE WHEN rl.status = 'platform_unavailable' THEN 1 ELSE 0 END), 0) AS lyrics_platform_unavailable,
+                   COALESCE(SUM(CASE WHEN rl.status = 'pending' THEN 1 ELSE 0 END), 0) AS lyrics_pending,
+                   COALESCE(SUM(CASE WHEN rl.recording_id IS NULL THEN 1 ELSE 0 END), 0) AS lyrics_missing
+            FROM recording r
+            LEFT JOIN recording_lyric rl ON rl.recording_id = r.id
+            WHERE r.canonical_analysis_id IS NOT NULL
+            """
+        ).fetchone()
+        lyric_count_keys = (
+            "canonical_recordings",
+            "lyrics_available",
+            "lyrics_instrumental",
+            "lyrics_platform_unavailable",
+            "lyrics_pending",
+            "lyrics_missing",
+        )
+        counts.update(
+            {
+                key: int(value or 0)
+                for key, value in zip(lyric_count_keys, lyric_counts, strict=True)
+            }
+        )
+        counts["lyrics_unresolved"] = (
+            counts["canonical_recordings"]
+            - counts["lyrics_available"]
+            - counts["lyrics_instrumental"]
+            - counts["lyrics_platform_unavailable"]
+        )
         source_ids: dict[str, set[str]] = {}
         for source_name, source_track_id in connection.execute(
             "SELECT lower(source_name), source_track_id FROM source_track"
@@ -68,6 +101,17 @@ def validate_release(knowledge_db: Path) -> tuple[dict[str, int], dict[str, set[
         raise RuntimeError(
             "知识库 source link 不完整，不能删除音频: "
             f"source_tracks={normalized['source_tracks']} source_links={normalized['source_links']}"
+        )
+    if normalized["lyrics_unresolved"]:
+        raise RuntimeError(
+            "知识库歌词覆盖不完整，不能删除音频: "
+            f"canonical_recordings={normalized['canonical_recordings']} "
+            f"lyrics_available={normalized['lyrics_available']} "
+            f"lyrics_instrumental={normalized['lyrics_instrumental']} "
+            f"lyrics_platform_unavailable={normalized['lyrics_platform_unavailable']} "
+            f"lyrics_pending={normalized['lyrics_pending']} "
+            f"lyrics_missing={normalized['lyrics_missing']} "
+            f"lyrics_unresolved={normalized['lyrics_unresolved']}"
         )
     return normalized, source_ids
 

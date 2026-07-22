@@ -306,16 +306,16 @@ def test_peer_config_rejects_non_boolean_enabled(master_database, tmp_path: Path
 
 
 def test_remote_plugin_compatibility_script_accepts_matching_cache(tmp_path: Path) -> None:
-    install = tmp_path / "0.7.0"
+    install = tmp_path / "0.8.0"
     (install / ".codex-plugin").mkdir(parents=True)
     (install / "src" / "music_kb").mkdir(parents=True)
     (install / ".codex-plugin" / "plugin.json").write_text(
-        '{"name":"music-kb","version":"0.7.0"}\n', encoding="utf-8"
+        '{"name":"music-kb","version":"0.8.0"}\n', encoding="utf-8"
     )
-    (install / "src" / "music_kb" / "schema.py").write_text("SCHEMA_VERSION = 6\n", encoding="utf-8")
+    (install / "src" / "music_kb" / "schema.py").write_text("SCHEMA_VERSION = 7\n", encoding="utf-8")
 
     result = subprocess.run(
-        [sys.executable, "-c", _REMOTE_COMPATIBILITY_CODE, str(tmp_path), "0.7.0", "6"],
+        [sys.executable, "-c", _REMOTE_COMPATIBILITY_CODE, str(tmp_path), "0.8.0", "7"],
         text=True,
         capture_output=True,
         check=False,
@@ -334,7 +334,7 @@ def test_remote_plugin_compatibility_script_rejects_old_schema(tmp_path: Path) -
     (install / "src" / "music_kb" / "schema.py").write_text("SCHEMA_VERSION = 5\n", encoding="utf-8")
 
     result = subprocess.run(
-        [sys.executable, "-c", _REMOTE_COMPATIBILITY_CODE, str(tmp_path), "0.7.0", "6"],
+        [sys.executable, "-c", _REMOTE_COMPATIBILITY_CODE, str(tmp_path), "0.8.0", "7"],
         text=True,
         capture_output=True,
         check=False,

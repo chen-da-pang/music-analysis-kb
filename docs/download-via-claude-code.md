@@ -10,8 +10,11 @@ The reusable workflow is now split into two tools:
 
 - `prepare_download_queue.py` owns identity and deduplication.
 - `download_music_queue.py` owns the proven `musicdl` search/download loop.
+- The same worker writes an append-only exact-identity lyric receipt from
+  `SongInfo.lyric`; it never promotes a loose `.lrc` file into the database.
 - `prune_audio_library.py` removes local audio only after the release and link
-  counts pass their safety gates; it preserves the deduplication inventory.
+  and lyric-coverage counts pass their safety gates; it preserves the
+  deduplication inventory.
 
 `run_claude_download.py` is the atom entry point. It invokes Claude Code with
 an explicit prompt that tells the child to run the deterministic worker. This
@@ -83,9 +86,13 @@ MusicClient(
 )
 ```
 
-For each queued song it searches `title + artist`, chooses exact title + artist
-before less-specific fallbacks, downloads the selected result, verifies that a
-file exists, and updates the inventory immediately. If a run is interrupted,
+For each queued song it searches `title + artist`, accepts a result only when
+its returned Kugou `MixSongID`/`ID` exactly matches the queue's
+`platform_track_key`, downloads the selected result, verifies that a file
+exists, and updates the inventory immediately. It also normalizes the exact
+result's `SongInfo.lyric` into a JSONL receipt with the canonical
+`source_track_id`; a blank/network/parse/identity error remains `pending`.
+If a run is interrupted,
 the next run sees the file and skips it. A new chart row with an old
 `mix_song_id` or an already-downloaded normalized title/artist is not queued.
 Each search/download operation is bounded by `--item-timeout-seconds`; a
@@ -104,11 +111,36 @@ forbidden from editing inventory/progress/queue state by hand.
 - `song_inventory.json`, queue runs, logs, progress, audio, and credentials are
   local operational data and must stay outside Git.
 
+## Historical lyrics without re-downloading audio
+
+For the already analyzed library, use the same CC/Kugou worker in
+`--lyrics-only` mode. It first reads unresolved canonical `source_track` rows
+from the publisher master. New rows already carry `kugou-<MixSongID>`; the
+historical delivery keys are resolved only by an exact join from their stored
+`source_url` to `data/music_trends.sqlite.platform_tracks.play_link`, yielding
+that row's `platform_track_key` (MixSongID). It never uses URL fragments, title,
+or artist as an identity substitute. Dry-run first:
+
+```bash
+python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_lyrics_backfill.py \
+  --workspace "$MUSIC_WORKSPACE" \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --chart-db "$MUSIC_WORKSPACE/data/music_trends.sqlite" \
+  --run-id kugou-lyrics-backfill-2026w30 \
+  --dry-run
+```
+
+After review, remove `--dry-run`. The real command stores its queue, progress,
+and receipt under `data/weekly_runs/<run-id>/lyrics-backfill/`, imports the
+receipt via the normal source-identity validation, and exits nonzero if any
+canonical lyric remains unresolved. Use `--allow-incomplete` only for an
+explicit bounded diagnostic pass; it never permits a snapshot or audio cleanup.
+
 ## Removing the local audio after import
 
 The audio is an input to Music Flamingo, not part of the searchable release.
-After the 927 canonical records and their listening URLs have been verified,
-run the prune atom in dry-run mode first:
+After the canonical records, their listening URLs, and their terminal lyric
+outcomes have been verified, run the prune atom in dry-run mode first:
 
 ```bash
 python3 music-analysis-kb/plugins/music-kb/scripts/prune_audio_library.py \

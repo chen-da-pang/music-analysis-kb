@@ -23,7 +23,29 @@ description: Search the local, read-only Music Flamingo analysis knowledge base.
 1. Call `music_kb_status` to confirm that a local snapshot is available.
 2. Use `music_kb_search` with exact tags first when the request contains a
    niche term; aliases are searched too.
-3. Use `music_kb_get_canonical_analysis` only for selected recordings.
+3. Use a detail tool only after the user has selected a recording from the
+   result: `music_kb_get_canonical_analysis` for the music analysis and
+   `music_kb_get_lyrics` for lyrics.
+
+## Selected-song lyrics contract
+
+- First-turn search, title/artist resolution, and tag facets stay compact: do
+  not fetch or show full lyrics while presenting candidates.
+- If the user asks only for “歌词”, “完整歌词”, or equivalent after selecting a
+  recording, call **only** `music_kb_get_lyrics(recording_id=...)`. Return the
+  complete stored text when status is `available`; do not replace it with a
+  summary, tag, translation, generated text, or `.lrc` timestamps.
+- If the user asks for “完整内容”, call both
+  `music_kb_get_canonical_analysis(recording_id=...)` and
+  `music_kb_get_lyrics(recording_id=...)`, then present the complete music
+  analysis and the complete lyrics as separate sections for that exact
+  recording.
+- `instrumental` and `platform_unavailable` are honest terminal outcomes. Say
+  which applies and do not invent lyrics. A `pending` response means the
+  published snapshot is incomplete or older; report that boundary rather than
+  guessing from a title or another version.
+- Never use the lyric tool as a corpus-wide text search. It is a selected,
+  recording-ID detail read only.
 
 ## Retrieval order
 
@@ -38,6 +60,7 @@ description: Search the local, read-only Music Flamingo analysis knowledge base.
 - `music_kb_search(query="", tags=["rare tag"], limit=10)`
 - `music_kb_resolve_title_artist(title="...", artist="...")`
 - `music_kb_get_canonical_analysis(recording_id="...")`
+- `music_kb_get_lyrics(recording_id="...")`
 - `music_kb_tag_facets(namespace="production", prefix="granular")`
 
 Search and canonical-analysis results include `listen_url` and `source_links`

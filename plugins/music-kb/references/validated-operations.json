@@ -55,7 +55,7 @@
       "effective_method": "先重建 song_inventory.json；downloaded 且文件存在或 retention=purged_after_analysis 时跳过，missing/failed/no_results 才进入队列。"
     },
     "claude_download": {
-      "effective_method": "由 run_claude_download.py 调用 claude -p；Claude 严格执行 download_music_queue.py，不调用 kugou-cli，不运行旧 batch_download.py。"
+      "effective_method": "由 run_claude_download.py 调用 claude -p；Claude 严格执行 download_music_queue.py，不调用 kugou-cli，不运行旧 batch_download.py。worker 以 Kugou MixSongID 精确校验搜索结果，并从 SongInfo.lyric 写结构化 receipt；不得扫描 LRC，网络/解析/identity 失败写 pending。"
     },
     "fallback_download": {
       "effective_method": "只处理主 Kugou worker 已记录为 no_results 的队列；由 Claude Code 串行运行 download_music_fallback.py，按 fallback-download-profile.json 的 QQ、咪咕、酷我顺序逐来源搜索，严格匹配规范化标题和歌手（含显式艺名别名），下载后必须验证文件大于 1 MB 且 ffprobe 时长至少 60 秒，成功后才更新 song_inventory.json；每来源 90 秒硬超时，失败和 no_results 保留可审计状态。"

@@ -10,6 +10,7 @@ from typing import Any, Callable
 from .campaign_delivery import load_campaign_delivery_file
 from .distribution import publish_snapshot
 from .errors import DatabaseNotInitializedError, MusicKBError
+from .lyrics_backfill import materialize_lyric_backfill_queue
 from .repository import MusicKBRepository, iter_import_file
 from .schema import SCHEMA_VERSION, initialize_database
 from .snapshot import create_snapshot, install_snapshot, verify_snapshot
@@ -122,6 +123,23 @@ def build_parser() -> argparse.ArgumentParser:
     _add_database_argument(lyric_importer, required=True)
     lyric_importer.add_argument(
         "--input", type=Path, required=True, help="CC lyric receipt JSONL file"
+    )
+
+    lyric_backfill = commands.add_parser(
+        "prepare-lyrics-backfill",
+        help="Materialize the exact-identity, no-audio CC lyric queue for unresolved canonical recordings",
+    )
+    _add_database_argument(lyric_backfill, required=True)
+    lyric_backfill.add_argument(
+        "--output", type=Path, required=True, help="Operational JSONL queue path outside the plugin repository"
+    )
+    lyric_backfill.add_argument(
+        "--chart-db",
+        type=Path,
+        help=(
+            "Authoritative Kugou chart SQLite used only to resolve legacy source URLs "
+            "to exact MixSongIDs"
+        ),
     )
 
     enricher = commands.add_parser(
@@ -395,6 +413,12 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             args.db,
             read_only=False,
             operation=lambda repo: repo.import_lyric_receipt_file(args.input),
+        )
+    if args.command == "prepare-lyrics-backfill":
+        return 0, materialize_lyric_backfill_queue(
+            args.db,
+            args.output,
+            chart_database=args.chart_db,
         )
     if args.command == "enrich-campaign-tags":
         return 0, _with_repository(

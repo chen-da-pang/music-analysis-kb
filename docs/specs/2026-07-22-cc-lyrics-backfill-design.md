@@ -1,6 +1,6 @@
 # #52：复用 CC 下载原子补齐并分发完整歌词
 
-状态：设计已获产品确认；实现前等待本文档审阅。
+状态：实现中。
 
 ## 目标
 
@@ -75,10 +75,12 @@
 
 新增一个受现有 CC 编排管理的 `lyrics_backfill` 模式，不下载音频。
 
-1. 从 master 的 `source_track` 生成队列，每项携带 canonical `recording_id`、`source_track.id`、`source_name`、精确 `source_track_id` 和 `source_url`。
+1. 从 master 的 `source_track` 生成队列，每项携带 canonical `recording_id`、`source_track.id`、`source_name`、精确 `source_track_id` 和 `source_url`。新行直接使用 `kugou-<MixSongID>`；历史 927 条的 `source_track_id` 是交付键，必须由 `source_url == data/music_trends.sqlite.platform_tracks.play_link` 的**精确**连接取得 `platform_track_key`（MixSongID）。绝不从 URL 片段、标题或歌手猜测 ID。
 2. 固定 worker 使用同一个 `KugouMusicClient` 来源，按精确 identity 取得歌词回执；不得将同名搜索结果直接当作成功。
 3. 将 `available`、有证据的 `instrumental` 和有证据的 `platform_unavailable` 幂等写入 master；其余项目保持 `pending` 并可只重试未解决项。
 4. 不读取、移动或重新下载既有音频。历史 `.lrc` 仅可作为人工排障证据，不能绕过 identity 校验。
+
+如果同一 canonical recording 有多个来源行，只有每个候选都由 campaign provenance 证明与 canonical audio SHA-256 字节一致时，才按稳定的 source-track ID 顺序选择一个；其他多来源情形直接报错，不做任意挑选。
 
 这样，未来新歌和 1,348 首历史歌共享同一歌词来源、同一清洗规则和同一回执格式。
 

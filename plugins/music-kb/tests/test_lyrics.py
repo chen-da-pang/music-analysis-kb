@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from music_kb.errors import ValidationError
+from music_kb.lyrics_backfill import materialize_lyric_backfill_queue
 from music_kb.lyrics import LYRIC_NORMALIZER_VERSION, normalize_lyric_text
 from music_kb.repository import MusicKBRepository
 from music_kb.schema import SCHEMA_VERSION, initialize_database
@@ -137,6 +138,239 @@ def test_cc_receipt_file_binds_by_source_identity_not_title_artist(
         wrong_recording = dict(receipt, recording_id="rec_other_version")
         with pytest.raises(ValidationError, match="recording_id"):
             repository.import_lyric_receipt(wrong_recording)
+
+
+def _make_fixture_source_exact_kugou(repository: MusicKBRepository) -> None:
+    with repository.connection:
+        repository.connection.execute(
+            """
+            UPDATE source_track
+            SET source_name = 'kugou', source_track_id = 'kugou-123456'
+            WHERE recording_id = 'rec_neon_night_studio'
+            """
+        )
+
+
+def _write_kugou_chart_database(
+    path: Path,
+    rows: list[tuple[str, str]],
+) -> Path:
+    """Create the minimal authoritative URL -> MixSongID bridge fixture."""
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE platform_tracks(
+                platform TEXT NOT NULL,
+                platform_track_key TEXT NOT NULL,
+                play_link TEXT NOT NULL
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO platform_tracks(platform, platform_track_key, play_link) VALUES ('kugou', ?, ?)",
+            rows,
+        )
+    return path
+
+
+def _insert_exact_audio_provenance(
+    repository: MusicKBRepository,
+    *,
+    delivery_id: str,
+    manifest_index: int,
+) -> None:
+    recording = repository.connection.execute(
+        """
+        SELECT id, canonical_analysis_id, audio_sha256
+        FROM recording
+        WHERE id = 'rec_neon_night_studio'
+        """
+    ).fetchone()
+    assert recording is not None
+    with repository.connection:
+        repository.connection.execute(
+            """
+            INSERT INTO campaign_delivery_provenance(
+                id, delivery_schema_version, campaign_id, delivery_id, analysis_id,
+                manifest_index, source_title, source_artist, relative_audio_path,
+                source_sha256, source_bytes, output_text_sha256,
+                generated_token_count, max_new_tokens, contract, attempt_id,
+                canonical_source, provenance_json
+            ) VALUES (?, 1, 'fixture-campaign', ?, ?, ?, '霓虹夜航', '示例乐队', ?, ?,
+                      1, ?, 1, 1, 'fixture-contract', 'fixture-attempt', 'fixture-source', '{}')
+            """,
+            (
+                f"prov_{delivery_id}",
+                delivery_id,
+                str(recording["canonical_analysis_id"]),
+                manifest_index,
+                f"audio/{delivery_id}.mp3",
+                str(recording["audio_sha256"]),
+                "b" * 64,
+            ),
+        )
+
+
+def test_lyrics_backfill_queue_uses_only_unresolved_exact_kugou_source(unresolved_master_database) -> None:
+    with MusicKBRepository(unresolved_master_database) as repository:
+        _make_fixture_source_exact_kugou(repository)
+        plan = repository.prepare_lyric_backfill_queue()
+
+    assert plan["coverage"]["unresolved"] == 1
+    assert plan["queue_count"] == 1
+    assert plan["rows"] == [
+        {
+            "schema_version": 1,
+            "recording_id": "rec_neon_night_studio",
+            "source_track_row_id": plan["rows"][0]["source_track_row_id"],
+            "source_name": "kugou",
+            "source_track_id": "kugou-123456",
+            "identity_key": "kugou:123456",
+            "platform": "kugou",
+            "platform_track_key": "123456",
+            "title": "霓虹夜航",
+            "artist": "示例乐队",
+            "source_url": "https://music.example/listen/fixture-001",
+            "existing_lyric_status": "missing",
+            "identity_resolution": "source_track_id_kugou_prefix_v1",
+            "source_identity_alias_count": 1,
+        }
+    ]
+
+
+def test_lyrics_backfill_queue_refuses_ambiguous_kugou_source(unresolved_master_database) -> None:
+    with MusicKBRepository(unresolved_master_database) as repository:
+        _make_fixture_source_exact_kugou(repository)
+        with repository.connection:
+            repository.connection.execute(
+                """
+                INSERT INTO source_track(
+                    id, recording_id, source_name, source_track_id,
+                    source_title, source_artist_credit, source_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "src_extra_kugou",
+                    "rec_neon_night_studio",
+                    "kugou",
+                    "kugou-654321",
+                    "霓虹夜航",
+                    "示例乐队",
+                    "https://music.example/listen/fixture-001-alt",
+                ),
+            )
+        with pytest.raises(ValidationError, match="lack a safe exact Kugou source identity"):
+            repository.prepare_lyric_backfill_queue()
+
+
+def test_lyrics_backfill_queue_maps_legacy_source_only_through_exact_chart_play_link(
+    unresolved_master_database, tmp_path: Path
+) -> None:
+    legacy_url = "https://www.kugou.com/mixsong/agent_gateway/fixture-hash.html"
+    chart_database = _write_kugou_chart_database(
+        tmp_path / "music_trends.sqlite",
+        [("987654", legacy_url)],
+    )
+    with MusicKBRepository(unresolved_master_database) as repository:
+        with repository.connection:
+            repository.connection.execute(
+                """
+                UPDATE source_track
+                SET source_name = 'kugou', source_track_id = 'legacy-delivery-key',
+                    source_url = ?
+                WHERE recording_id = 'rec_neon_night_studio'
+                """,
+                (legacy_url,),
+            )
+        with pytest.raises(ValidationError, match="require --chart-db"):
+            repository.prepare_lyric_backfill_queue()
+        plan = repository.prepare_lyric_backfill_queue(chart_database=chart_database)
+
+    assert plan["queue_count"] == 1
+    assert plan["chart_database"] == str(chart_database.resolve())
+    assert plan["identity_resolution_counts"] == {"chart_play_link_exact_v1": 1}
+    assert plan["rows"][0]["source_track_id"] == "legacy-delivery-key"
+    assert plan["rows"][0]["platform_track_key"] == "987654"
+    assert plan["rows"][0]["identity_resolution"] == "chart_play_link_exact_v1"
+
+
+def test_lyrics_backfill_queue_rejects_a_chart_link_with_multiple_platform_ids(
+    unresolved_master_database, tmp_path: Path
+) -> None:
+    legacy_url = "https://www.kugou.com/mixsong/agent_gateway/ambiguous-fixture.html"
+    chart_database = _write_kugou_chart_database(
+        tmp_path / "ambiguous-music_trends.sqlite",
+        [("111", legacy_url), ("222", legacy_url)],
+    )
+    with MusicKBRepository(unresolved_master_database) as repository:
+        with repository.connection:
+            repository.connection.execute(
+                """
+                UPDATE source_track
+                SET source_name = 'kugou', source_track_id = 'legacy-delivery-key',
+                    source_url = ?
+                WHERE recording_id = 'rec_neon_night_studio'
+                """,
+                (legacy_url,),
+            )
+        with pytest.raises(ValidationError, match="multiple platform IDs"):
+            repository.prepare_lyric_backfill_queue(chart_database=chart_database)
+
+
+def test_lyrics_backfill_queue_deterministically_selects_proven_byte_identical_aliases(
+    unresolved_master_database,
+) -> None:
+    with MusicKBRepository(unresolved_master_database) as repository:
+        _make_fixture_source_exact_kugou(repository)
+        _insert_exact_audio_provenance(
+            repository,
+            delivery_id="kugou-123456",
+            manifest_index=0,
+        )
+        with repository.connection:
+            repository.connection.execute(
+                """
+                INSERT INTO source_track(
+                    id, recording_id, source_name, source_track_id,
+                    source_title, source_artist_credit, source_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "src_exact_alias",
+                    "rec_neon_night_studio",
+                    "kugou",
+                    "kugou-654321",
+                    "霓虹夜航",
+                    "示例乐队",
+                    "https://music.example/listen/fixture-001-alias",
+                ),
+            )
+        _insert_exact_audio_provenance(
+            repository,
+            delivery_id="kugou-654321",
+            manifest_index=1,
+        )
+        plan = repository.prepare_lyric_backfill_queue()
+
+    assert plan["queue_count"] == 1
+    assert plan["rows"][0]["source_track_id"] == "kugou-123456"
+    assert plan["rows"][0]["source_identity_alias_count"] == 2
+
+
+def test_materialized_lyrics_backfill_queue_is_operational_jsonl(unresolved_master_database, tmp_path: Path) -> None:
+    with MusicKBRepository(unresolved_master_database) as repository:
+        _make_fixture_source_exact_kugou(repository)
+
+    output = tmp_path / "operations" / "lyrics-backfill.jsonl"
+    result = materialize_lyric_backfill_queue(unresolved_master_database, output)
+
+    assert result["queue"] == str(output)
+    assert result["queue_count"] == 1
+    assert len(result["queue_sha256"]) == 64
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["recording_id"] == "rec_neon_night_studio"
+    assert row["source_track_id"] == "kugou-123456"
 
 
 def test_initialize_migrates_v6_database_without_fabricating_lyrics(tmp_path: Path) -> None:
