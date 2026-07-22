@@ -19,6 +19,7 @@ from .tagging import PARSER_SOURCE, extract_music_flamingo_metadata
 
 MAX_SEARCH_LIMIT = 50
 MAX_FACET_LIMIT = 100
+DEFAULT_SEARCH_FACETS_PER_NAMESPACE = 5
 DEFAULT_ENRICH_BATCH_SIZE = 500
 DEFAULT_IMPORT_BATCH_SIZE = 500
 IMPORT_LOOKUP_CACHE_SIZE = 8_192
@@ -1663,6 +1664,98 @@ class MusicKBRepository:
                 }
             )
         return results
+
+    def search_with_facets(
+        self,
+        *,
+        query: str = "",
+        tags: Sequence[str] = (),
+        title: str = "",
+        artist: str = "",
+        limit: int = 10,
+        per_namespace_limit: int = DEFAULT_SEARCH_FACETS_PER_NAMESPACE,
+    ) -> dict[str, Any]:
+        """Return bounded search rows plus canonical-tag counts for those rows."""
+
+        applied_limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+        results = self.search(
+            query=query,
+            tags=tags,
+            title=title,
+            artist=artist,
+            limit=applied_limit,
+        )
+        recording_ids = [str(item["recording_id"]) for item in results]
+        facet_limit = max(1, min(int(per_namespace_limit), MAX_FACET_LIMIT))
+        return {
+            "results": results,
+            "count": len(results),
+            "limit_applied": applied_limit,
+            "facet_counts": self.tag_facet_counts(
+                recording_ids,
+                per_namespace_limit=facet_limit,
+            ),
+            "facet_scope": {
+                "kind": "returned_results",
+                "recording_count": len(results),
+                "max_per_namespace": facet_limit,
+            },
+        }
+
+    def tag_facet_counts(
+        self,
+        recording_ids: Sequence[str],
+        *,
+        per_namespace_limit: int = DEFAULT_SEARCH_FACETS_PER_NAMESPACE,
+    ) -> list[dict[str, Any]]:
+        """Count canonical analysis tags over a bounded set of returned recordings.
+
+        Identity-only ``recording_tag`` rows and tag aliases are intentionally
+        excluded, so titles and artists cannot become musical facet evidence.
+        """
+
+        bounded_ids = list(
+            dict.fromkeys(
+                str(recording_id).strip()
+                for recording_id in recording_ids
+                if str(recording_id).strip()
+            )
+        )[:MAX_SEARCH_LIMIT]
+        if not bounded_ids:
+            return []
+
+        per_namespace_limit = max(1, min(int(per_namespace_limit), MAX_FACET_LIMIT))
+        placeholders = ", ".join("?" for _ in bounded_ids)
+        rows = self.connection.execute(
+            f"""
+            SELECT t.namespace, t.canonical_name AS name,
+                   COUNT(DISTINCT r.id) AS tag_count
+            FROM recording r
+            JOIN analysis_revision ar ON ar.id = r.canonical_analysis_id
+            JOIN analysis_tag at ON at.analysis_id = ar.id
+            JOIN tag t ON t.id = at.tag_id
+            WHERE r.id IN ({placeholders})
+              AND t.namespace NOT IN ('title', 'artist')
+            GROUP BY t.namespace, t.canonical_name
+            ORDER BY t.namespace, tag_count DESC, t.canonical_name
+            """,
+            tuple(bounded_ids),
+        )
+        counts_by_namespace: Counter[str] = Counter()
+        facets: list[dict[str, Any]] = []
+        for row in rows:
+            namespace = str(row["namespace"])
+            if counts_by_namespace[namespace] >= per_namespace_limit:
+                continue
+            counts_by_namespace[namespace] += 1
+            facets.append(
+                {
+                    "namespace": namespace,
+                    "name": str(row["name"]),
+                    "count": int(row["tag_count"]),
+                }
+            )
+        return facets
 
     def _text_candidate_sql(self, value: str) -> tuple[str, list[Any]]:
         key = normalized(value)

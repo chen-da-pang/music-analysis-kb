@@ -25,7 +25,15 @@ def test_cli_json_lifecycle(tmp_path: Path) -> None:
     assert imported.returncode == 0, imported.stderr
     searched = run_cli("--json", "search", "--db", str(database), "--tag", "颗粒人声切片")
     assert searched.returncode == 0, searched.stderr
-    assert json.loads(searched.stdout)["result"]["count"] == 1
+    search_result = json.loads(searched.stdout)["result"]
+    assert search_result["count"] == 1
+    assert search_result["facet_scope"]["kind"] == "returned_results"
+    assert search_result["facet_scope"]["recording_count"] == 1
+    assert {item["name"] for item in search_result["facet_counts"]} == {
+        "electronic pop",
+        "granular vocal chop",
+        "syncopated rimshot",
+    }
     valid = run_cli("--json", "validate", "--db", str(database))
     assert valid.returncode == 0, valid.stderr
     assert json.loads(valid.stdout)["result"]["valid"] is True

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "scenario_id": "warm-rnb-love-observed-regression",
+  "normalization_note": "Branch calls and flat rendering are transcribed from the observed failed run; base facet counts were replayed against the same local 1,348-recording snapshot after facet support was added.",
+  "base_search": {
+    "tool": "music_kb_search",
+    "arguments": {"query": "r&b warm love", "limit": 50},
+    "result": {
+      "facet_counts": [
+        {"namespace": "genre", "name": "r&b", "count": 48},
+        {"namespace": "genre", "name": "soul", "count": 8},
+        {"namespace": "lyric_theme", "name": "love", "count": 47},
+        {"namespace": "mood", "name": "warm", "count": 50},
+        {"namespace": "mood", "name": "romantic", "count": 31},
+        {"namespace": "production", "name": "reverb", "count": 50}
+      ],
+      "facet_scope": {"kind": "returned_results", "recording_count": 50, "max_per_namespace": 5}
+    }
+  },
+  "supported_directions": [
+    {"id": "emotional-warmth", "important": true},
+    {"id": "warm-timbre", "important": true},
+    {"id": "soul-direction", "important": true}
+  ],
+  "selected_direction_ids": ["emotional-warmth", "warm-timbre"],
+  "branch_searches": [
+    {
+      "call_id": "branch-1",
+      "direction_id": "emotional-warmth",
+      "tool": "music_kb_search",
+      "arguments": {"tags": ["r&b", "warm", "love", "hopeful", "romantic"], "limit": 50},
+      "result_count": 9,
+      "credible_results": true
+    },
+    {
+      "call_id": "branch-2",
+      "direction_id": "warm-timbre",
+      "tool": "music_kb_search",
+      "arguments": {"tags": ["r&b", "warm", "love", "yearning", "romantic"], "limit": 50},
+      "result_count": 8,
+      "credible_results": true
+    }
+  ],
+  "final_response": {
+    "layout": "flat",
+    "grouped_direction_ids": [],
+    "reported_separately_direction_ids": [],
+    "ungrouped_recording_ids": ["representative-result-1", "representative-result-2"]
+  }
+}

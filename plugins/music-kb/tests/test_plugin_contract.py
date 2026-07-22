@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -32,6 +33,14 @@ def test_conversation_ux_onboarding_and_contract_are_present() -> None:
         "## Conversation UX contract",
         "Broad subjective requests use real-result branches",
         "tag co-occurrence",
+        "facet_scope.kind=returned_results",
+        "two or more user-relevant interpretations",
+        "at least two and at most **three**",
+        "exactly three important directions",
+        "separate bounded `music_kb_search`",
+        "never flatten or recombine searched branches",
+        "final answer must contain one separate group",
+        "Never merge those groups into a flat list",
         "at most **three**",
         "most likely interpretation",
         "numeric confidence",
@@ -81,9 +90,14 @@ def test_conversation_ux_metric_pack_is_shipped() -> None:
     assert manifest.is_file()
     assert emitter.is_file()
     payload = json.loads(manifest.read_text(encoding="utf-8"))
-    assert payload["version"] == "0.2.0"
+    assert payload["name"] == "music-kb-conversation-contract"
+    assert payload["version"] == "0.3.0"
     assert payload["supportedTargetKinds"] == ["skill", "plugin"]
     assert payload["command"] == ["python3", "./emit-conversation-ux.py"]
+    trace_schema = json.loads(
+        (root / "evals" / "conversation-ux" / "trace-schema.json").read_text(encoding="utf-8")
+    )
+    assert trace_schema["properties"]["schema_version"]["const"] == 1
 
 
 def test_conversation_ux_metric_pack_passes_the_plugin() -> None:
@@ -96,9 +110,19 @@ def test_conversation_ux_metric_pack_passes_the_plugin() -> None:
         text=True,
     )
     result = json.loads(completed.stdout)
-    assert all(check["status"] == "pass" for check in result["checks"])
+    assert all(
+        check["status"] == "pass"
+        for check in result["checks"]
+        if check["id"] != "music-kb-runtime-behavior-unmeasured"
+    )
+    assert next(
+        check
+        for check in result["checks"]
+        if check["id"] == "music-kb-runtime-behavior-unmeasured"
+    )["status"] == "info"
     assert {check["id"] for check in result["checks"]} == {
         "music-kb-ux-branching",
+        "music-kb-contract-branch-execution",
         "music-kb-ux-recovery",
         "music-kb-ux-progressive-results",
         "music-kb-ux-followup-direction",
@@ -110,9 +134,112 @@ def test_conversation_ux_metric_pack_passes_the_plugin() -> None:
         "music-kb-ux-evidence",
         "music-kb-ux-deferred-decisions",
         "music-kb-ux-onboarding",
+        "music-kb-runtime-behavior-unmeasured",
     }
-    assert result["metrics"][0]["id"] == "music-kb-conversation-ux-coverage"
+    assert result["metrics"][0]["id"] == "music-kb-conversation-contract-coverage"
     assert result["metrics"][0]["value"] == 100.0
+    assert not any(metric["category"] == "conversation-behavior" for metric in result["metrics"])
+
+
+def test_conversation_ux_metric_pack_measures_an_explicit_runtime_trace() -> None:
+    root = Path(__file__).resolve().parents[1]
+    emitter = root / "evals" / "conversation-ux" / "emit-conversation-ux.py"
+    trace = (
+        root
+        / "evals"
+        / "conversation-ux"
+        / "fixtures"
+        / "expected-grouped-three-directions.json"
+    )
+    env = os.environ.copy()
+    env["MUSIC_KB_CONVERSATION_TRACE"] = str(trace)
+    completed = subprocess.run(
+        ["python3", str(emitter), str(root), "plugin"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    result = json.loads(completed.stdout)
+    behavior_checks = [
+        check for check in result["checks"] if check["category"] == "conversation-behavior"
+    ]
+    assert behavior_checks
+    assert all(check["status"] == "pass" for check in behavior_checks)
+    behavior_metric = next(
+        metric
+        for metric in result["metrics"]
+        if metric["id"] == "music-kb-runtime-behavior-coverage"
+    )
+    assert behavior_metric["value"] == 100.0
+    assert result["artifacts"][0]["path"] == str(trace)
+
+
+def test_conversation_ux_metric_pack_catches_observed_branch_and_flattening_regression() -> None:
+    root = Path(__file__).resolve().parents[1]
+    emitter = root / "evals" / "conversation-ux" / "emit-conversation-ux.py"
+    trace = (
+        root
+        / "evals"
+        / "conversation-ux"
+        / "fixtures"
+        / "observed-flat-two-directions.json"
+    )
+    env = os.environ.copy()
+    env["MUSIC_KB_CONVERSATION_TRACE"] = str(trace)
+    completed = subprocess.run(
+        ["python3", str(emitter), str(root), "plugin"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    result = json.loads(completed.stdout)
+    failed = {check["id"] for check in result["checks"] if check["status"] == "fail"}
+    assert failed == {
+        "music-kb-behavior-direction-completeness",
+        "music-kb-behavior-grouped-rendering",
+    }
+    behavior_metric = next(
+        metric
+        for metric in result["metrics"]
+        if metric["id"] == "music-kb-runtime-behavior-coverage"
+    )
+    assert behavior_metric["value"] == 60.0
+
+
+def test_conversation_ux_trace_rejects_malformed_result_count_without_crashing(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    emitter = root / "evals" / "conversation-ux" / "emit-conversation-ux.py"
+    fixture = (
+        root
+        / "evals"
+        / "conversation-ux"
+        / "fixtures"
+        / "expected-grouped-three-directions.json"
+    )
+    trace = json.loads(fixture.read_text(encoding="utf-8"))
+    trace["branch_searches"][0]["result_count"] = "not-a-count"
+    trace_path = tmp_path / "malformed-count.json"
+    trace_path.write_text(json.dumps(trace), encoding="utf-8")
+    env = os.environ.copy()
+    env["MUSIC_KB_CONVERSATION_TRACE"] = str(trace_path)
+    completed = subprocess.run(
+        ["python3", str(emitter), str(root), "plugin"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    result = json.loads(completed.stdout)
+    independent = next(
+        check
+        for check in result["checks"]
+        if check["id"] == "music-kb-behavior-independent-searches"
+    )
+    assert independent["status"] == "fail"
 
 
 def test_conversation_ux_metric_pack_catches_withdrawn_fixed_quantity(tmp_path: Path) -> None:
@@ -166,6 +293,10 @@ def test_conversation_ux_metric_pack_catches_missing_followup_guidance(tmp_path:
 @pytest.mark.parametrize(
     ("removed_phrase", "check_id"),
     [
+        ("two or more user-relevant interpretations", "music-kb-contract-branch-execution"),
+        ("exactly three important directions", "music-kb-contract-branch-execution"),
+        ("separate bounded `music_kb_search`", "music-kb-contract-branch-execution"),
+        ("Never merge those groups into a flat list", "music-kb-contract-branch-execution"),
         ("all remaining unshown results", "music-kb-ux-insufficient-results"),
         ("description dimension is optional", "music-kb-ux-detail-selection"),
         ("at most **four songs per batch**", "music-kb-ux-detail-batching"),
@@ -205,6 +336,6 @@ def test_plugin_version_is_kept_in_sync() -> None:
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     lockfile = (root / "uv.lock").read_text(encoding="utf-8")
     version = manifest["version"]
-    assert version == "0.7.4"
+    assert version == "0.7.5"
     assert f'version = "{version}"' in pyproject
     assert f'name = "music-kb"\nversion = "{version}"' in lockfile

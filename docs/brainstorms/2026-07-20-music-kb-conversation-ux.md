@@ -1,6 +1,6 @@
 # Music KB 对话 UX 头脑风暴记录
 
-状态：Round 34 已确认默认语言；脑爆阶段正式结束；已在插件 v0.7.4 实施于 Draft PR #46 分支，尚未合并
+状态：Round 34 后的 review 修复已在插件 v0.7.5 实施于 Draft PR #46 分支；尚未合并
 开始日期：2026-07-20
 关联 Issue：[Issue #41](https://github.com/chen-da-pang/music-analysis-kb/issues/41)
 
@@ -751,6 +751,51 @@ peer 和音频流程均保持现有范围边界，不属于本轮用户端 retri
 实施后验证：插件测试 189 项全部通过；custom metric pack 为 12/12、coverage 100%、
 failed checks 0；Plugin Eval 对 retrieval Skill 的核心评分为 A / 95、0 fail，唯一 warning
 是约 4.2k tokens 的静态 invoke budget。该预算观察作为非阻塞项保留，不改变已批准规则。
+
+## 实施后 review 修复记录（v0.7.5）
+
+### 发现的问题
+
+v0.7.4 的文字契约仍留下两个可执行逃逸口：`at most three` 允许模型只做一至两个方向，
+并且没有最终守卫要求“已检索方向必须逐组呈现”。一次真实轨迹因此只检索了“情绪温暖”
+和“温暖音色但感伤”两个方向，遗漏 Soul 方向，最后又把两个已检索方向平铺成一张歌单。
+此前的 12/12 只检查 Skill 中是否存在短语，不能证明工具调用和最终回答行为。
+
+### 采用的修复
+
+- 每次 bounded search 增加 `facet_counts`，只统计当前返回 recording 的 canonical
+  analysis tags；排除 title、artist 和 aliases，并用 `facet_scope.kind=returned_results`
+  明示统计范围，不把它包装成全库分布。
+- 当请求和基础结果支持两个以上重要解释时，必须建立 2–3 个方向；恰好支持三个重要方向
+  时三个都要保留。每个选中方向必须有独立的 bounded `music_kb_search`。
+- 最终回答必须按有效检索方向逐组呈现，组数与有效分支一致；禁止把已检索分支重新合并为
+  单一歌曲列表。
+- custom metric pack 改称 conversation-contract coverage。未传入规范化 runtime trace 时，
+  明确报告行为未测量；传入 trace 后才单独检查方向完整性、独立搜索和分组输出。
+
+### 正式快照证据
+
+在只读快照 `music-kb-2026w29-kugou-431-final`（1,348 recordings）上重放
+`query="r&b warm love", limit=50`，返回 50 条有界结果。新增统计包含：`r&b 48`、
+`soul 8`、`love 47`、`warm 50`、`romantic 31`。这些数字只描述本次 50 条返回结果，
+不声称是全库数量；它们证明基础结果中确实存在模型此前遗漏的 Soul 方向证据。
+
+### 验证边界
+
+- 插件全量测试：197 passed；`uv lock --check`、JSON、compileall 和 `git diff --check`
+  通过。
+- 正式快照同进程热缓存交替顺序各 20 次中位数：原搜索 8.02 ms，带 facets 9.15 ms，
+  新增统计约 1.13 ms；没有把候选检索变成长分析流程。
+- Plugin Eval 保持 A / 95、0 fail；静态 invoke estimate 从 4,233 增至 4,414 tokens，
+  增量 181，用于必要的分支硬约束，heavy warning 仍为非阻塞观察项。
+- 静态契约 13/13 通过；期望轨迹用于校验 validator 正向路径为 5/5。已知的“两方向 +
+  平铺”回归轨迹为 3/5（60%），稳定失败于方向完整性和分组输出。
+- 新鲜 `codex exec` 已加载本机 v0.7.5，但第一步 `music_kb_status` 返回
+  `user cancelled MCP tool call`，没有产生可评分的真实分支轨迹。该次运行输入为 304,442
+  tokens；为避免继续烧量，没有盲目重试，也没有把期望轨迹伪装成真实模型通过。
+
+本修复没有修改 SQLite Schema、快照内容、周更、CNB、peer、音频或提示词流程；MCP / CLI
+仅增加只读搜索返回字段。Draft PR #46 继续保持 Draft，不自动合并。
 
 ## 记录规则
 

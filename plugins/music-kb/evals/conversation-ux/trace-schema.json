@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Music KB normalized multi-direction runtime trace",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scenario_id",
+    "base_search",
+    "supported_directions",
+    "selected_direction_ids",
+    "branch_searches",
+    "final_response"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "scenario_id": {"type": "string", "minLength": 1},
+    "base_search": {
+      "type": "object",
+      "required": ["tool", "arguments", "result"],
+      "properties": {
+        "tool": {"const": "music_kb_search"},
+        "arguments": {"type": "object"},
+        "result": {
+          "type": "object",
+          "required": ["facet_counts", "facet_scope"]
+        }
+      }
+    },
+    "supported_directions": {"type": "array", "minItems": 2},
+    "selected_direction_ids": {"type": "array", "minItems": 2, "maxItems": 3},
+    "branch_searches": {"type": "array", "minItems": 2},
+    "final_response": {
+      "type": "object",
+      "required": ["layout", "grouped_direction_ids", "reported_separately_direction_ids"],
+      "properties": {
+        "layout": {"enum": ["grouped", "flat"]},
+        "grouped_direction_ids": {"type": "array"},
+        "reported_separately_direction_ids": {"type": "array"},
+        "ungrouped_recording_ids": {"type": "array"}
+      }
+    }
+  }
+}

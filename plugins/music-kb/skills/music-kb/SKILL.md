@@ -45,12 +45,18 @@ learn canonical tag names, MCP tool names, or CLI arguments.
 For a request such as “一些有氛围感的歌” or “R&B、温暖、关于爱情的歌”, do
 the bounded retrieval work before asking the user to choose a meaning:
 
-- Start with the literal broad request (or its clearly supported tag
-  equivalents), inspect the returned tag co-occurrence, and use that evidence
-  to shape the branch queries. Do not invent branch names from assumptions
-  before looking at the library results.
-- Build at most **three** complete, meaningfully different branches from the
-  user's wording and the tags/results actually present in the snapshot.
+- Start with one bounded search for the literal broad request (or its clearly
+  supported tag equivalents). Inspect the returned `facet_counts` tag co-occurrence
+  before naming directions. Those counts describe only
+  `facet_scope.kind=returned_results`, never the whole corpus; do not invent
+  directions from assumptions or aliases.
+- When the wording and base results support two or more user-relevant interpretations,
+  build at least two and at most **three** complete, meaningfully different
+  branches. If they support exactly three important directions, include all
+  three; do not silently reduce them to one or two.
+- Run a separate bounded `music_kb_search` for every selected direction. A
+  label without its own search call is not a completed branch. Keep every branch
+  with credible results as its own answer group; never flatten or recombine searched branches into one song list.
 - Put the currently most likely interpretation first. Say what that
   interpretation is and give one short reason grounded in the request or the
   visible retrieval evidence. Do not show a numeric confidence score.
@@ -272,6 +278,9 @@ Keep the answer scannable and evidence-based:
   large one.
 - For each branch, show its interpretation and (for the first branch) the one-
   sentence reason it is currently most likely.
+- The final answer must contain one separate group for every branch search with
+  credible results, in branch order. Never merge those groups into a flat list;
+  report an empty or weak searched direction separately instead of padding it.
 - For each candidate, show an unambiguous visible sequence number,
   `歌名 — 艺人`, the returned matching evidence, and a Markdown listening link
   when `listen_url` is non-empty. Use the runtime URL exactly; never fabricate

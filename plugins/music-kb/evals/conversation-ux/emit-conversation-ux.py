@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from trace_validator import validate_trace_file
+
 
 def _check(
     check_id: str,
@@ -27,6 +29,18 @@ def _check(
         "message": message,
         "evidence": evidence,
         "remediation": remediation,
+    }
+
+
+def _info(check_id: str, message: str, *, evidence: list[str]) -> dict[str, Any]:
+    return {
+        "id": check_id,
+        "category": "conversation-behavior",
+        "severity": "info",
+        "status": "info",
+        "message": message,
+        "evidence": evidence,
+        "remediation": [],
     }
 
 
@@ -92,6 +106,35 @@ def main() -> None:
             "Natural-language requests have bounded, transparent branch retrieval.",
             evidence=[phrase for phrase in branching_phrases if phrase in normalized_skill],
             remediation=["Restore the approved branch, ordering, and cross-branch disclosure rules."],
+        )
+    )
+
+    branch_execution_phrases = (
+        "facet_scope.kind=returned_results",
+        "two or more user-relevant interpretations",
+        "at least two and at most **three**",
+        "exactly three important directions",
+        "do not silently reduce them to one or two",
+        "separate bounded `music_kb_search`",
+        "A label without its own search call",
+        "never flatten or recombine searched branches",
+        "final answer must contain one separate group",
+        "Never merge those groups into a flat list",
+    )
+    branch_execution_ok = bool(skill) and all(
+        phrase in normalized_skill for phrase in branch_execution_phrases
+    )
+    checks.append(
+        _check(
+            "music-kb-contract-branch-execution",
+            branch_execution_ok,
+            "The written contract requires evidence-backed branch completeness, separate searches, and grouped rendering.",
+            evidence=[
+                phrase for phrase in branch_execution_phrases if phrase in normalized_skill
+            ],
+            remediation=[
+                "Require two or three supported directions, one search per direction, and one final group per valid search."
+            ],
         )
     )
 
@@ -279,6 +322,8 @@ def main() -> None:
     evidence_phrases = (
         "ordered for retrieval",
         "small shortlist",
+        "facet_counts",
+        "facet_scope.kind=returned_results",
         "listen_url",
         "search_projection_state",
         "Do not infer mood",
@@ -341,29 +386,57 @@ def main() -> None:
         )
     )
 
-    passed = sum(1 for check in checks if check["status"] == "pass")
-    total = len(checks)
+    contract_checks = list(checks)
+    passed = sum(1 for check in contract_checks if check["status"] == "pass")
+    total = len(contract_checks)
     score = round((passed / total) * 100, 2) if total else 0
     band = "good" if score == 100 else "needs-work" if score >= 80 else "poor"
+    metrics = [
+        {
+            "id": "music-kb-conversation-contract-coverage",
+            "category": "conversation-contract",
+            "value": score,
+            "unit": "percent",
+            "band": band,
+        },
+        {
+            "id": "music-kb-conversation-contract-failed-checks",
+            "category": "conversation-contract",
+            "value": total - passed,
+            "unit": "checks",
+            "band": "good" if passed == total else "needs-work",
+        },
+    ]
+    artifacts: list[dict[str, Any]] = []
+    trace_value = os.environ.get("MUSIC_KB_CONVERSATION_TRACE", "").strip()
+    if trace_value:
+        trace_path = Path(trace_value).expanduser().resolve()
+        behavior_checks, behavior_metrics = validate_trace_file(trace_path)
+        checks.extend(behavior_checks)
+        metrics.extend(behavior_metrics)
+        artifacts.append(
+            {
+                "id": "music-kb-conversation-runtime-trace",
+                "type": "runtime-trace",
+                "label": "Normalized Music KB conversation trace",
+                "description": "Runtime behavior evidence evaluated separately from the static Skill contract.",
+                "path": str(trace_path),
+            }
+        )
+    else:
+        checks.append(
+            _info(
+                "music-kb-runtime-behavior-unmeasured",
+                "Runtime branch execution and final-answer grouping were not measured because no normalized trace was provided.",
+                evidence=[
+                    "Set MUSIC_KB_CONVERSATION_TRACE to a trace matching trace-schema.json to measure behavior."
+                ],
+            )
+        )
     payload = {
         "checks": checks,
-        "metrics": [
-            {
-                "id": "music-kb-conversation-ux-coverage",
-                "category": "conversation-ux",
-                "value": score,
-                "unit": "percent",
-                "band": band,
-            },
-            {
-                "id": "music-kb-conversation-ux-failed-checks",
-                "category": "conversation-ux",
-                "value": total - passed,
-                "unit": "checks",
-                "band": "good" if passed == total else "needs-work",
-            },
-        ],
-        "artifacts": [],
+        "metrics": metrics,
+        "artifacts": artifacts,
     }
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 

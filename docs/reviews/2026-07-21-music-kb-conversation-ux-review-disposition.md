@@ -2,7 +2,7 @@
 
 日期：2026-07-22（补充记录）
 
-状态：Round 34 已确认默认语言；所有必要 UX 决策完成；已在插件 v0.7.4 实施于 Draft PR #46 分支，尚未合并
+状态：Round 34 后的 review 修复已在插件 v0.7.5 实施于 Draft PR #46 分支；尚未合并
 
 范围：`plugins/music-kb/skills/music-kb/SKILL.md` 的用户端检索和对话流程，以及为这套流程编写的 conversation-UX metric pack。
 
@@ -10,8 +10,9 @@
 
 ## 一句话结论
 
-当前用户端 UX 没有需要立即阻塞发布的 review 问题；详情展开采用单批最多 4 首并跟随用户
-语言忠实呈现。所有阻塞实现的 UX 决策已经完成，并已进入 v0.7.4 的 Skill、说明和回归指标。
+当前 review 发现的分支遗漏、分支平铺和静态指标误标问题已在 v0.7.5 修复。详情展开仍采用
+单批最多 4 首并跟随用户语言忠实呈现；真实模型复测因 `codex exec` 取消 MCP 调用而未测量，
+因此不再用静态 100% 声称行为通过。
 
 ## 证据边界
 
@@ -58,6 +59,11 @@
 | R20 | 检索候选与每首歌的完整音乐描述如何衔接 | 已解决 | 检索后先让用户按序号、歌名或“前几首”选择要展开的歌曲；描述维度可选，不设为必答。用户说“全部”时，小结果集一次展开，大结果集自动分批并说明可继续；不主动获取未选歌曲的长描述。 |
 | R21 | “全部”展开的真实体量是否支持一次输出 | 已解决 | benchmark 后采用单批最多 4 首：1–4 首一次展开，5 首起自动分批；分批不改变当前方向，也不提前获取后续批次长文本。 |
 | R22 | 完整描述默认使用什么语言和忠实呈现方式 | 已解决 | 跟随用户当前语言；中文对话提供完整、忠实的中文呈现，不做摘要性删减、不添加原文外判断。英文原文或中英双语只在用户明确要求时展示。 |
+| R23 | `at most three` 允许模型静默漏掉第三个重要方向 | 已解决 | 有两个以上重要解释时必须建立 2–3 个方向；恰好三个时全部保留，每个方向独立检索。 |
+| R24 | 已检索方向最终仍可能平铺成一张歌单 | 已解决 | 最终组数必须与有效分支一致；每个有效分支单独成组，禁止重新合并。 |
+| R25 | 搜索结果缺少紧凑共现证据 | 已解决 | MCP / CLI 搜索新增当前 bounded 返回行的 canonical `facet_counts`；明确排除标题、艺人和 aliases。 |
+| R26 | 12/12 静态覆盖率容易被理解成真实行为通过 | 已解决 | 指标改称 conversation-contract coverage；无 trace 时行为为 unmeasured，只有显式 trace 才产生独立 behavior metrics。 |
+| R27 | 新鲜真实模型复测 | 环境阻塞，非伪通过 | v0.7.5 已加载，但 `music_kb_status` 被 `codex exec` 报为 `user cancelled MCP tool call`；没有产生行为结论，不继续高成本盲重试。 |
 
 ## Round 31 追加决策：候选层 → 详情层
 
@@ -132,6 +138,19 @@ benchmark 边界处理，不再新增 UX 议题；本轮脑爆正式结束。
 - `uv run pytest`：189 passed；插件结构验证和 `uv lock --check` 通过。
 - Plugin Eval（带本地 metric pack）：核心评分 A / 95、0 fail；自定义契约 12/12、coverage 100%、failed checks 0。
 - 唯一 warning 是约 4.2k tokens 的静态 invoke budget，作为非阻塞观察项保留，不改变已批准的交互规则。
+
+## v0.7.5 review 修复验证
+
+- 正式只读快照重放：`query="r&b warm love", limit=50` 返回 50 条，bounded facets 包含
+  `r&b 48`、`soul 8`、`love 47`、`warm 50`、`romantic 31`；这些不是全库统计。
+- `uv run pytest`：197 passed；锁文件、JSON、compileall、diff whitespace 检查通过。
+- 正式快照同进程热缓存交替顺序各 20 次中位数：基础搜索 8.02 ms，带 facets 9.15 ms，
+  增量约 1.13 ms；新增证据没有把检索做重。
+- Plugin Eval：A / 95、0 fail；invoke estimate 4,414 tokens，比 v0.7.4 增加 181。
+- static conversation-contract：13/13；无 trace 时明确输出 runtime behavior unmeasured。
+- validator 正向期望轨迹：5/5；已知真实结构回归轨迹：3/5，失败项正是遗漏第三方向和最终平铺。
+- 新鲜 `codex exec` 没有获得真实歌曲结果：第一步 `music_kb_status` 被取消。该失败属于
+  测试载体边界，不能写成 v0.7.5 对话行为通过，也不改变代码与契约测试已经通过的事实。
 
 ## 相关记录
 

@@ -34,13 +34,13 @@ class ReadOnlyMusicKB:
         artist: str = "",
         limit: int = 10,
     ) -> dict[str, Any]:
-        results = self._call(
-            lambda repository: repository.search(
+        result = self._call(
+            lambda repository: repository.search_with_facets(
                 query=query, tags=tags or [], title=title, artist=artist, limit=limit
             )
         )
-        assert isinstance(results, list)
-        return {"results": results, "count": len(results), "limit_applied": min(max(int(limit), 1), 50)}
+        assert isinstance(result, dict)
+        return result
 
     def resolve_title_artist(self, *, title: str, artist: str = "", limit: int = 10) -> dict[str, Any]:
         return self.search(title=title, artist=artist, limit=limit)
@@ -76,7 +76,7 @@ def create_server(database: str | Path | None = None) -> Any:
 
     @server.tool(
         name="music_kb_search",
-        description="Search canonical Music Flamingo analyses by text, exact tags/aliases, title, and artist. Results are bounded and read-only.",
+        description="Search canonical Music Flamingo analyses by text, exact tags/aliases, title, and artist. Results are bounded and include canonical-tag counts scoped only to the returned rows.",
     )
     def music_kb_search(
         query: str = "",

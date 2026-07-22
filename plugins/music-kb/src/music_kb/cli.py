@@ -386,17 +386,14 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         result = _with_repository(
             args.db,
             read_only=True,
-            operation=lambda repo: {
-                "results": repo.search(
-                    query=args.query,
-                    tags=args.tag,
-                    title=args.title,
-                    artist=args.artist,
-                    limit=args.limit,
-                )
-            },
+            operation=lambda repo: repo.search_with_facets(
+                query=args.query,
+                tags=args.tag,
+                title=args.title,
+                artist=args.artist,
+                limit=args.limit,
+            ),
         )
-        result["count"] = len(result["results"])
         return 0, result
     if args.command == "get":
         return 0, _with_repository(
