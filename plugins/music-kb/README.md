@@ -35,6 +35,29 @@ The Skill must not invent a permanent default quantity or silently broaden a
 request. Every listening link shown to a user comes from the runtime
 `listen_url` returned by the read-only MCP path.
 
+If the current direction runs short, the Skill first delivers every remaining
+valid, not-yet-shown result. It then presents only evidence-backed choices to
+relax a less-central condition or try a meaningfully different adjacent
+direction. Nothing is broadened or searched on the user's behalf until they
+choose; the chosen path then becomes the direction used by later follow-ups.
+
+Candidate results stay light and visibly numbered. After a non-empty result,
+the Skill asks which songs the user wants complete descriptions for; the user
+can answer with sequence numbers, song titles, “前几首”, or “全部”, without
+having to choose an analysis field. These detail selections are separate from
+“再来一些” and “换一批”: the former expands already displayed songs, while the
+latter two retrieve more candidates in the current direction.
+
+Complete descriptions are loaded only for the selected songs. One to four can
+be delivered together; selections of five or more are automatically split into
+batches of at most four, and later batches are not fetched in advance. The
+selected order and current direction stay intact between batches. Descriptions
+follow the user's current language: a Chinese conversation gets a complete,
+faithful Chinese rendering, while English source text or bilingual output is
+shown only when explicitly requested. The Skill does not summarize away source
+content, add unsupported musical judgments, or convert an analysis into a
+generation prompt.
+
 From this directory:
 
 ```bash

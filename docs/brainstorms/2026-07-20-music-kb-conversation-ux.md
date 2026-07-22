@@ -1,6 +1,6 @@
 # Music KB 对话 UX 头脑风暴记录
 
-状态：Round 34 已确认默认语言；脑爆阶段正式结束，尚未实施
+状态：Round 34 已确认默认语言；脑爆阶段正式结束；已在插件 v0.7.4 实施于 Draft PR #46 分支，尚未合并
 开始日期：2026-07-20
 关联 Issue：[Issue #41](https://github.com/chen-da-pang/music-analysis-kb/issues/41)
 
@@ -741,6 +741,16 @@ peer 和音频流程均保持现有范围边界，不属于本轮用户端 retri
 
 **收束规则：** 以上延后事项不得被模型自行猜测成默认行为。本轮脑爆到此正式结束，不再
 追加新的 UX 议题；后续进入已确认设计的实现规划和验证阶段。
+
+## 实施记录（v0.7.4）
+
+已批准的基线现已写入 retrieval Skill 和用户说明，包括结果不足时的剩余结果交付与
+用户控制回退、候选后的完整描述选择、最多 4 首一批的惰性获取，以及跟随用户语言的忠实
+呈现。conversation-UX metric pack 从 8 项扩展到 12 项，并为新增规则增加反向回归用例。
+
+实施后验证：插件测试 189 项全部通过；custom metric pack 为 12/12、coverage 100%、
+failed checks 0；Plugin Eval 对 retrieval Skill 的核心评分为 A / 95、0 fail，唯一 warning
+是约 4.2k tokens 的静态 invoke budget。该预算观察作为非阻塞项保留，不改变已批准规则。
 
 ## 记录规则
 

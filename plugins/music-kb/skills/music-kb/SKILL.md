@@ -99,6 +99,41 @@ labels when the actual result evidence supports them.
   do not encode 3, 5, 10, or another universal constant in this Skill until a
   later real-sample decision.
 
+### When the current direction has too few valid results
+
+- There is no universal count that makes a result set “insufficient”. Judge it
+  against the user's requested quantity and whether the current direction has
+  credible, not-yet-shown matches; do not invent a fixed threshold.
+- If valid results remain, first deliver all remaining unshown results from the
+  current direction. Briefly say that the direction is running short. Do not
+  withhold real matches, repeat earlier results, or pad the list with partially
+  matching songs.
+- In the same compact answer, put the supported next paths side by side: a
+  specific constraint that could be relaxed when one is justified, and any
+  credible adjacent directions that would give the user a meaningfully
+  different choice. Use existing returned evidence to support these options;
+  do not run a fallback search, relax a condition, or switch direction before
+  the user chooses.
+- Include all important, distinct, scannable paths in that answer instead of
+  forcing the user to ask for an expansion. Omit repetitive, weak-evidence, or
+  unreadably verbose options. Never manufacture options to reach a fixed
+  count. Show two adjacent directions separately only when both their
+  retrieval evidence and their user-visible value differ.
+- Prefer relaxing the least central condition, not the condition that merely
+  produces the largest result increase. Infer centrality from the full
+  conversation: preserve the current selected direction and corrected
+  conditions first, then conditions the user explicitly emphasized or
+  repeated, then the original wording.
+- If the full conversation still cannot distinguish which of two plausible
+  conditions is less central, ask one minimal, neutral question. Explain in one
+  short line per option what would be relaxed, what would remain, and what
+  difference the user would notice. Do not retrieve either alternative until
+  the user answers.
+- Once the user chooses a relaxation or adjacent direction, retrieve it without
+  another confirmation and set it as the current selected direction. Keep the
+  prior direction in the conversation history; later “再来一些” and “换一批”
+  follow the newly selected direction until the user changes it again.
+
 ### Follow-up requests keep the selected direction
 
 - “再来一些” means the user wants more songs that fit the **current selected
@@ -130,6 +165,60 @@ labels when the actual result evidence supports them.
   “我会沿这个方向补充一批，并保留刚才的结果”); do not silently change the
   direction. Do not repeat the full guide in unrelated answers or when no
   continuation is being offered.
+
+### Offer selected complete descriptions after candidates
+
+- Treat the candidate list as a light discovery layer. Give every displayed
+  candidate a visible sequence number that is unambiguous within the answer.
+  After any non-empty candidate result, ask one simple, optional question in
+  the user's language, for example:
+
+  > 想看哪些歌的完整描述？可以回复序号、歌名、“前几首”或“全部”；如果只想看某个方面，也可以顺便说明。
+
+- Accept selections by visible sequence number, song title, “前几首”, or
+  “全部”. Resolve the selection against the currently displayed candidates and
+  current direction, and preserve their displayed order.
+- A description dimension is optional. If the user does not name one, return
+  the complete description instead of asking them to choose internal fields.
+  If they do name a dimension, follow that narrower request.
+- Do not fetch canonical analyses merely in anticipation of a detail selection.
+  Until the user selects songs, keep the candidate response light; the bounded
+  shortlist verification rule above remains the only pre-selection exception.
+
+### Deliver complete descriptions in readable batches
+
+- For one to four selected songs, retrieve and present all selected complete
+  descriptions in one response. For five or more selected songs, including a
+  large “全部” selection, deliver at most **four songs per batch**.
+- Fetch `music_kb_get_canonical_analysis` only for the current batch.
+- Do not prefetch canonical analyses for later batches or retrieve every
+  candidate's long text in advance.
+- Preserve the selected order, current direction, and conversation context.
+  After a partial batch, say plainly that more selected descriptions remain
+  and can be continued. On continuation, fetch the next batch without
+  repeating the previous batch, re-running the candidate search, or making the
+  user restate the selection.
+- This four-song limit applies only to user-selected complete descriptions. It
+  does not set the size of the first candidate page or change the progressive
+  result-volume policy.
+
+### Keep canonical descriptions faithful to the user's language
+
+- Present a selected description in the user's current language. In a Chinese
+  conversation, provide a complete and faithful Chinese rendering of the
+  canonical analysis.
+- Preserve all substantive content in the source, including its rhythm/groove,
+  instrumentation/production, harmony, vocals, lyrical themes, structure, and
+  overall atmosphere when present. Do not summarize away content or add a
+  musical judgment outside the canonical analysis.
+- Do not present translated wording as a new model analysis. Show the English
+  original or a bilingual version only when the user explicitly asks for it;
+  do not double the default output with both languages.
+- Verify `raw_text_truncated` is false before calling the result complete. If
+  the server still reports truncation at its supported maximum, disclose that
+  boundary instead of silently claiming the text is complete.
+- This remains retrieval-only. Never convert the canonical description into a
+  Suno prompt or another generation prompt.
 
 ### Keep the conversation recoverable
 
@@ -165,7 +254,9 @@ labels when the actual result evidence supports them.
    contract above instead of silently declaring a universal intersection or
    union rule.
 6. Use `music_kb_get_canonical_analysis` only for a selected recording, a
-   comparison, or the small shortlist needed to verify a branch. Preserve the
+   comparison, or the small shortlist needed to verify a branch. For a
+   user-selected detail batch, call it only for the current batch of at most
+   four songs and verify that `raw_text_truncated` is false. Preserve the
    runtime `listen_url` exactly.
 
 The search limit is bounded by the MCP server (maximum 50). `count` is the
@@ -181,16 +272,23 @@ Keep the answer scannable and evidence-based:
   large one.
 - For each branch, show its interpretation and (for the first branch) the one-
   sentence reason it is currently most likely.
-- For each candidate, show `歌名 — 艺人`, the returned matching evidence, and a
-  Markdown listening link when `listen_url` is non-empty. Use the runtime URL
-  exactly; never fabricate or substitute a missing link.
+- For each candidate, show an unambiguous visible sequence number,
+  `歌名 — 艺人`, the returned matching evidence, and a Markdown listening link
+  when `listen_url` is non-empty. Use the runtime URL exactly; never fabricate
+  or substitute a missing link.
 - When a branch is representative or explicitly expandable, include the short
   “你可以这样继续” guide that defines “再来一些” and “换一批” in the same
   answer. Keep it adjacent to the continuation offer rather than making the
   user infer the commands from the Skill's internal rules.
+- After a non-empty candidate list, ask which songs the user wants complete
+  descriptions for and teach the sequence-number/title/“前几首”/“全部” selection
+  forms in that question. Keep this separate from the “再来一些”/“换一批” guide:
+  one selects details from displayed candidates, while the other retrieves
+  more candidates from the current direction.
 - Keep recording IDs, full tag dumps, provenance, and raw canonical text hidden
-  unless the user asks. Do not claim popularity, mood, genre, or lyric meaning
-  that is absent from returned evidence.
+  until the user selects a complete description or explicitly asks. Do not
+  claim popularity, mood, genre, or lyric meaning that is absent from returned
+  evidence.
 - For no rows, report what the bounded search actually returned and avoid
   implying that the corpus or the concept is empty. Do not broaden the request
   silently; make any fallback explicit.

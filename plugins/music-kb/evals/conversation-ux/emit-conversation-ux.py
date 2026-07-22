@@ -174,6 +174,108 @@ def main() -> None:
         )
     )
 
+    insufficient_phrases = (
+        "When the current direction has too few valid results",
+        "no universal count",
+        "all remaining unshown results",
+        "partially matching songs",
+        "side by side",
+        "existing returned evidence",
+        "full conversation",
+        "one minimal, neutral question",
+        "set it as the current selected direction",
+    )
+    insufficient_ok = bool(skill) and all(
+        phrase in normalized_skill for phrase in insufficient_phrases
+    )
+    checks.append(
+        _check(
+            "music-kb-ux-insufficient-results",
+            insufficient_ok,
+            "Insufficient directions deliver remaining valid matches before offering user-controlled fallbacks.",
+            evidence=[phrase for phrase in insufficient_phrases if phrase in normalized_skill],
+            remediation=[
+                "Restore remaining-result delivery, evidence-backed fallback choices, full-context constraint priority, and direction inheritance."
+            ],
+        )
+    )
+
+    detail_selection_phrases = (
+        "Offer selected complete descriptions after candidates",
+        "visible sequence number",
+        "序号",
+        "歌名",
+        "前几首",
+        "全部",
+        "description dimension is optional",
+        "Do not fetch canonical analyses merely in anticipation",
+    )
+    detail_selection_ok = bool(skill) and all(
+        phrase in normalized_skill for phrase in detail_selection_phrases
+    )
+    checks.append(
+        _check(
+            "music-kb-ux-detail-selection",
+            detail_selection_ok,
+            "Candidate replies expose a simple, optional path to selected complete descriptions.",
+            evidence=[phrase for phrase in detail_selection_phrases if phrase in normalized_skill],
+            remediation=[
+                "Ask which displayed songs to expand and accept numbers, titles, prefix selections, or all without requiring a field choice."
+            ],
+        )
+    )
+
+    detail_batching_phrases = (
+        "Deliver complete descriptions in readable batches",
+        "one to four selected songs",
+        "five or more selected songs",
+        "at most **four songs per batch**",
+        "only for the current batch",
+        "Do not prefetch canonical analyses",
+        "Preserve the selected order",
+        "does not set the size of the first candidate page",
+    )
+    detail_batching_ok = bool(skill) and all(
+        phrase in normalized_skill for phrase in detail_batching_phrases
+    )
+    checks.append(
+        _check(
+            "music-kb-ux-detail-batching",
+            detail_batching_ok,
+            "Selected complete descriptions are fetched lazily in batches of at most four.",
+            evidence=[phrase for phrase in detail_batching_phrases if phrase in normalized_skill],
+            remediation=[
+                "Cap detail batches at four, fetch only the current batch, and preserve selection order and candidate-page independence."
+            ],
+        )
+    )
+
+    detail_language_phrases = (
+        "Keep canonical descriptions faithful to the user's language",
+        "user's current language",
+        "complete and faithful Chinese rendering",
+        "Do not summarize away content",
+        "outside the canonical analysis",
+        "English original or a bilingual version",
+        "user explicitly asks",
+        "raw_text_truncated",
+        "retrieval-only",
+    )
+    detail_language_ok = bool(skill) and all(
+        phrase in normalized_skill for phrase in detail_language_phrases
+    )
+    checks.append(
+        _check(
+            "music-kb-ux-detail-language",
+            detail_language_ok,
+            "Complete descriptions follow the user's language without summarization or unsupported additions.",
+            evidence=[phrase for phrase in detail_language_phrases if phrase in normalized_skill],
+            remediation=[
+                "Preserve all canonical content in the user's language, disclose truncation, and show English or bilingual text only on request."
+            ],
+        )
+    )
+
     evidence_phrases = (
         "ordered for retrieval",
         "small shortlist",
