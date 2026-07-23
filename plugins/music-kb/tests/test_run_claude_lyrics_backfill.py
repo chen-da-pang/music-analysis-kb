@@ -69,9 +69,51 @@ def test_backfill_progress_marks_pending_as_attempted_and_prompt_forbids_audio()
     assert "--lyrics-only" in prompt
 
 
+def test_backfill_progress_compacts_a_long_unattempted_tail() -> None:
+    module = _module()
+
+    result = module.compact_progress_summary(
+        {
+            "queue": 30,
+            "attempted": 2,
+            "available": 2,
+            "unattempted": [f"track-{index}" for index in range(28)],
+        },
+        sample_limit=3,
+    )
+
+    assert result["unattempted"] == ["track-0", "track-1", "track-2"]
+    assert result["unattempted_count"] == 28
+
+
+def test_backfill_import_summary_keeps_only_a_review_sample() -> None:
+    module = _module()
+
+    result = module.compact_import_summary(
+        {"count": 4, "imported": 4, "results": [{"row": index} for index in range(4)]},
+        sample_limit=2,
+    )
+
+    assert result == {
+        "count": 4,
+        "imported": 4,
+        "result_count": 4,
+        "result_sample": [{"row": 0}, {"row": 1}],
+        "results_truncated": True,
+    }
+
+
 def test_backfill_wrapper_accepts_an_explicit_musicdl_interpreter() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
     assert 'parser.add_argument(\n        "--worker-python"' in source
     assert 'default=os.environ.get("MUSICDL_PYTHON", "python3")' in source
     assert "args.worker_python," in source
+
+
+def test_backfill_wrapper_defaults_to_the_direct_exact_source_executor() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'choices=("direct", "claude")' in source
+    assert 'default="direct"' in source
+    assert '"executor": "direct"' in source

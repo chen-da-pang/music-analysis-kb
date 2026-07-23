@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import sys
@@ -49,6 +50,44 @@ def _queue(tmp_path: Path, *, title: str, artist: str) -> tuple[Path, Path, Path
     inventory = tmp_path / "inventory.json"
     inventory.write_text(json.dumps({"songs": []}), encoding="utf-8")
     return queue, inventory, tmp_path / "music", tmp_path / "progress.json", tmp_path / "download.log"
+
+
+def _direct_kugou_responses(mix_song_id: str = "1") -> tuple[bytes, bytes, bytes]:
+    page = (
+        "<script>var dataFromSmarty = "
+        + json.dumps(
+            [
+                {
+                    "mixsongid": mix_song_id,
+                    "hash": "DIRECT-HASH",
+                    "timelength": 123000,
+                    "audio_name": "黄霄雲、刘端端 - 空心 (Live)",
+                    "song_name": "空心 (Live)",
+                    "artist_name": "黄霄雲、刘端端",
+                }
+            ],
+            ensure_ascii=False,
+        )
+        + ",// 当前页面歌曲信息</script>"
+    ).encode("utf-8")
+    search = json.dumps(
+        {
+            "status": 200,
+            "candidates": [
+                {
+                    "id": "candidate-1",
+                    "accesskey": "access-key",
+                    "duration": 123000,
+                    "song": "空心 (Live)",
+                    "singer": "黄霄雲、刘端端",
+                }
+            ],
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    lyric = base64.b64encode("[ti:空心]\r\n[00:01.00]精确页面歌词\r\n".encode("utf-8")).decode("ascii")
+    download = json.dumps({"status": 200, "content": lyric}, ensure_ascii=False).encode("utf-8")
+    return page, search, download
 
 
 def test_choose_match_rejects_wrong_versions_and_artist() -> None:
@@ -160,6 +199,84 @@ def test_exact_match_records_selected_result_metadata(monkeypatch, tmp_path: Pat
     assert receipt["lyric_text"] == "第一句\n第二句"
 
 
+def test_download_worker_repairs_pending_musicdl_lyric_via_exact_page(monkeypatch, tmp_path: Path) -> None:
+    module = _module()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.work_dir = Path(kwargs["init_music_clients_cfg"]["KugouMusicClient"]["work_dir"])
+            self.exact = SimpleNamespace(
+                source="KugouMusicClient",
+                song_name="空心 (Live)",
+                singers="黄霄雲、刘端端",
+                identifier="musicdl-file-hash",
+                lyric="<script>window.location='/error'</script>获取失败",
+                raw_data={
+                    "search": {"MixSongID": "1"},
+                    "lyric": {"candidates": [{"id": "fixture"}]},
+                },
+            )
+
+        def search(self, _query: str):
+            return {"KugouMusicClient": [self.exact]}
+
+        def download(self, _items):
+            path = self.work_dir / "KugouMusicClient" / "exact.mp3"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"exact")
+            return [
+                SimpleNamespace(
+                    save_path=str(path),
+                    source=self.exact.source,
+                    identifier=self.exact.identifier,
+                    lyric=self.exact.lyric,
+                    raw_data=self.exact.raw_data,
+                )
+            ]
+
+    _install_fake_musicdl(monkeypatch, FakeClient)
+    queue, inventory, work_dir, progress, log = _queue(
+        tmp_path, title="空心 (Live)", artist="黄霄雲、刘端端"
+    )
+    source_url = "https://www.kugou.com/mixsong/agent_gateway/future-download.html"
+    row = json.loads(queue.read_text(encoding="utf-8"))
+    row["play_link"] = source_url
+    queue.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    page, search, download = _direct_kugou_responses()
+
+    def fake_fetch(url: str, *, timeout: float) -> bytes:
+        assert timeout == 5
+        if url == source_url:
+            return page
+        if url.startswith("https://lyrics.kugou.com/search?"):
+            return search
+        if url.startswith("https://lyrics.kugou.com/download?"):
+            return download
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(module, "_fetch_url", fake_fetch)
+    summary = module.run_download(
+        queue,
+        inventory,
+        work_dir,
+        progress,
+        log,
+        "future-download-lyrics",
+        None,
+        False,
+        0,
+        0,
+        10,
+        5,
+    )
+
+    assert summary["downloaded"] == 1
+    assert summary["lyrics_available"] == 1
+    receipt = json.loads((tmp_path / "lyrics-receipts.jsonl").read_text(encoding="utf-8"))
+    assert receipt["lyric_text"] == "精确页面歌词"
+    assert receipt["evidence"]["query_method"] == module.DIRECT_LYRIC_QUERY_METHOD
+
+
 def test_exact_title_artist_without_matching_mix_song_id_is_rejected(monkeypatch, tmp_path: Path) -> None:
     module = _module()
 
@@ -238,6 +355,100 @@ def test_lyrics_only_worker_writes_pending_or_available_receipt_without_audio(mo
     assert receipt["status"] == "available"
     assert receipt["lyric_text"] == "只取歌词"
     assert not (work_dir / "KugouMusicClient").exists()
+
+
+def test_lyrics_only_worker_uses_exact_mixsong_page_without_musicdl(monkeypatch, tmp_path: Path) -> None:
+    module = _module()
+    queue, _inventory, work_dir, progress, log = _queue(
+        tmp_path, title="空心 (Live)", artist="黄霄雲、刘端端"
+    )
+    source_url = "https://www.kugou.com/mixsong/agent_gateway/exact.html"
+    row = json.loads(queue.read_text(encoding="utf-8"))
+    row["source_url"] = source_url
+    queue.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    page, search, download = _direct_kugou_responses()
+    calls: list[str] = []
+
+    def fake_fetch(url: str, *, timeout: float) -> bytes:
+        assert timeout == 5
+        calls.append(url)
+        if url == source_url:
+            return page
+        if url.startswith("https://lyrics.kugou.com/search?"):
+            return search
+        if url.startswith("https://lyrics.kugou.com/download?"):
+            return download
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(module, "_fetch_url", fake_fetch)
+    receipt_path = tmp_path / "backfill-lyrics.jsonl"
+    summary = module.run_lyrics_only(
+        queue,
+        work_dir,
+        progress,
+        log,
+        "lyrics-only-direct",
+        None,
+        False,
+        0,
+        0,
+        10,
+        5,
+        receipt_path,
+    )
+
+    assert summary["available"] == 1
+    assert len(calls) == 3
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "available"
+    assert receipt["lyric_text"] == "精确页面歌词"
+    assert receipt["evidence"]["query_method"] == module.DIRECT_LYRIC_QUERY_METHOD
+    assert receipt["evidence"]["page_kugou_mix_song_id"] == "1"
+    assert receipt["evidence"]["page_file_hash"] == "DIRECT-HASH"
+    assert not (work_dir / "KugouMusicClient").exists()
+
+
+def test_exact_mixsong_zero_lyric_candidates_is_platform_unavailable(monkeypatch, tmp_path: Path) -> None:
+    module = _module()
+    queue, _inventory, work_dir, progress, log = _queue(
+        tmp_path, title="空心 (Live)", artist="黄霄雲、刘端端"
+    )
+    source_url = "https://www.kugou.com/mixsong/agent_gateway/no-lyric.html"
+    row = json.loads(queue.read_text(encoding="utf-8"))
+    row["source_url"] = source_url
+    queue.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    page, _search, _download = _direct_kugou_responses()
+
+    def fake_fetch(url: str, *, timeout: float) -> bytes:
+        assert timeout == 5
+        if url == source_url:
+            return page
+        if url.startswith("https://lyrics.kugou.com/search?"):
+            return b'{"status":200,"candidates":[]}'
+        raise AssertionError(f"a zero-candidate response must not download lyrics: {url}")
+
+    monkeypatch.setattr(module, "_fetch_url", fake_fetch)
+    receipt_path = tmp_path / "backfill-lyrics.jsonl"
+    summary = module.run_lyrics_only(
+        queue,
+        work_dir,
+        progress,
+        log,
+        "lyrics-only-zero-candidates",
+        None,
+        False,
+        0,
+        0,
+        10,
+        5,
+        receipt_path,
+    )
+
+    assert summary["platform_unavailable"] == 1
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "platform_unavailable"
+    assert receipt["evidence"]["response_kind"] == "platform_zero_lyric_candidates"
+    assert receipt["evidence"]["query_method"] == module.DIRECT_LYRIC_QUERY_METHOD
 
 
 def test_lyrics_only_worker_rejects_html_failure_payload(monkeypatch, tmp_path: Path) -> None:

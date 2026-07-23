@@ -10,6 +10,7 @@ an already-present song again.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -21,13 +22,36 @@ import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
+from urllib.parse import urlencode, urlsplit
+from urllib.request import Request, urlopen
 
 
 MATCH_POLICY = "exact_kugou_mix_song_id_title_compatible_artist_v2"
 LYRIC_RECEIPT_SCHEMA_VERSION = 1
 LYRIC_QUERY_METHOD = "musicdl_kugou_exact_mix_song_id_v1"
+DIRECT_LYRIC_QUERY_METHOD = "kugou_mixsong_page_exact_lyrics_v1"
 LYRIC_NORMALIZER_VERSION = "lrc-v1"
+
+_KUGOU_MIXSONG_HOST = "www.kugou.com"
+_KUGOU_MIXSONG_PATH_PREFIX = "/mixsong/agent_gateway/"
+_KUGOU_BROWSER_HEADERS = {
+    "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+    ),
+}
+_DATA_FROM_SMARTY_ASSIGNMENT = re.compile(r"var\s+dataFromSmarty\s*=\s*", re.IGNORECASE)
+_DIRECT_RETRYABLE_RESPONSE_KINDS = frozenset(
+    {
+        "direct_mixsong_page_request_failed",
+        "direct_lyric_search_request_failed",
+        "direct_lyric_download_request_failed",
+        "direct_timeout",
+    }
+)
 
 # These are exact platform-facing placeholder responses, not broad keyword
 # guesses. An empty SongInfo.lyric is never enough to publish an exception.
@@ -47,6 +71,21 @@ def now_iso() -> str:
 
 class ItemTimeoutError(RuntimeError):
     """Raised when one musicdl operation does not return in time."""
+
+
+class DirectKugouLyricError(RuntimeError):
+    """An auditable error from the exact Kugou mix-song lyric path."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        response_kind: str,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.response_kind = response_kind
+        self.evidence = dict(evidence or {})
 
 
 @contextmanager
@@ -314,6 +353,346 @@ def _is_non_lyric_payload(value: str) -> bool:
     return any(marker.casefold() in folded for marker in NON_LYRIC_PAYLOAD_MARKERS)
 
 
+def exact_kugou_mixsong_url(candidate: Mapping[str, Any]) -> str | None:
+    """Return a safe, exact Kugou mix-song URL carried by the queue row.
+
+    This is intentionally narrower than a general source URL.  The public
+    mix-song page embeds the platform's own MixSongID, audio hash, and
+    duration, which creates a deterministic chain into the lyric endpoint.
+    A title/artist query cannot offer the same guarantee.
+    """
+
+    value = str(candidate.get("source_url") or candidate.get("play_link") or "").strip()
+    if not value:
+        return None
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != _KUGOU_MIXSONG_HOST
+        or not parsed.path.startswith(_KUGOU_MIXSONG_PATH_PREFIX)
+        or not parsed.path.endswith(".html")
+    ):
+        return None
+    return value
+
+
+def _fetch_url(url: str, *, timeout: float) -> bytes:
+    """Fetch a bounded Kugou response; kept small so tests can replace it."""
+
+    request = Request(url, headers=_KUGOU_BROWSER_HEADERS)
+    with urlopen(request, timeout=timeout) as response:  # noqa: S310 - URL was allow-listed above.
+        return response.read()
+
+
+def _json_payload(payload: bytes, *, endpoint: str) -> Mapping[str, Any]:
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, TypeError) as exc:
+        raise DirectKugouLyricError(
+            f"Kugou {endpoint} response was not valid JSON",
+            response_kind="direct_invalid_json_response",
+        ) from exc
+    if not isinstance(value, Mapping):
+        raise DirectKugouLyricError(
+            f"Kugou {endpoint} response was not an object",
+            response_kind="direct_invalid_json_response",
+        )
+    return value
+
+
+def _mixsong_page_tracks(payload: bytes) -> list[Mapping[str, Any]]:
+    try:
+        page = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DirectKugouLyricError(
+            "Kugou mix-song page was not UTF-8",
+            response_kind="direct_invalid_mixsong_page",
+        ) from exc
+    assignment = _DATA_FROM_SMARTY_ASSIGNMENT.search(page)
+    if assignment is None:
+        raise DirectKugouLyricError(
+            "Kugou mix-song page did not contain platform track metadata",
+            response_kind="direct_invalid_mixsong_page",
+        )
+    try:
+        decoded, _ = json.JSONDecoder().raw_decode(page[assignment.end() :].lstrip())
+    except ValueError as exc:
+        raise DirectKugouLyricError(
+            "Kugou mix-song page track metadata was not valid JSON",
+            response_kind="direct_invalid_mixsong_page",
+        ) from exc
+    if not isinstance(decoded, list):
+        raise DirectKugouLyricError(
+            "Kugou mix-song page track metadata was not a list",
+            response_kind="direct_invalid_mixsong_page",
+        )
+    tracks = [item for item in decoded if isinstance(item, Mapping)]
+    if not tracks:
+        raise DirectKugouLyricError(
+            "Kugou mix-song page did not provide a track record",
+            response_kind="direct_invalid_mixsong_page",
+        )
+    return tracks
+
+
+def _page_track_for_mix_song_id(
+    tracks: list[Mapping[str, Any]], expected_track_key: str
+) -> Mapping[str, Any]:
+    matches = [
+        track
+        for track in tracks
+        if str(
+            track.get("mixsongid")
+            or track.get("mix_song_id")
+            or track.get("MixSongID")
+            or ""
+        ).strip()
+        == expected_track_key
+    ]
+    if len(matches) != 1:
+        raise DirectKugouLyricError(
+            "Kugou mix-song page identity does not match the requested MixSongID",
+            response_kind="direct_identity_mismatch",
+            evidence={"page_matching_mix_song_id_count": len(matches)},
+        )
+    return matches[0]
+
+
+def _page_track_lyric_query(
+    track: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> tuple[str, str, int]:
+    file_hash = str(track.get("hash") or track.get("FileHash") or "").strip()
+    if not file_hash:
+        raise DirectKugouLyricError(
+            "Kugou mix-song page did not provide an audio hash",
+            response_kind="direct_missing_platform_hash",
+        )
+    raw_duration = track.get("timelength")
+    try:
+        duration_ms = int(float(raw_duration))
+    except (TypeError, ValueError) as exc:
+        raise DirectKugouLyricError(
+            "Kugou mix-song page did not provide a valid millisecond duration",
+            response_kind="direct_missing_platform_duration",
+        ) from exc
+    if duration_ms <= 0:
+        raise DirectKugouLyricError(
+            "Kugou mix-song page did not provide a positive millisecond duration",
+            response_kind="direct_missing_platform_duration",
+        )
+    keyword = str(track.get("audio_name") or track.get("filename") or "").strip()
+    if not keyword:
+        source_artist = str(track.get("artist_name") or candidate.get("artist") or "").strip()
+        source_title = str(track.get("song_name") or candidate.get("title") or "").strip()
+        keyword = " - ".join(part for part in (source_artist, source_title) if part)
+    if not keyword:
+        raise DirectKugouLyricError(
+            "Kugou mix-song page did not provide a lyric-search keyword",
+            response_kind="direct_missing_platform_metadata",
+        )
+    return file_hash, keyword, duration_ms
+
+
+def _lyric_candidate_is_duration_compatible(candidate: Mapping[str, Any], duration_ms: int) -> bool:
+    value = candidate.get("duration")
+    if value is None or str(value).strip() == "":
+        return True
+    try:
+        observed = int(float(value))
+    except (TypeError, ValueError):
+        return False
+    return observed == duration_ms or observed * 1000 == duration_ms
+
+
+def _lyric_candidate_evidence(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: candidate[key]
+        for key in ("id", "duration", "song", "singer")
+        if candidate.get(key) is not None
+    }
+
+
+def _direct_kugou_lyric_item(
+    candidate: Mapping[str, Any],
+    *,
+    mixsong_url: str,
+    expected_track_key: str,
+    timeout: float,
+) -> tuple[Any, dict[str, Any]]:
+    """Fetch lyrics through the exact MixSongID -> hash -> lyric chain.
+
+    The page must echo the queue's MixSongID before its hash is trusted.  The
+    platform lyric search is then called with that hash and exact duration;
+    no title/artist matching or downloaded audio is involved.
+    """
+
+    try:
+        page_payload = _fetch_url(mixsong_url, timeout=timeout)
+    except Exception as exc:  # pragma: no cover - network-dependent
+        raise DirectKugouLyricError(
+            f"Kugou mix-song page request failed: {exc}",
+            response_kind="direct_mixsong_page_request_failed",
+            evidence={"kugou_mixsong_url": mixsong_url},
+        ) from exc
+    track = _page_track_for_mix_song_id(_mixsong_page_tracks(page_payload), expected_track_key)
+    file_hash, keyword, duration_ms = _page_track_lyric_query(track, candidate)
+    search_url = "https://lyrics.kugou.com/search?" + urlencode(
+        {"keyword": keyword, "duration": str(duration_ms), "hash": file_hash}
+    )
+    try:
+        lyric_search = _json_payload(
+            _fetch_url(search_url, timeout=timeout), endpoint="lyric search"
+        )
+    except DirectKugouLyricError:
+        raise
+    except Exception as exc:  # pragma: no cover - network-dependent
+        raise DirectKugouLyricError(
+            f"Kugou lyric search request failed: {exc}",
+            response_kind="direct_lyric_search_request_failed",
+        ) from exc
+    raw_candidates = lyric_search.get("candidates")
+    if not isinstance(raw_candidates, list):
+        raise DirectKugouLyricError(
+            "Kugou lyric search did not provide a candidate list",
+            response_kind="direct_invalid_lyric_search_response",
+        )
+    candidates = [item for item in raw_candidates if isinstance(item, Mapping)]
+    evidence = {
+        "kugou_mixsong_url": mixsong_url,
+        "page_kugou_mix_song_id": expected_track_key,
+        "page_file_hash": file_hash,
+        "page_duration_ms": duration_ms,
+        "source_page_sha256": hashlib.sha256(page_payload).hexdigest(),
+        "lyric_candidate_count": len(candidates),
+    }
+    response_candidates = [_lyric_candidate_evidence(item) for item in candidates]
+    if not candidates:
+        return (
+            SimpleNamespace(
+                source="KugouMusicClient",
+                song_name=str(track.get("song_name") or candidate.get("title") or ""),
+                singers=str(track.get("artist_name") or candidate.get("artist") or ""),
+                identifier=file_hash,
+                lyric=None,
+                raw_data={
+                    "search": {"MixSongID": expected_track_key, "hash": file_hash},
+                    "lyric": {"candidates": []},
+                },
+            ),
+            evidence,
+        )
+    usable_candidates = [
+        item
+        for item in candidates
+        if item.get("id") is not None and str(item.get("accesskey") or "").strip()
+    ]
+    selected = next(
+        (item for item in usable_candidates if _lyric_candidate_is_duration_compatible(item, duration_ms)),
+        usable_candidates[0] if usable_candidates else None,
+    )
+    if selected is None:
+        raise DirectKugouLyricError(
+            "Kugou lyric search candidates did not include a usable result",
+            response_kind="direct_invalid_lyric_search_response",
+            evidence={**evidence, "lyric_candidates": response_candidates[:10]},
+        )
+    selected_id = str(selected["id"])
+    evidence["selected_lyric_candidate_id"] = selected_id
+    evidence["selected_lyric_candidate_duration_compatible"] = _lyric_candidate_is_duration_compatible(
+        selected, duration_ms
+    )
+    download_url = "https://lyrics.kugou.com/download?" + urlencode(
+        {
+            "ver": "1",
+            "client": "pc",
+            "id": selected_id,
+            "accesskey": str(selected["accesskey"]),
+            "fmt": "lrc",
+            "charset": "utf8",
+        }
+    )
+    try:
+        lyric_download = _json_payload(
+            _fetch_url(download_url, timeout=timeout), endpoint="lyric download"
+        )
+    except DirectKugouLyricError:
+        raise
+    except Exception as exc:  # pragma: no cover - network-dependent
+        raise DirectKugouLyricError(
+            f"Kugou lyric download request failed: {exc}",
+            response_kind="direct_lyric_download_request_failed",
+            evidence=evidence,
+        ) from exc
+    encoded_lyric = lyric_download.get("content")
+    if not isinstance(encoded_lyric, str) or not encoded_lyric:
+        raise DirectKugouLyricError(
+            "Kugou lyric download did not provide encoded lyric content",
+            response_kind="direct_missing_lyric_content",
+            evidence=evidence,
+        )
+    try:
+        lyric = base64.b64decode(encoded_lyric.encode("ascii"), validate=True).decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise DirectKugouLyricError(
+            "Kugou lyric download content could not be decoded as UTF-8 LRC",
+            response_kind="direct_invalid_lyric_content",
+            evidence=evidence,
+        ) from exc
+    return (
+        SimpleNamespace(
+            source="KugouMusicClient",
+            song_name=str(track.get("song_name") or candidate.get("title") or ""),
+            singers=str(track.get("artist_name") or candidate.get("artist") or ""),
+            identifier=file_hash,
+            lyric=lyric,
+            raw_data={
+                "search": {"MixSongID": expected_track_key, "hash": file_hash},
+                "lyric": {
+                    "candidates": response_candidates,
+                    "selected_candidate_id": selected_id,
+                    "download_content_sha256": hashlib.sha256(encoded_lyric.encode("ascii")).hexdigest(),
+                },
+            },
+        ),
+        evidence,
+    )
+
+
+def direct_kugou_lyric_receipt(
+    candidate: Mapping[str, Any], *, run_id: str, timeout: float
+) -> dict[str, Any] | None:
+    """Return an exact-page lyric receipt, or ``None`` when no safe URL exists."""
+
+    expected_track_key = expected_kugou_track_key(candidate)
+    mixsong_url = exact_kugou_mixsong_url(candidate)
+    if not expected_track_key or not mixsong_url:
+        return None
+    try:
+        item, evidence = _direct_kugou_lyric_item(
+            candidate,
+            mixsong_url=mixsong_url,
+            expected_track_key=expected_track_key,
+            timeout=timeout,
+        )
+    except DirectKugouLyricError as exc:
+        return lyric_receipt_for_match(
+            candidate,
+            None,
+            run_id=run_id,
+            reason=str(exc),
+            response_kind=exc.response_kind,
+            query_method=DIRECT_LYRIC_QUERY_METHOD,
+            evidence_extra={"kugou_mixsong_url": mixsong_url, **exc.evidence},
+        )
+    return lyric_receipt_for_match(
+        candidate,
+        item,
+        run_id=run_id,
+        query_method=DIRECT_LYRIC_QUERY_METHOD,
+        evidence_extra=evidence,
+    )
+
+
 def lyric_receipt_for_match(
     candidate: Mapping[str, Any],
     item: Any | None,
@@ -321,6 +700,8 @@ def lyric_receipt_for_match(
     run_id: str,
     reason: str | None = None,
     response_kind: str | None = None,
+    query_method: str = LYRIC_QUERY_METHOD,
+    evidence_extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create an auditable receipt for one exact-result lyric attempt.
 
@@ -377,7 +758,7 @@ def lyric_receipt_for_match(
         "source_name": receipt_source_name,
         "source_track_id": receipt_source_track_id,
         "reason": final_reason,
-        "query_method": LYRIC_QUERY_METHOD,
+        "query_method": query_method,
         "response_kind": response_kind,
         "run_id": run_id,
         "expected_kugou_mix_song_id": expected_track_key,
@@ -385,6 +766,8 @@ def lyric_receipt_for_match(
         "returned_file_hash": str(getattr(item, "identifier", "") or "") if item is not None else None,
         "raw_response_sha256": _json_sha256(response),
     }
+    if evidence_extra:
+        evidence.update(dict(evidence_extra))
     receipt: dict[str, Any] = {
         "schema_version": LYRIC_RECEIPT_SCHEMA_VERSION,
         "run_id": run_id,
@@ -674,6 +1057,22 @@ def run_download(
             }
             lyric_source = result if downloaded and getattr(result, "raw_data", None) is not None else best
             receipt = lyric_receipt_for_match(candidate, lyric_source, run_id=run_id)
+            # Audio downloads still use musicdl as their primary path.  When
+            # its lyric attachment is absent or a known bad payload, retry the
+            # lyric only through the public page that already proves the exact
+            # MixSongID.  This keeps future weekly downloads in the same lyric
+            # coverage contract as the historical backfill without re-downloading
+            # their audio.
+            if receipt["status"] == "pending":
+                try:
+                    with item_timeout(item_timeout_seconds):
+                        direct_receipt = direct_kugou_lyric_receipt(
+                            candidate, run_id=run_id, timeout=item_timeout_seconds
+                        )
+                except ItemTimeoutError:
+                    direct_receipt = None
+                if direct_receipt is not None and direct_receipt["status"] != "pending":
+                    receipt = direct_receipt
             try:
                 append_lyric_receipt(lyrics_receipt_path, receipt)
                 progress["lyrics"][identity] = lyric_progress_metadata(receipt)
@@ -775,24 +1174,36 @@ def run_lyrics_only(
         print(json.dumps(summary, ensure_ascii=False))
         return summary
 
-    try:
-        from musicdl.musicdl import MusicClient
-    except Exception as exc:  # pragma: no cover - environment-dependent
-        raise SystemExit(f"无法导入 musicdl，请在 Claude Code 环境安装 musicdl: {exc}") from exc
-    client = MusicClient(
-        music_sources=["KugouMusicClient"],
-        init_music_clients_cfg={
-            "KugouMusicClient": {
-                "work_dir": str(work_dir),
-                "search_size_per_source": search_size,
-            }
-        },
-    )
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def log(message: str) -> None:
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(f"[{now_iso()}] {message}\n")
+
+    # All materialized historical rows carry an exact mix-song URL, so the
+    # direct page path normally avoids importing musicdl entirely.  Keep the
+    # old client as a lazy compatibility fallback for a manually supplied
+    # queue row that lacks that durable URL.
+    client: Any | None = None
+
+    def musicdl_client() -> Any:
+        nonlocal client
+        if client is not None:
+            return client
+        try:
+            from musicdl.musicdl import MusicClient
+        except Exception as exc:  # pragma: no cover - environment-dependent
+            raise RuntimeError(f"无法导入 musicdl，请在 Claude Code 环境安装 musicdl: {exc}") from exc
+        client = MusicClient(
+            music_sources=["KugouMusicClient"],
+            init_music_clients_cfg={
+                "KugouMusicClient": {
+                    "work_dir": str(work_dir),
+                    "search_size_per_source": search_size,
+                }
+            },
+        )
+        return client
 
     terminal_statuses = {"available", "instrumental", "platform_unavailable"}
     for index, candidate in enumerate(selected, start=1):
@@ -807,15 +1218,7 @@ def run_lyrics_only(
         summary["attempted"] += 1
         log(f"lyrics-only [{index}/{len(selected)}] {title} - {artist}")
         receipt: dict[str, Any]
-        if not title or not artist:
-            receipt = lyric_receipt_for_match(
-                candidate,
-                None,
-                run_id=run_id,
-                reason="queue row has no title or artist for candidate discovery",
-                response_kind="invalid_queue_row",
-            )
-        elif not expected_track_key:
+        if not expected_track_key:
             receipt = lyric_receipt_for_match(
                 candidate,
                 None,
@@ -824,45 +1227,81 @@ def run_lyrics_only(
                 response_kind="unsupported_source_identity",
             )
         else:
-            found: list[Any] | None = None
-            last_error: str | None = None
-            for attempt in range(retries + 1):
-                try:
-                    with item_timeout(item_timeout_seconds):
-                        found = client.search(f"{title} {artist}").get("KugouMusicClient", [])
-                    break
-                except ItemTimeoutError as exc:
-                    last_error = str(exc)
-                    break
-                except Exception as exc:  # pragma: no cover - network-dependent
-                    last_error = str(exc)
-                    if attempt < retries:
-                        time.sleep(3)
-            if found is None:
+            direct_receipt: dict[str, Any] | None = None
+            mixsong_url = exact_kugou_mixsong_url(candidate)
+            if mixsong_url is not None:
+                for attempt in range(retries + 1):
+                    try:
+                        with item_timeout(item_timeout_seconds):
+                            direct_receipt = direct_kugou_lyric_receipt(
+                                candidate, run_id=run_id, timeout=item_timeout_seconds
+                            )
+                    except ItemTimeoutError as exc:
+                        direct_receipt = lyric_receipt_for_match(
+                            candidate,
+                            None,
+                            run_id=run_id,
+                            reason=str(exc),
+                            response_kind="direct_timeout",
+                            query_method=DIRECT_LYRIC_QUERY_METHOD,
+                            evidence_extra={"kugou_mixsong_url": mixsong_url},
+                        )
+                    if direct_receipt is None:
+                        break
+                    response_kind = str(direct_receipt["evidence"].get("response_kind") or "")
+                    if response_kind not in _DIRECT_RETRYABLE_RESPONSE_KINDS or attempt >= retries:
+                        break
+                    time.sleep(3)
+            if direct_receipt is not None:
+                receipt = direct_receipt
+            elif not title or not artist:
                 receipt = lyric_receipt_for_match(
                     candidate,
                     None,
                     run_id=run_id,
-                    reason=last_error or "musicdl search failed",
-                    response_kind="network_or_parse_error",
+                    reason="queue row has no title or artist and no exact Kugou mix-song URL",
+                    response_kind="invalid_queue_row",
                 )
             else:
-                best = choose_match(
-                    found,
-                    title,
-                    artist,
-                    platform_track_key=expected_track_key,
-                )
-                if best is None:
+                found: list[Any] | None = None
+                last_error: str | None = None
+                for attempt in range(retries + 1):
+                    try:
+                        with item_timeout(item_timeout_seconds):
+                            found = musicdl_client().search(f"{title} {artist}").get("KugouMusicClient", [])
+                        break
+                    except ItemTimeoutError as exc:
+                        last_error = str(exc)
+                        break
+                    except Exception as exc:  # pragma: no cover - network-dependent
+                        last_error = str(exc)
+                        if attempt < retries:
+                            time.sleep(3)
+                if found is None:
                     receipt = lyric_receipt_for_match(
                         candidate,
                         None,
                         run_id=run_id,
-                        reason="no title/artist-compatible musicdl result carried the requested Kugou mix-song ID",
-                        response_kind="identity_mismatch",
+                        reason=last_error or "musicdl search failed",
+                        response_kind="network_or_parse_error",
                     )
                 else:
-                    receipt = lyric_receipt_for_match(candidate, best, run_id=run_id)
+                    best = choose_match(
+                        found,
+                        title,
+                        artist,
+                        platform_track_key=expected_track_key,
+                    )
+                    if best is None:
+                        receipt = lyric_receipt_for_match(
+                            candidate,
+                            None,
+                            run_id=run_id,
+                            reason="no title/artist-compatible musicdl result carried the requested Kugou mix-song ID",
+                            response_kind="identity_mismatch",
+                        )
+                    else:
+                        receipt = lyric_receipt_for_match(candidate, best, run_id=run_id)
         append_lyric_receipt(lyrics_receipt_path, receipt)
         progress["results"][identity] = {
             "query_status": "completed",

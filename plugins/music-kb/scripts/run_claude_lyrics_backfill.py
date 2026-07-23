@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Run the no-audio, exact-identity Kugou lyric backfill through Claude Code.
+"""Run the no-audio, exact-identity Kugou lyric backfill.
 
-This is the historical companion to ``run_claude_download.py``.  It reads the
+This is the historical companion to ``run_claude_download.py``. It reads the
 publisher master only to materialize unresolved canonical source tracks, then
-asks Claude Code to run the fixed worker in ``--lyrics-only`` mode.  It never
-rebuilds the audio inventory or downloads existing audio files.
+defaults to the fixed worker's direct MixSongID -> page hash -> lyric path.
+``--executor claude`` retains the older Claude Code chunk executor for a
+bounded compatibility retry. Neither mode rebuilds audio inventory or
+downloads existing audio files.
 """
 
 from __future__ import annotations
@@ -99,6 +101,29 @@ def progress_summary(rows: Sequence[Mapping[str, Any]], progress: Mapping[str, A
     }
 
 
+def compact_progress_summary(summary: Mapping[str, Any], *, sample_limit: int = 20) -> dict[str, Any]:
+    """Keep the run receipt reviewable when a bounded batch leaves a long tail."""
+
+    unattempted = list(summary.get("unattempted") or [])
+    return {
+        **dict(summary),
+        "unattempted": unattempted[:sample_limit],
+        "unattempted_count": len(unattempted),
+    }
+
+
+def compact_import_summary(summary: Mapping[str, Any], *, sample_limit: int = 20) -> dict[str, Any]:
+    """Keep receipt/state JSON bounded; the full per-row evidence is JSONL."""
+
+    results = list(summary.get("results") or [])
+    return {
+        **{key: value for key, value in summary.items() if key != "results"},
+        "result_count": len(results),
+        "result_sample": results[:sample_limit],
+        "results_truncated": len(results) > sample_limit,
+    }
+
+
 def _write_chunk_queue(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     path.write_text(
         "".join(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows),
@@ -153,11 +178,20 @@ def main() -> int:
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--claude-bin", default="claude")
     parser.add_argument(
+        "--executor",
+        choices=("direct", "claude"),
+        default="direct",
+        help=(
+            "direct queries each exact Kugou mix-song page locally (default); "
+            "claude preserves the older Claude Code chunk executor"
+        ),
+    )
+    parser.add_argument(
         "--worker-python",
         default=os.environ.get("MUSICDL_PYTHON", "python3"),
         help=(
-            "Python executable that already has musicdl installed. "
-            "Defaults to $MUSICDL_PYTHON or python3."
+            "Python executable for the worker. Direct mode needs only the standard library; "
+            "the Claude/musicdl fallback needs musicdl installed. Defaults to $MUSICDL_PYTHON or python3."
         ),
     )
     parser.add_argument("--model")
@@ -174,6 +208,13 @@ def main() -> int:
     parser.add_argument("--reuse-queue", action="store_true")
     parser.add_argument("--allow-incomplete", action="store_true")
     parser.add_argument("--item-timeout-seconds", type=float, default=60.0)
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.3,
+        help="Seconds to wait between exact lyric requests (default: 0.3)",
+    )
+    parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--proxy")
     args = parser.parse_args()
 
@@ -192,6 +233,10 @@ def main() -> int:
         raise ValueError("chunk-size must be positive")
     if args.item_timeout_seconds <= 0:
         raise ValueError("item-timeout-seconds must be positive")
+    if args.delay < 0:
+        raise ValueError("delay must be non-negative")
+    if args.retries < 0:
+        raise ValueError("retries must be non-negative")
     if args.max_items is not None and args.max_items < 1:
         raise ValueError("max-items must be positive when supplied")
 
@@ -216,6 +261,7 @@ def main() -> int:
                 "workspace": str(workspace),
                 "dry_run": args.dry_run,
                 "max_items": args.max_items,
+                "executor": args.executor,
                 "worker_python": args.worker_python,
             },
         ) as outputs:
@@ -260,6 +306,7 @@ def main() -> int:
                 "queued_for_attempt": len(selected_rows),
                 "chunk_size": args.chunk_size,
                 "chunks": len(chunks),
+                "executor": args.executor,
                 "reuse_queue": args.reuse_queue,
                 "receipt": str(receipt_path),
                 "progress": str(progress_path),
@@ -275,39 +322,16 @@ def main() -> int:
                 if args.proxy:
                     env["http_proxy"] = args.proxy
                     env["https_proxy"] = args.proxy
-                claude_command = [
-                    args.claude_bin,
-                    "-p",
-                    "--output-format",
-                    "json",
-                    "--permission-mode",
-                    "dontAsk",
-                    "--allowedTools",
-                    "Bash",
-                    "Read",
-                    "Monitor",
-                    "--add-dir",
-                    str(workspace),
-                ]
-                if args.model:
-                    claude_command.extend(["--model", args.model])
-                if args.max_budget_usd is not None:
-                    claude_command.extend(["--max-budget-usd", str(args.max_budget_usd)])
-
                 chunk_receipts: list[dict[str, Any]] = []
-                for chunk_index, chunk in enumerate(chunks, start=1):
-                    chunk_queue = work_dir / f"queue-{chunk_index:04d}.jsonl"
-                    prompt_path = work_dir / f"claude-prompt-{chunk_index:04d}.txt"
-                    stdout_path = work_dir / f"claude-stdout-{chunk_index:04d}.json"
-                    stderr_path = work_dir / f"claude-stderr-{chunk_index:04d}.log"
-                    _write_chunk_queue(chunk_queue, chunk)
-                    worker_values = [
+
+                def worker_values(worker_queue: Path, *, cache_dir: Path) -> list[str]:
+                    return [
                         args.worker_python,
                         str(worker_path),
                         "--queue",
-                        str(chunk_queue),
+                        str(worker_queue),
                         "--work-dir",
-                        str(work_dir / "musicdl-search-cache"),
+                        str(cache_dir),
                         "--progress",
                         str(progress_path),
                         "--log",
@@ -319,15 +343,21 @@ def main() -> int:
                         str(receipt_path),
                         "--item-timeout-seconds",
                         str(args.item_timeout_seconds),
+                        "--delay",
+                        str(args.delay),
+                        "--retries",
+                        str(args.retries),
                     ]
-                    worker_command = " ".join(shlex.quote(value) for value in worker_values)
-                    prompt = render_prompt(worker_command, chunk_index=chunk_index, chunk_total=len(chunks))
-                    prompt_path.write_text(prompt, encoding="utf-8")
+
+                if args.executor == "direct":
+                    direct_queue = work_dir / "direct-queue.jsonl"
+                    stdout_path = work_dir / "direct-stdout.json"
+                    stderr_path = work_dir / "direct-stderr.log"
+                    _write_chunk_queue(direct_queue, selected_rows)
                     completed = subprocess.run(
-                        claude_command,
+                        worker_values(direct_queue, cache_dir=work_dir / "direct-lyrics-cache"),
                         cwd=workspace,
                         env=env,
-                        input=prompt,
                         capture_output=True,
                         text=True,
                         timeout=args.timeout_seconds,
@@ -335,28 +365,97 @@ def main() -> int:
                     )
                     stdout_path.write_text(completed.stdout, encoding="utf-8")
                     stderr_path.write_text(completed.stderr, encoding="utf-8")
-                    chunk_progress = progress_summary(chunk, _load_progress(progress_path))
-                    chunk_receipt = {
-                        "chunk_index": chunk_index,
-                        "chunk_count": len(chunk),
-                        "queue": str(chunk_queue),
-                        "prompt": str(prompt_path),
-                        "stdout": str(stdout_path),
-                        "stderr": str(stderr_path),
-                        "claude_exit_code": completed.returncode,
-                        "worker_progress": chunk_progress,
-                    }
-                    chunk_receipts.append(chunk_receipt)
+                    direct_progress = progress_summary(selected_rows, _load_progress(progress_path))
+                    chunk_receipts.append(
+                        {
+                            "executor": "direct",
+                            "chunk_index": 1,
+                            "chunk_count": len(selected_rows),
+                            "queue": str(direct_queue),
+                            "stdout": str(stdout_path),
+                            "stderr": str(stderr_path),
+                            "worker_exit_code": completed.returncode,
+                            "worker_progress": direct_progress,
+                        }
+                    )
                     if completed.returncode != 0:
-                        raise RuntimeError(f"Claude Code lyric backfill chunk {chunk_index} failed")
-                    if chunk_progress["unattempted"]:
+                        raise RuntimeError("direct exact-source lyric backfill worker failed")
+                    if direct_progress["unattempted"]:
                         raise RuntimeError(
-                            f"lyric worker did not produce progress for chunk {chunk_index}: "
-                            f"{chunk_progress['unattempted']}"
+                            "direct lyric worker did not produce progress: "
+                            f"{direct_progress['unattempted']}"
                         )
+                else:
+                    claude_command = [
+                        args.claude_bin,
+                        "-p",
+                        "--output-format",
+                        "json",
+                        "--permission-mode",
+                        "dontAsk",
+                        "--allowedTools",
+                        "Bash",
+                        "Read",
+                        "Monitor",
+                        "--add-dir",
+                        str(workspace),
+                    ]
+                    if args.model:
+                        claude_command.extend(["--model", args.model])
+                    if args.max_budget_usd is not None:
+                        claude_command.extend(["--max-budget-usd", str(args.max_budget_usd)])
+                    for chunk_index, chunk in enumerate(chunks, start=1):
+                        chunk_queue = work_dir / f"queue-{chunk_index:04d}.jsonl"
+                        prompt_path = work_dir / f"claude-prompt-{chunk_index:04d}.txt"
+                        stdout_path = work_dir / f"claude-stdout-{chunk_index:04d}.json"
+                        stderr_path = work_dir / f"claude-stderr-{chunk_index:04d}.log"
+                        _write_chunk_queue(chunk_queue, chunk)
+                        worker_command = " ".join(
+                            shlex.quote(value)
+                            for value in worker_values(
+                                chunk_queue, cache_dir=work_dir / "musicdl-search-cache"
+                            )
+                        )
+                        prompt = render_prompt(worker_command, chunk_index=chunk_index, chunk_total=len(chunks))
+                        prompt_path.write_text(prompt, encoding="utf-8")
+                        completed = subprocess.run(
+                            claude_command,
+                            cwd=workspace,
+                            env=env,
+                            input=prompt,
+                            capture_output=True,
+                            text=True,
+                            timeout=args.timeout_seconds,
+                            check=False,
+                        )
+                        stdout_path.write_text(completed.stdout, encoding="utf-8")
+                        stderr_path.write_text(completed.stderr, encoding="utf-8")
+                        chunk_progress = progress_summary(chunk, _load_progress(progress_path))
+                        chunk_receipt = {
+                            "executor": "claude",
+                            "chunk_index": chunk_index,
+                            "chunk_count": len(chunk),
+                            "queue": str(chunk_queue),
+                            "prompt": str(prompt_path),
+                            "stdout": str(stdout_path),
+                            "stderr": str(stderr_path),
+                            "claude_exit_code": completed.returncode,
+                            "worker_progress": chunk_progress,
+                        }
+                        chunk_receipts.append(chunk_receipt)
+                        if completed.returncode != 0:
+                            raise RuntimeError(f"Claude Code lyric backfill chunk {chunk_index} failed")
+                        if chunk_progress["unattempted"]:
+                            raise RuntimeError(
+                                f"lyric worker did not produce progress for chunk {chunk_index}: "
+                                f"{chunk_progress['unattempted']}"
+                            )
 
-                worker_progress = progress_summary(rows, _load_progress(progress_path))
-                imported, coverage, validation = _import_receipts(database, receipt_path)
+                worker_progress = compact_progress_summary(
+                    progress_summary(rows, _load_progress(progress_path))
+                )
+                imported_raw, coverage, validation = _import_receipts(database, receipt_path)
+                imported = compact_import_summary(imported_raw)
                 summary.update(
                     {
                         "chunks": chunk_receipts,

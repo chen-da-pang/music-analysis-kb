@@ -28,8 +28,12 @@ Schema v7 stores one identity-bound lyric outcome for every canonical
 recording. `available` retains normalized ordinary text; `instrumental` and
 `platform_unavailable` retain exact-source evidence. Missing/pending lyrics
 block snapshots, peer publication, and audio cleanup. New songs receive their
-receipt from the existing CC/Kugou download worker; the one-time historical
-backfill uses the same worker in no-audio mode:
+receipt from the existing CC/Kugou download worker. The one-time historical
+backfill defaults to a local exact-source path: it verifies the public Kugou
+mix-song page's MixSongID, then uses that page's hash and duration to request
+lyrics without downloading audio or invoking a title/artist search. The older
+Claude Code executor remains available as `--executor claude` for a bounded
+compatibility retry:
 
 ```bash
 python3 scripts/run_claude_lyrics_backfill.py \
@@ -45,7 +49,9 @@ For legacy source rows, the chart database is used only as an exact public
 play-link to MixSongID bridge, never as a title/artist match. The real command
 writes receipts under `data/weekly_runs/<run-id>/lyrics-backfill/` and imports
 them into the supplied publisher master; it never re-downloads or scans
-existing audio/LRC files.
+existing audio/LRC files. If `musicdl` returns an empty or invalid lyric during
+a future audio download, the download worker retries that same exact-source
+path before recording a pending lyric result.
 
 The complete publisher-side weekly run is `music-kb weekly-run`. It records a
 run state and one receipt per atom under `data/weekly_runs/<run-id>/`, reads the
