@@ -60,7 +60,7 @@ def test_fallback_dry_run_does_not_touch_inventory_or_audio(tmp_path: Path) -> N
     assert not audio.exists()
 
 
-def test_prepare_fallback_queue_only_includes_unique_no_results(tmp_path: Path) -> None:
+def test_prepare_fallback_queue_only_includes_unique_retryable_statuses(tmp_path: Path) -> None:
     inventory = tmp_path / "inventory.json"
     inventory.write_text(
         json.dumps(
@@ -68,6 +68,7 @@ def test_prepare_fallback_queue_only_includes_unique_no_results(tmp_path: Path) 
                 "songs": [
                     {"identity_key": "kugou:1", "title": "Beyond the Dream", "artist": "DINO", "download": {"status": "no_results"}},
                     {"identity_key": "kugou:1", "title": "Beyond the Dream", "artist": "DINO", "download": {"status": "no_results"}},
+                    {"identity_key": "kugou:3", "title": "Retry", "artist": "Artist", "download": {"status": "failed"}},
                     {"identity_key": "kugou:2", "title": "Done", "artist": "Artist", "download": {"status": "downloaded"}},
                 ]
             }
@@ -76,13 +77,30 @@ def test_prepare_fallback_queue_only_includes_unique_no_results(tmp_path: Path) 
     )
     queue = tmp_path / "fallback.jsonl"
     result = subprocess.run(
-        [sys.executable, str(PREPARE), "--inventory", str(inventory), "--output", str(queue), "--profile", str(PROFILE)],
+        [sys.executable, str(PREPARE), "--inventory", str(inventory), "--output", str(queue), "--profile", str(PROFILE), "--statuses", "no_results,failed"],
         capture_output=True,
         text=True,
         check=True,
     )
     manifest = json.loads(result.stdout)
-    row = json.loads(queue.read_text(encoding="utf-8"))
-    assert manifest["queued"] == 1
-    assert manifest["unique_identity_keys"] == 1
-    assert row["artist_aliases"] == [["DINO", "디노"]]
+    rows = [json.loads(line) for line in queue.read_text(encoding="utf-8").splitlines()]
+    assert manifest["queued"] == 2
+    assert manifest["unique_identity_keys"] == 2
+    assert manifest["retry_statuses"] == ["no_results", "failed"]
+    assert manifest["status_counts"] == {"no_results": 1, "failed": 1}
+    assert rows[0]["artist_aliases"] == [["DINO", "디노"]]
+    assert rows[0]["retry_from_status"] == "no_results"
+    assert rows[1]["retry_from_status"] == "failed"
+
+
+def test_prepare_fallback_queue_rejects_nonretryable_status(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text('{"songs": []}\n', encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(PREPARE), "--inventory", str(inventory), "--output", str(tmp_path / "queue.jsonl"), "--profile", str(PROFILE), "--statuses", "no_results,downloaded"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "unsupported retry statuses: downloaded" in result.stderr

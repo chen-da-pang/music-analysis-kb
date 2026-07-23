@@ -19,8 +19,8 @@ from a completed CNB canonical delivery. The atom has four bounded stages:
    `KugouMusicClient`, updates the inventory after every attempt, and writes an
    identity-bound lyric receipt from the exact result's `SongInfo.lyric`.
 
-If the primary worker leaves songs as `no_results`, run the separate fallback
-atom with Claude Code. It consumes only an explicit no-results queue and runs
+If the primary worker leaves songs as `no_results` or `failed`, run the separate fallback
+atom with Claude Code. It consumes only an explicit retryable queue and runs
 `scripts/download_music_fallback.py` serially through the versioned
 `references/fallback-download-profile.json` sources (QQ, Migu, then Kuwo).
 Fallback matching is exact on normalized title and artist, with only aliases
@@ -135,7 +135,8 @@ automatically.
 ### Fallback invocation
 
 The fallback queue must contain only records whose current inventory status is
-`no_results`. Before a real run, use `--dry-run` and review the queue count.
+`no_results` or `failed`; it records the original status for audit. Before a
+real run, use `--dry-run` and review the queue count and status breakdown.
 Claude Code must run this fixed command and wait for its progress receipt:
 
 ```bash

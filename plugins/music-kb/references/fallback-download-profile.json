@@ -5,6 +5,10 @@
     "MiguMusicClient",
     "KuwoMusicClient"
   ],
+  "retry_statuses": [
+    "no_results",
+    "failed"
+  ],
   "source_timeout_seconds": 90,
   "minimum_size_bytes": 1000000,
   "minimum_duration_seconds": 60,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download explicitly queued Kugou no-results through alternate musicdl sources."""
+"""Download explicitly queued retryable Kugou records through alternate musicdl sources."""
 
 from __future__ import annotations
 
@@ -152,7 +152,14 @@ def main() -> int:
             progress["results"][identity] = {"status": "skipped_existing", "at": now_iso()}
             continue
         aliases = candidate.get("artist_aliases") or profile.get("artist_aliases", {}).get(f"{candidate.get('title')}\u0000{candidate.get('artist')}", [])
-        result: dict[str, Any] = {"status": "failed", "source": None, "error": None, "at": now_iso()}
+        retry_from_status = candidate.get("retry_from_status")
+        result: dict[str, Any] = {
+            "status": "failed",
+            "source": None,
+            "error": None,
+            "retry_from_status": retry_from_status,
+            "at": now_iso(),
+        }
         matched = None
         for source in sources:
             try:
@@ -173,7 +180,7 @@ def main() -> int:
         if matched is None:
             summary["no_results"] += 1
             result["status"] = "no_results"
-            item["download"] = {"status": "no_results", "retention": "retained", "path": None, "recorded_at": now_iso(), "fallback": True}
+            item["download"] = {"status": "no_results", "retention": "retained", "path": None, "recorded_at": now_iso(), "fallback": True, "retry_from_status": retry_from_status}
         else:
             source, song = matched
             try:
@@ -186,13 +193,13 @@ def main() -> int:
                 if path is None:
                     raise RuntimeError("musicdl returned no file path")
                 verified = verify_file(path, int(profile["minimum_size_bytes"]), float(profile["minimum_duration_seconds"]))
-                item["download"] = {"status": "downloaded", "retention": "retained", "path": str(path.resolve()), "file_present": True, "exists": True, "source": source, "matched_title": getattr(song, "song_name", None), "matched_artist": getattr(song, "singers", None), "recorded_at": now_iso(), **verified}
+                item["download"] = {"status": "downloaded", "retention": "retained", "path": str(path.resolve()), "file_present": True, "exists": True, "source": source, "matched_title": getattr(song, "song_name", None), "matched_artist": getattr(song, "singers", None), "recorded_at": now_iso(), "retry_from_status": retry_from_status, **verified}
                 summary["downloaded"] += 1
                 result.update({"status": "downloaded", "source": source, "path": str(path.resolve()), **verified})
             except Exception as exc:
                 summary["failed"] += 1
                 result["error"] = str(exc)
-                item["download"] = {"status": "failed", "retention": "retained", "path": None, "recorded_at": now_iso(), "error": str(exc), "fallback": True}
+                item["download"] = {"status": "failed", "retention": "retained", "path": None, "recorded_at": now_iso(), "error": str(exc), "fallback": True, "retry_from_status": retry_from_status}
         progress["results"][identity] = result
         inventory["generated_at"] = now_iso()
         inventory["counts"] = {"total": len(inventory.get("songs", []))}

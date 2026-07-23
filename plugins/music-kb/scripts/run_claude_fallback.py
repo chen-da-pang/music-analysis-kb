@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the no-results queue and execute the fixed fallback worker through Claude Code."""
+"""Prepare the retryable cross-platform queue and execute the fixed worker through Claude Code."""
 
 from __future__ import annotations
 
@@ -36,19 +36,33 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--operations-file", type=Path, default=Path(__file__).resolve().parents[1] / "references" / "validated-operations.json")
     parser.add_argument("--profile", type=Path, default=Path(__file__).resolve().parents[1] / "references" / "fallback-download-profile.json")
+    parser.add_argument("--retry-statuses", help="Override comma-separated retry statuses from the fallback profile")
     args = parser.parse_args()
     started_at = now_iso()
     workspace = args.workspace.expanduser().resolve()
     operations = args.operations_file.expanduser().resolve()
     profile = args.profile.expanduser().resolve()
     load_validated_operations(operations, required_atom="fallback_download")
+    profile_data = json.loads(profile.read_text(encoding="utf-8"))
+    retry_statuses = args.retry_statuses or ",".join(profile_data.get("retry_statuses", ["no_results", "failed"]))
     run_dir = workspace / "data" / "download_runs" / args.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     queue = run_dir / "fallback_queue.jsonl"
     inventory = workspace / "data" / "song_inventory.json"
     progress = run_dir / "fallback-progress.json"
     scripts = Path(__file__).resolve().parent
-    manifest = run_checked([sys.executable, str(scripts / "prepare_fallback_queue.py"), "--inventory", str(inventory), "--output", str(queue), "--profile", str(profile)], workspace, args.timeout_seconds)
+    manifest = run_checked([
+        sys.executable,
+        str(scripts / "prepare_fallback_queue.py"),
+        "--inventory",
+        str(inventory),
+        "--output",
+        str(queue),
+        "--profile",
+        str(profile),
+        "--statuses",
+        retry_statuses,
+    ], workspace, args.timeout_seconds)
     (run_dir / "fallback-queue-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     values = ["python3", str(scripts / "download_music_fallback.py"), "--queue", str(queue), "--inventory", str(inventory), "--work-dir", str(workspace / "music_downloads" / "KugouMusicClient"), "--progress", str(progress), "--run-id", args.run_id, "--profile", str(profile)]
     if args.dry_run:
@@ -57,7 +71,7 @@ def main() -> int:
     prompt = "\n".join([
         "你是音乐库 fallback 下载原子的 Claude Code 执行器。",
         "只运行下面固定命令；不得改脚本、队列、inventory，不得调用 kugou-cli 或旧 batch_download.py。",
-        "worker 会按 QQ、咪咕、酷我串行搜索；必须等待它退出。",
+        f"worker 只处理记录为 {','.join(manifest['retry_statuses'])} 的歌曲，并按 QQ、咪咕、酷我串行搜索；必须等待它退出。",
         command,
         "完成后只返回 worker 的 JSON summary。",
     ]) + "\n"
@@ -88,7 +102,7 @@ def main() -> int:
         "finished_at": now_iso(),
         "run_id": args.run_id,
         "atom": "fallback_download",
-        "inputs": {"inventory": str(inventory), "profile": str(profile), "queue": str(queue)},
+        "inputs": {"inventory": str(inventory), "profile": str(profile), "queue": str(queue), "retry_statuses": manifest["retry_statuses"]},
         "outputs": summary,
         "operations_file": str(operations),
         "operations_sha256": sha256_file(operations),
