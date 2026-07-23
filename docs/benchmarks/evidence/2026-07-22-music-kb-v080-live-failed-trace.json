@@ -1,0 +1,122 @@
+{
+  "schema_version": 2,
+  "scenario_id": "warm-rnb-love-v080-live-failed-2026-07-22",
+  "normalization_note": "Normalized from the complete isolated Codex JSONL event stream. The discovery facet list keeps the result-changing subset of 71 returned facets; command arguments, recommendation rows, final grouping, and usage came directly from the captured events.",
+  "base_discovery": {
+    "tool": "music_kb_discover",
+    "arguments": {
+      "tags": ["r&b", "warm", "love"]
+    },
+    "result": {
+      "match_count": 53,
+      "facet_counts": [
+        {"namespace": "genre", "name": "r&b", "count": 53},
+        {"namespace": "genre", "name": "jazz", "count": 7},
+        {"namespace": "genre", "name": "soul", "count": 7},
+        {"namespace": "lyric_theme", "name": "love", "count": 53},
+        {"namespace": "mood", "name": "warm", "count": 53},
+        {"namespace": "mood", "name": "melancholic", "count": 47},
+        {"namespace": "mood", "name": "romantic", "count": 33},
+        {"namespace": "mood", "name": "hopeful", "count": 22}
+      ],
+      "facet_scope": {
+        "kind": "all_matches",
+        "recording_count": 53,
+        "facet_count": 71,
+        "namespaces": ["genre", "mood", "lyric_theme", "vocal", "production", "tempo", "instrument", "rhythm", "drum"],
+        "per_namespace_target": 20,
+        "cutoff_ties_included": true,
+        "truncated_namespaces": []
+      }
+    }
+  },
+  "supported_directions": [
+    {"id": "emotional-warmth", "important": true},
+    {"id": "warm-melancholic", "important": true},
+    {"id": "soul-direction", "important": true}
+  ],
+  "selected_direction_ids": ["emotional-warmth", "warm-melancholic"],
+  "branch_recommendations": [
+    {
+      "call_id": "live2-hopeful",
+      "direction_id": "emotional-warmth",
+      "tool": "music_kb_recommend",
+      "arguments": {
+        "tags": ["r&b", "warm", "love", "hopeful"],
+        "limit": 6,
+        "offset": 0
+      },
+      "result_count": 6,
+      "match_count": 22,
+      "payload_bytes": 4474,
+      "result_fields": ["recording_id", "title", "version_label", "artists", "matched_tags", "representative_tags", "selection_basis", "listen_url"],
+      "result_recording_ids": [
+        "rec_kugou_babbdb1cfd31c336cd917dd3379a109014118ea6f98ed663d6f1a905877f4931",
+        "rec_kugou_5c0a844336078614cc3747a79da00cafe28c43de47a01fd4398f0ab3dc8351ea",
+        "rec_kugou_3ecbaa4b321465676f7b00d33d346748fbfd12c76791d718ba893cdc68f766fd",
+        "rec_kugou_a8a59bb48fbd81ed1a68a8b8630d96d8ca6f5b4addbefdbe9652563ee33d01ab",
+        "rec_kugou_ac9df3aa966349a536694f3cf2b533a8eb8fe404de51d8948b92401639aa8c00",
+        "rec_kugou_8910b365ad9edd5da2988c29e2ffed570e630eb2b85e759af1c17a1c296f95a8"
+      ],
+      "selection_scope": {"kind": "ranked_representative_results"},
+      "credible_results": true
+    },
+    {
+      "call_id": "live2-melancholic",
+      "direction_id": "warm-melancholic",
+      "tool": "music_kb_recommend",
+      "arguments": {
+        "tags": ["r&b", "warm", "love", "melancholic"],
+        "limit": 6,
+        "offset": 0
+      },
+      "result_count": 6,
+      "match_count": 47,
+      "payload_bytes": 4299,
+      "result_fields": ["recording_id", "title", "version_label", "artists", "matched_tags", "representative_tags", "selection_basis", "listen_url"],
+      "result_recording_ids": [
+        "rec_kugou_5334c0d7da2d6d83db6793dfee7473d642782cdb568eb3a0db2c494cf8dccbf3",
+        "rec_kugou_a8a59bb48fbd81ed1a68a8b8630d96d8ca6f5b4addbefdbe9652563ee33d01ab",
+        "rec_kugou_4e33d035e131d05f01d8c223529245bc3c97413283cc078267417a478fa04f3c",
+        "rec_kugou_ff634ca9cc668d377522c63e6c61e70f7b6c5f7c0473c705685ff8a2b765e35b",
+        "rec_kugou_6ac4c803b3d00104b6dda8cb516513768ea55b5bbd19a6e03aeb7897ac4fab9f",
+        "rec_kugou_627a97f29a92fce69dc16420b0fd22456e9520198499b66a366a941ef742e881"
+      ],
+      "selection_scope": {"kind": "ranked_representative_results"},
+      "credible_results": true
+    }
+  ],
+  "final_response": {
+    "layout": "grouped",
+    "grouped_direction_ids": ["emotional-warmth", "warm-melancholic"],
+    "reported_separately_direction_ids": [],
+    "ungrouped_recording_ids": [],
+    "grouped_recording_ids": {
+      "emotional-warmth": [
+        "rec_kugou_babbdb1cfd31c336cd917dd3379a109014118ea6f98ed663d6f1a905877f4931",
+        "rec_kugou_5c0a844336078614cc3747a79da00cafe28c43de47a01fd4398f0ab3dc8351ea",
+        "rec_kugou_3ecbaa4b321465676f7b00d33d346748fbfd12c76791d718ba893cdc68f766fd",
+        "rec_kugou_a8a59bb48fbd81ed1a68a8b8630d96d8ca6f5b4addbefdbe9652563ee33d01ab",
+        "rec_kugou_8910b365ad9edd5da2988c29e2ffed570e630eb2b85e759af1c17a1c296f95a8"
+      ],
+      "warm-melancholic": [
+        "rec_kugou_5334c0d7da2d6d83db6793dfee7473d642782cdb568eb3a0db2c494cf8dccbf3",
+        "rec_kugou_4e33d035e131d05f01d8c223529245bc3c97413283cc078267417a478fa04f3c",
+        "rec_kugou_ff634ca9cc668d377522c63e6c61e70f7b6c5f7c0473c705685ff8a2b765e35b",
+        "rec_kugou_6ac4c803b3d00104b6dda8cb516513768ea55b5bbd19a6e03aeb7897ac4fab9f",
+        "rec_kugou_627a97f29a92fce69dc16420b0fd22456e9520198499b66a366a941ef742e881"
+      ]
+    },
+    "exposed_internal_fields": [],
+    "followup_actions": ["再来一些", "换一批"],
+    "complete_description_offer": true
+  },
+  "normalization_evidence": {
+    "source": "/tmp/music-kb-codex.TIuBdw/live2.jsonl",
+    "capture_kind": "complete-codex-jsonl-event-stream",
+    "discovery_total_facets": 71,
+    "discovery_facets_preserved_here": 8,
+    "elapsed_seconds": 64,
+    "final_answer_preserved_in_raw_capture": true
+  }
+}

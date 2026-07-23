@@ -26,17 +26,25 @@ REQUIRED = {
     "README.md": "runner\n",
     "config/env.example": "AUDIO_ROOT=data/input\n",
     "scripts/run.py": "print('ok')\n",
+    "scripts/devgpu_run_manual_kugou_quality_rerun.sh": "#!/usr/bin/env bash\nexit 0\n",
+    "scripts/manual_kugou_quality_route.py": "print('manual route')\n",
+    "scripts/check_manual_gpu_gate.py": "print('gpu gate')\n",
+    "scripts/prepare_kugou_quality_rerun.sh": "#!/usr/bin/env bash\nexit 0\n",
+    "scripts/prepare_kugou_quality_rerun.py": "print('prepare quality')\n",
     "tests/test_runtime.py": "assert True\n",
 }
 
 
 class ExportRuntimeTests(unittest.TestCase):
     def _repo(
-        self, extras: dict[str, bytes | str] | None = None
+        self, extras: dict[str, bytes | str] | None = None, *, omit: str | None = None
     ) -> tuple[tempfile.TemporaryDirectory[str], Path, str]:
         temporary = tempfile.TemporaryDirectory()
         root = Path(temporary.name)
-        for path, content in {**REQUIRED, **(extras or {})}.items():
+        files = {**REQUIRED, **(extras or {})}
+        if omit is not None:
+            files.pop(omit)
+        for path, content in files.items():
             target = root / RUNNER_SUBTREE / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content if isinstance(content, bytes) else content.encode())
@@ -65,6 +73,14 @@ class ExportRuntimeTests(unittest.TestCase):
             hashlib.sha256(b"print('ok')\n").hexdigest(),
         )
         self.assertEqual((first / "scripts/run.py").read_bytes(), (second / "scripts/run.py").read_bytes())
+        for path in (
+            "scripts/devgpu_run_manual_kugou_quality_rerun.sh",
+            "scripts/manual_kugou_quality_route.py",
+            "scripts/check_manual_gpu_gate.py",
+            "scripts/prepare_kugou_quality_rerun.sh",
+            "scripts/prepare_kugou_quality_rerun.py",
+        ):
+            self.assertTrue((first / path).is_file(), path)
         self.assertEqual(first_provenance["source_repository"], GITHUB_REPOSITORY)
         self.assertEqual(first_provenance["source_commit"], commit)
 
@@ -102,6 +118,12 @@ class ExportRuntimeTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         with self.assertRaisesRegex(ExportError, "origin"):
             export_runtime(root, commit, Path(temporary.name) / "out")
+
+    def test_export_rejects_a_missing_manual_quality_route_file(self) -> None:
+        temporary, root, commit = self._repo(omit="scripts/check_manual_gpu_gate.py")
+        self.addCleanup(temporary.cleanup)
+        with self.assertRaisesRegex(ExportError, "check_manual_gpu_gate.py"):
+            export_runtime(root, commit, Path(temporary.name) / "out", require_published=False)
 
 
 if __name__ == "__main__":

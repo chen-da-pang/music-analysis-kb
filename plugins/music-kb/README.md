@@ -7,6 +7,71 @@ It intentionally contains **code, fixtures, and documentation only**. Do not
 put production SQLite files, lyrics, audio, SSH keys, or analysis exports in
 this directory or in Git.
 
+## Natural-language retrieval
+
+The retrieval Skill is designed for a first request in ordinary language. A
+user can say, for example, “我需要一些 R&B、温暖的、关于爱情的歌” or “找一些
+有氛围感的歌”，without learning canonical English tags or MCP syntax.
+
+For a clear request, the Skill retrieves first and briefly states how it
+understood the request. Broad subjective requests begin with
+`music_kb_discover`: SQLite counts every canonical match and returns
+`facet_counts` without serializing song records. Each supported direction then
+uses its own `music_kb_recommend` call. The backend hard-filters the requested
+conditions, orders matches by group representativeness, and adds secondary-tag
+diversity only among near-relevance rows. The model receives a compact page
+containing titles, artists, matching evidence, selection evidence, and listening
+links rather than full tag dumps and source metadata. Internal selection-basis
+codes are translated into short plain-language reasons rather than shown to the
+user.
+
+Two or three supported directions stay in separate answer groups; three
+important directions cannot be silently reduced to two or flattened into one
+song list. The most likely direction is shown first, and overlapping songs
+remain in each matching direction. A selected direction becomes the
+conversation context without silently triggering another retrieval. Large
+result sets start with a representative, expandable page; small sets can be
+shown in full. Stable `next_offset` continuation prevents “再来一些” and
+“换一批” from repeating the first page.
+
+The exact first-page quantity and the semantics of “再来一些” versus “换一批”
+now keep the selected direction: “再来一些” appends new results to the current
+list, while “换一批” replaces the displayed batch with new results from that
+same direction. Whenever a response offers an expandable representative set,
+it also tells the user in plain language:
+
+> 你可以这样继续：
+> - “再来一些”：保持这个方向，保留已展示的歌，再补充一批之前没展示过的歌。
+> - “换一批”：保持这个方向，换一批之前没展示过的新歌，替换当前展示；之前的结果仍留在对话记录里。
+
+The Skill must not invent a permanent default quantity or silently broaden a
+request. Every listening link shown to a user comes from the runtime
+`listen_url` returned by the read-only MCP path.
+
+If the current direction runs short, the Skill first delivers every remaining
+valid, not-yet-shown result. It then presents only evidence-backed choices to
+relax a less-central condition or try a meaningfully different adjacent
+direction. Nothing is broadened or searched on the user's behalf until they
+choose; the chosen path then becomes the direction used by later follow-ups.
+
+Candidate results stay light and visibly numbered. After a non-empty result,
+the Skill asks which songs the user wants complete descriptions for; the user
+can answer with sequence numbers, song titles, “前几首”, or “全部”, without
+having to choose an analysis field. These detail selections are separate from
+“再来一些” and “换一批”: the former expands already displayed songs, while the
+latter two retrieve more candidates in the current direction.
+
+Complete descriptions are loaded only for the selected songs. One to four can
+be delivered together; selections of five or more are automatically split into
+batches of at most four, and later batches are not fetched in advance. The
+selected order and current direction stay intact between batches. “完整描述”、
+“完整结果” and “完整 Music Flamingo 输出” return the unmodified canonical
+`analysis.raw_text` by default, even in a Chinese conversation. “中文翻译” and
+“摘要” are explicit, separately labelled modes: a translation keeps the source
+paragraph order and content, while a summary is never presented as the complete
+Music Flamingo output. The Skill does not add unsupported musical judgments or
+convert an analysis into a generation prompt.
+
 From this directory:
 
 ```bash
@@ -15,6 +80,13 @@ uv run music-kb --help
 uv run music-kb --json doctor
 uv run music-kb-mcp
 ```
+
+The bundled conversation metric pack reports static contract coverage by
+default. It deliberately marks runtime behavior as unmeasured unless
+`MUSIC_KB_CONVERSATION_TRACE` points to a normalized trace matching
+`evals/conversation-ux/trace-schema.json`; only then does it report separate
+direction discovery, compact ranked retrieval, branch execution, and grouped
+rendering behavior metrics.
 
 The publisher-only `music-kb publish push` command fans out an immutable
 release over SSH/rsync using a private peer TOML file; see

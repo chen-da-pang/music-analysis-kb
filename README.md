@@ -41,6 +41,14 @@ audit but are removed from client snapshots and never appear in MCP search.
 | `plugins/music-kb/skills/music-kb-audio-downloader` | Publisher-only upstream queue, inventory, and Claude Code/musicdl download workflow. |
 | Codex plugin | Packaging layer that ships the CLI/MCP/Skill together. It does not contain the database. |
 
+The retrieval Skill accepts ordinary-language requests, so a user can ask for
+“一些 R&B、温暖的、关于爱情的歌” without learning canonical tag names or MCP
+syntax. Clear requests are searched first and explained briefly; broad subjective
+requests can be split into at most three evidence-backed directions for the user
+to compare. Large result sets begin with a representative page and can be
+expanded, while small sets may be shown in full. The Skill preserves runtime
+listening URLs and does not silently invent a default quantity.
+
 ## Quick start (publisher)
 
 ```bash

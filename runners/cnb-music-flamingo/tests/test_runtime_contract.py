@@ -404,6 +404,121 @@ class CNBConfigurationContractTests(unittest.TestCase):
         self.assertIn("prepare_kugou_quality_rerun.sh", stages["Hydrate and rerun selected KuGou outputs"])
         self.assertIn("campaign_ledger_git.sh restore", stages["Restore isolated quality-rerun ledger"])
 
+    def test_vscode_is_manual_only_and_cannot_start_the_primary_campaign_runner(self) -> None:
+        workspace = self.load_config()["$"]["vscode"][0]
+        env = workspace["env"]
+        stages = {stage["name"]: stage.get("script", "") for stage in workspace["stages"]}
+        self.assertEqual(env["MUSIC_FLAMINGO_MANUAL_QUALITY_ROUTE"], "1")
+        self.assertEqual(env["MUSIC_FLAMINGO_MANUAL_GPU_NAME"], "L40")
+        self.assertEqual(str(env["MUSIC_FLAMINGO_MANUAL_GPU_MIN_FREE_MIB"]), "40000")
+        self.assertEqual(str(env["MUSIC_FLAMINGO_MANUAL_MAX_SELECTED_COUNT"]), "5")
+        self.assertEqual(str(env["MUSIC_FLAMINGO_REPETITION_PENALTY"]), "1.08")
+        self.assertEqual(str(env["MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE"]), "4")
+        for forbidden in (
+            "MUSIC_FLAMINGO_CAMPAIGN_ID",
+            "MUSIC_FLAMINGO_LEDGER_BRANCH",
+            "MUSIC_FLAMINGO_QUALITY_SELECTION_FILE",
+            "MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT",
+            "MUSIC_FLAMINGO_CAMPAIGN_MANIFEST_SHA256",
+        ):
+            self.assertNotIn(forbidden, env)
+        terminal_script = stages["Open manual-only Dev GPU terminal"]
+        self.assertNotIn("devgpu_run_kugou_campaign.sh", terminal_script)
+        self.assertNotIn(
+            "bash scripts/devgpu_run_manual_kugou_quality_rerun.sh",
+            [line.strip() for line in terminal_script.splitlines()],
+        )
+
+        manual = (REPO_ROOT / "scripts/devgpu_run_manual_kugou_quality_rerun.sh").read_text(encoding="utf-8")
+        self.assertNotIn("prepare_kugou_campaign_shard.sh", manual)
+        self.assertNotIn("devgpu_run_kugou_campaign.sh", manual)
+        self.assertIn("manual_kugou_quality_route.py", manual)
+        self.assertIn("prepare_kugou_quality_rerun.sh", manual)
+        self.assertIn('[[ "$repetition_penalty" == "1.08" ]]', manual)
+        self.assertIn('[[ "$no_repeat_ngram_size" == "4" ]]', manual)
+        self.assertIn("--repetition-penalty \"$repetition_penalty\"", manual)
+        self.assertIn("--no-repeat-ngram-size \"$no_repeat_ngram_size\"", manual)
+        self.assertLess(
+            manual.index('[[ "$repetition_penalty" == "1.08" ]]'),
+            manual.index("manual_gpu_gate_before_hydrate.json"),
+        )
+        self.assertLess(
+            manual.index("manual_gpu_gate_before_hydrate.json"),
+            manual.index("prepare_kugou_quality_rerun.sh"),
+        )
+        self.assertLess(
+            manual.index("prepare_kugou_quality_rerun.sh"),
+            manual.index("manual_gpu_gate_pre_model.json"),
+        )
+
+    def test_manual_quality_shell_rejects_wrong_controls_before_gpu_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            shell = scripts / "devgpu_run_manual_kugou_quality_rerun.sh"
+            shell.write_text(
+                (REPO_ROOT / "scripts" / shell.name).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            shell.chmod(0o755)
+            (scripts / "music_flamingo_run_context.py").write_text(
+                "from pathlib import Path\n"
+                "import sys\n"
+                f"root = Path({str(root)!r})\n"
+                "if sys.argv[1] == 'print-dir':\n"
+                "    print(root / 'out')\n",
+                encoding="utf-8",
+            )
+            (scripts / "manual_kugou_quality_route.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+            marker = root / "gpu-gate-called"
+            (scripts / "check_manual_gpu_gate.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('called', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            base_env = os.environ | {
+                "MUSIC_FLAMINGO_MANUAL_QUALITY_ROUTE": "1",
+                "MUSIC_FLAMINGO_CAMPAIGN_ID": "campaign-a",
+                "MUSIC_FLAMINGO_QUALITY_SOURCE_MANIFEST": "input/manifest.jsonl",
+                "MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT": "input",
+                "MUSIC_FLAMINGO_QUALITY_SELECTION_FILE": "selection.txt",
+                "MUSIC_FLAMINGO_CAMPAIGN_MANIFEST_SHA256": "0" * 64,
+                "MUSIC_FLAMINGO_QUALITY_SOURCE_EXPECTED_COUNT": "1",
+                "MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT": "1",
+                "MUSIC_FLAMINGO_LEDGER_BRANCH": "campaign-results/campaign-a-quality-rerun-l40-probe-1",
+                "MUSIC_FLAMINGO_EXECUTION_PROFILE": "nvidia-l40/full_precision/bfloat16",
+                "MUSIC_FLAMINGO_DURABLE_LEDGER_REQUIRED": "1",
+                "MUSIC_FLAMINGO_LEDGER_CHECKPOINT_EVERY": "1",
+            }
+            for controls, expected_error in (
+                (
+                    {
+                        "MUSIC_FLAMINGO_REPETITION_PENALTY": "1.07",
+                        "MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE": "4",
+                    },
+                    "MUSIC_FLAMINGO_REPETITION_PENALTY=1.08",
+                ),
+                (
+                    {
+                        "MUSIC_FLAMINGO_REPETITION_PENALTY": "1.08",
+                        "MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE": "3",
+                    },
+                    "MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE=4",
+                ),
+            ):
+                with self.subTest(controls=controls):
+                    result = subprocess.run(
+                        ["bash", "scripts/devgpu_run_manual_kugou_quality_rerun.sh"],
+                        cwd=root,
+                        text=True,
+                        capture_output=True,
+                        env=base_env | controls,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn(expected_error, result.stderr)
+                    self.assertFalse(marker.exists(), result.stdout + result.stderr)
+
 
 class ArtifactRetentionContractTests(unittest.TestCase):
     def test_remote_batch_routes_package_and_upload_run_evidence(self) -> None:

@@ -34,13 +34,55 @@ class ReadOnlyMusicKB:
         artist: str = "",
         limit: int = 10,
     ) -> dict[str, Any]:
-        results = self._call(
-            lambda repository: repository.search(
+        result = self._call(
+            lambda repository: repository.search_with_facets(
                 query=query, tags=tags or [], title=title, artist=artist, limit=limit
             )
         )
-        assert isinstance(results, list)
-        return {"results": results, "count": len(results), "limit_applied": min(max(int(limit), 1), 50)}
+        assert isinstance(result, dict)
+        return result
+
+    def discover(
+        self,
+        *,
+        query: str = "",
+        tags: list[str] | None = None,
+        title: str = "",
+        artist: str = "",
+    ) -> dict[str, Any]:
+        result = self._call(
+            lambda repository: repository.discover(
+                query=query,
+                tags=tags or [],
+                title=title,
+                artist=artist,
+            )
+        )
+        assert isinstance(result, dict)
+        return result
+
+    def recommend(
+        self,
+        *,
+        query: str = "",
+        tags: list[str] | None = None,
+        title: str = "",
+        artist: str = "",
+        limit: int = 5,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        result = self._call(
+            lambda repository: repository.recommend(
+                query=query,
+                tags=tags or [],
+                title=title,
+                artist=artist,
+                limit=limit,
+                offset=offset,
+            )
+        )
+        assert isinstance(result, dict)
+        return result
 
     def resolve_title_artist(self, *, title: str, artist: str = "", limit: int = 10) -> dict[str, Any]:
         return self.search(title=title, artist=artist, limit=limit)
@@ -83,7 +125,7 @@ def create_server(database: str | Path | None = None) -> Any:
 
     @server.tool(
         name="music_kb_search",
-        description="Search canonical Music Flamingo analyses by text, exact tags/aliases, title, and artist. Results are bounded and read-only.",
+        description="Search canonical Music Flamingo analyses by text, exact tags/aliases, title, and artist. Results are bounded and include canonical-tag counts scoped only to the returned rows.",
     )
     def music_kb_search(
         query: str = "",
@@ -93,6 +135,39 @@ def create_server(database: str | Path | None = None) -> Any:
         limit: int = 10,
     ) -> dict[str, Any]:
         return api.search(query=query, tags=tags, title=title, artist=artist, limit=limit)
+
+    @server.tool(
+        name="music_kb_discover",
+        description="Count every matching canonical analysis and return tag co-occurrence facets without serializing song records.",
+    )
+    def music_kb_discover(
+        query: str = "",
+        tags: list[str] | None = None,
+        title: str = "",
+        artist: str = "",
+    ) -> dict[str, Any]:
+        return api.discover(query=query, tags=tags, title=title, artist=artist)
+
+    @server.tool(
+        name="music_kb_recommend",
+        description="Return a compact stable page of exact matches ordered by group representativeness with bounded secondary-tag diversity.",
+    )
+    def music_kb_recommend(
+        query: str = "",
+        tags: list[str] | None = None,
+        title: str = "",
+        artist: str = "",
+        limit: int = 5,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        return api.recommend(
+            query=query,
+            tags=tags,
+            title=title,
+            artist=artist,
+            limit=limit,
+            offset=offset,
+        )
 
     @server.tool(
         name="music_kb_resolve_title_artist",

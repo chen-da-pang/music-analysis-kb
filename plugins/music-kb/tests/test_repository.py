@@ -22,6 +22,73 @@ def test_rare_tag_alias_and_identity_alias_are_recalled(master_database) -> None
         assert artist[0]["artists"] == ["示例乐队"]
 
 
+def test_tag_facet_counts_are_bounded_canonical_and_stably_sorted(master_database) -> None:
+    payloads = [
+        {
+            "recording": {"id": "rec_facet_a", "title": "Facet A"},
+            "artists": [{"name": "Facet Artist"}],
+            "analysis": {
+                "raw_text": "facet fixture a",
+                "summary": "facet fixture",
+                "quality_state": "passed",
+            },
+            "tags": [
+                {"namespace": "genre", "name": "soul"},
+                {"namespace": "mood", "name": "warm"},
+            ],
+        },
+        {
+            "recording": {"id": "rec_facet_b", "title": "Facet B"},
+            "artists": [{"name": "Facet Artist"}],
+            "analysis": {
+                "raw_text": "facet fixture b",
+                "summary": "facet fixture",
+                "quality_state": "passed",
+            },
+            "tags": [
+                {"namespace": "genre", "name": "soul"},
+                {"namespace": "mood", "name": "warm"},
+            ],
+        },
+        {
+            "recording": {"id": "rec_facet_c", "title": "Facet C"},
+            "artists": [{"name": "Facet Artist"}],
+            "analysis": {
+                "raw_text": "facet fixture c",
+                "summary": "facet fixture",
+                "quality_state": "passed",
+            },
+            "tags": [
+                {"namespace": "genre", "name": "ambient"},
+                {"namespace": "genre", "name": "rhythm and blues"},
+                {"namespace": "mood", "name": "calm"},
+            ],
+        },
+    ]
+    with MusicKBRepository(master_database) as repository:
+        repository.import_analyses(payloads)
+        facets = repository.tag_facet_counts(
+            ["rec_facet_a", "rec_facet_a", "rec_facet_b", "rec_facet_c"],
+            per_namespace_limit=1,
+        )
+        two_per_namespace = repository.tag_facet_counts(
+            ["rec_facet_a", "rec_facet_b", "rec_facet_c"],
+            per_namespace_limit=2,
+        )
+
+    assert facets == [
+        {"namespace": "genre", "name": "soul", "count": 2},
+        {"namespace": "mood", "name": "warm", "count": 2},
+    ]
+    assert all(item["namespace"] not in {"title", "artist"} for item in facets)
+    assert two_per_namespace == [
+        {"namespace": "genre", "name": "soul", "count": 2},
+        {"namespace": "genre", "name": "ambient", "count": 1},
+        {"namespace": "mood", "name": "warm", "count": 2},
+        {"namespace": "mood", "name": "calm", "count": 1},
+    ]
+
+
 def test_replacement_keeps_one_canonical_revision_and_hides_history(master_database, fixture_payload) -> None:
     replacement = copy.deepcopy(fixture_payload)
     replacement["analysis"]["raw_text"] = "Replacement canonical analysis: spacious pads and a compact electronic-pop hook."

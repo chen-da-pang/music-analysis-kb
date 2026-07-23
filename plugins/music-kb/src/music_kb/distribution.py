@@ -123,7 +123,7 @@ def _current_plugin_version() -> str:
     try:
         return package_version("music-kb")
     except PackageNotFoundError:
-        return "0.8.0"
+        return "0.8.2"
 
 
 def _identity_file(value: str | None, *, context: str) -> Path | None:

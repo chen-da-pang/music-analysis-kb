@@ -137,6 +137,16 @@ def test_sql_search_avoids_large_python_in_clause_for_common_tag(tmp_path: Path)
         )
         assert len(results) == 50
         assert all(item["title"].startswith("scale title") for item in results)
+        discovered = repository.discover(tags=["scale common"])
+        assert discovered["match_count"] == 1_100
+        assert "results" not in discovered
+        first_page = repository.recommend(tags=["scale common"], limit=5)
+        second_page = repository.recommend(tags=["scale common"], limit=5, offset=5)
+        assert first_page["match_count"] == 1_100
+        assert first_page["count"] == second_page["count"] == 5
+        assert {
+            item["recording_id"] for item in first_page["results"]
+        }.isdisjoint(item["recording_id"] for item in second_page["results"])
         assert repository.validate()["valid"] is True
 
 
