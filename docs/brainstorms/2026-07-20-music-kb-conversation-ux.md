@@ -797,6 +797,111 @@ v0.7.4 的文字契约仍留下两个可执行逃逸口：`at most three` 允许
 本修复没有修改 SQLite Schema、快照内容、周更、CNB、peer、音频或提示词流程；MCP / CLI
 仅增加只读搜索返回字段。Draft PR #46 继续保持 Draft，不自动合并。
 
+## v0.8.0 直接决策与实施记录：后端代表性选择 + 紧凑检索
+
+### 新发现的问题
+
+v0.7.5 的真实回答虽然保留了三个方向，但没有回答“为什么展示的是这几首”。现有
+`music_kb_search` 只保证标签条件命中，SQL 最终按 `updated_at DESC, recording_id`
+返回；它没有语义相关度分数。真实验收的三个分组又与三个分支返回的前四行完全一致，
+因此展示顺序实际受最近入库 / 更新顺序影响，不能证明这些歌比其余命中结果更符合。
+
+同时，基础查询和三个分支把 137 条次完整记录交给模型，包含完整 tags、source links、
+recording ID 等字段。四次旧 payload 合计 165,201 bytes，后续模型回合继续携带这些内容，
+形成明显的上下文放大。
+
+### 用户批准的直接决定
+
+用户明确停止继续头脑风暴，要求直接给出最佳改法并批准实施。采用以下边界：
+
+- 严格条件匹配由后端完成；默认排序不再使用更新时间。
+- 所有命中歌曲先按组内代表性排序；只有与当前高代表性结果接近时，才允许提升一个
+  不同的次级标签侧重。多样性不能把明显离群结果带进首屏。
+- 模型不再读取 50 条完整记录后临场挑歌，也不得把旧搜索的前几行称为“最佳”。
+- 方向发现、紧凑推荐、用户选中后的完整描述分为三个只读层次。
+
+### 已实现的数据流
+
+1. `music_kb_discover` 对完整 canonical 命中集合计算 `match_count` 和 facets，不返回歌曲
+   records；`facet_scope.kind=all_matches` 明确统计范围。
+2. `music_kb_recommend` 返回稳定的代表性分页。每条只包含歌名、艺人、硬匹配标签、
+   代表性 / 次级覆盖标签、选择依据和试听链接；完整 tag dump、summary、source links、
+   canonical text 均不进入首轮载荷。
+3. `next_offset` 驱动“再来一些 / 换一批”，后续页不重复首屏。
+4. `music_kb_get_canonical_analysis` 仍只在用户选择歌曲后按最多四首一批读取完整描述。
+
+### 正式快照验证
+
+只读快照 `music-kb-2026w29-kugou-431-final` 的基础条件 `r&b + warm + love` 实际有
+53 条完整命中；旧流程只看最近返回的 50 条。新 discovery 不传歌曲记录，仍能看到
+`romantic 33`、`melancholic 47`、`soul 7` 等完整方向证据。
+
+同一场景的新四次 payload 为 3,258、3,551、3,592、3,589 bytes，合计 13,990 bytes；
+旧四次为 58,754、39,966、55,877、10,604 bytes，合计 165,201 bytes。返回载荷下降
+约 91.5%。同进程 30 次中位数：discovery 14.763 ms、五首 recommendation 33.263 ms、
+旧 50-row search 11.410 ms；后端增加约 22 ms，换取稳定排序和约 151 KB 的首轮载荷削减。
+
+首两页各五首没有重复；相同参数重复调用输出完全一致。插件全量测试当前为 199 passed。
+本次没有修改 SQLite Schema、快照内容、标签器、周更、CNB、peer、音频或提示词流程；
+Draft PR #46 继续保持 Draft，等待重新加载后的真实模型对话验收。
+
+## v0.8.0 真实模型验收与回归守卫（不重新开启脑爆）
+
+本节只记录已批准实现的真实验收证据和修复，不增加新的用户端默认决策。
+
+### 第一次隔离真实运行：同时暴露两个行为失败
+
+discovery 在正式只读快照上返回 53 条完整命中和 71 个 facets，其中
+`hopeful=22`、`melancholic=47`、`soul=7`。实际模型只建立并检索了前两个方向，
+再次因为 Soul 数量较少而静默丢失一个会改变用户选择的真实方向。
+
+同一运行的两次 recommendation 各显式返回 6 首，最终每组却只展示 5 首。模型基于歌名
+删掉《跳楼机》，并为了跨组去重删掉《麦恩莉》。这不是后端 top-5，而是模型在已经排好的
+页面上又做了一次无证据 cutoff。该 trace 经扩展后的 runtime validator 评分为 7/9，
+稳定失败于方向完整性和页面保真。
+
+### 采用的实现级守卫
+
+- 推荐前先建立 2–3 个完整方向的 ledger，再为每个条目执行一次 recommendation；禁止从一个
+  未完成的方向列表开始调用。
+- 对已经用户确认的 `R&B + warm + love` 回归场景，当 `hopeful / melancholic / soul`
+  都是非零 facet 时，三个方向全部检索。该守卫不扩张成其他请求的固定分类。
+- discovery 保留 namespace cutoff 上的同频并列 facets，避免一个重要方向只因字段排序而消失。
+- 用户没有指定数量时不传 recommendation `limit`，使用后端当前默认页。后端返回多少，
+  最终对应组就按原序展示多少；禁止标题直觉删除、重排或跨组静默去重。
+- 最终回答前做机械 preflight：方向数、独立调用数和分组数必须一致；每组可见歌曲必须
+  与返回页 IDs 及顺序完全一致；`recording_id` 和 `selection_basis` 不对用户暴露。
+- 当 MCP 函数不在工具列表时，直接使用已知的只读 CLI `doctor / discover / recommend`；
+  不再探测 MCP resources、仓库源码或 `--help`。
+- 结果不足、追加 / 换批、详情展开和纠错的规则移入 deferred `references/followups.md`，
+  普通首轮不加载。
+
+### 最终空工作目录真实验收
+
+路由修复后的第一次空目录运行已经做到单次 Skill 读取，并直接执行
+`doctor -> discover -> 三个 recommend -> 回答`；没有 MCP resource probe、源码扫描、help
+试错或重复推荐。它仍暴露两个用户可见缺口：跨组重复没有说明“也符合哪个方向”，试听地址
+是裸 URL。检索和分组虽正确，但该回答不能作为最终用户端通过样本。
+
+在不重新开启脑爆的前提下，实施继续按 Round 10 已批准的重叠展示原则收口：每个跨组重复
+必须追加简短“也符合：……”说明；每首歌必须把 runtime `listen_url` 渲染为 Markdown 链接。
+这两项同时进入静态 contract、trace schema 和 runtime validator，任何一项缺失都会使
+`music-kb-behavior-rendering-contract` 失败。
+
+最终运行继续使用临时 `CODEX_HOME` 和空工作目录，模型无法读取仓库源码，也没有加载 deferred
+follow-up 文件。真实答案完整返回“明亮心动 / 温柔微醺伤感 / Soul 柔暖质感”三组，每组 5 首，
+顺序与后端默认页完全一致。《麦恩莉》和《此刻最好的都在身边》在它们真实命中的两组中都被保留，
+两边共出现 4 个重叠标注；15 个试听地址全部是 Markdown 链接。
+
+最终 runtime behavior 为 16/16，静态契约与真实行为合计 32/32 checks 通过。实际用量为
+146,215 input（其中 123,776 cached）、1,681 output、149 reasoning，63 秒。相比 v0.7.5 的
+390,859 input 下降约 62.6%。Plugin Eval 的静态 Skill 评估为 A / 100、low risk；加入这一份
+宿主 observed usage 后仍为 C / 81、high risk。两者分别回答“Skill 是否紧凑清晰”和“整个宿主
+轮次实际多重”，不得互相替代。
+
+完整方法、载荷对比和证据边界见
+[代表性紧凑检索验收](../benchmarks/2026-07-22-music-kb-ranked-compact-retrieval.md)。
+
 ## 记录规则
 
 - 每轮讨论追加一个 `Round N`，不覆盖历史决定。

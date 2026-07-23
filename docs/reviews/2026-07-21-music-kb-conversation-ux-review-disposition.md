@@ -2,7 +2,7 @@
 
 日期：2026-07-22（补充记录）
 
-状态：Round 34 后的 review 修复已在插件 v0.7.5 实施于 Draft PR #46 分支；尚未合并
+状态：v0.7.5 的对话契约修复和 v0.8.0 的代表性紧凑检索已实施于 Draft PR #46 分支；尚未合并
 
 范围：`plugins/music-kb/skills/music-kb/SKILL.md` 的用户端检索和对话流程，以及为这套流程编写的 conversation-UX metric pack。
 
@@ -10,17 +10,23 @@
 
 ## 一句话结论
 
-当前 review 发现的分支遗漏、分支平铺和静态指标误标问题已在 v0.7.5 修复。详情展开仍采用
-单批最多 4 首并跟随用户语言忠实呈现；真实模型复测因 `codex exec` 取消 MCP 调用而未测量，
-因此不再用静态 100% 声称行为通过。
+v0.7.5 修复了分支遗漏、分支平铺和静态指标误标；v0.8.0 进一步把方向发现与候选列表分开，
+用后端代表性排序和紧凑投影取代 50-row 完整记录。最终空目录真实复测为 16/16 runtime checks；
+每个有证据的方向、后端返回页和最终分组一一对应，跨组重叠与试听链接也满足用户可见契约。
+实际 input 比 v0.7.5 样本下降约 62.6%，但 observed-usage 仍为 C / 81、high risk，因此只声称
+当前功能验收通过，不声称已建立稳定性能基线。
 
 ## 证据边界
 
 ### 用户端 Skill（本次 review 的目标）
 
-- `plugin-eval analyze` 目标为 `plugins/music-kb/skills/music-kb`：A / 95、0 fail；有 1 个静态 invoke-budget warning，覆盖率产物缺失仍为 info。
-- `conversation-ux` custom metric pack：12/12 checks 通过，coverage 100%，failed checks 0。
-- 当前 Skill 的静态检查覆盖：分支上限和排序、分支选择后的上下文延续、最小修复问题、渐进式结果展示、追加 / 换批方向和展示语义、用户可见的后续动作指引、证据和 `listen_url` 边界、未决语义不得被写成固定默认值，以及自然语言入口示例。
+- `plugin-eval analyze` 目标为 `plugins/music-kb/skills/music-kb`：不带 observed usage 时 A / 100、low risk、0 fail；
+  主 Skill invoke 估算 2,178 tokens，deferred follow-up 为 1,431 tokens。
+- `conversation-ux` custom metric pack：16/16 静态契约和 16/16 真实行为全部通过，合计 32/32，
+  coverage 100%，failed checks 0。
+- 加入最终真实样本后为 C / 81、high risk；观测到 146,215 input（其中 123,776 cached）、
+  1,681 output、149 reasoning 和 63 秒。这是整个 Codex 宿主会话，不等同于插件载荷。
+- 当前 Skill 的静态检查覆盖：分支上限和排序、分支选择后的上下文延续、最小修复问题、渐进式结果展示、追加 / 换批方向和展示语义、用户可见的后续动作指引、证据和 `listen_url` 边界、Markdown 链接与跨组重叠标注、未决语义不得被写成固定默认值，以及自然语言入口示例。
 - 真实校准请求和用户确认记录在 [头脑风暴记录](../brainstorms/2026-07-20-music-kb-conversation-ux.md) 的 Round 17；它证明了“温暖”需要至少区分情绪方向和音色方向，但不把这三个方向写成通用分类表。
 
 ### 整个插件包（不作为本次 UX 结论）
@@ -63,9 +69,14 @@
 | R24 | 已检索方向最终仍可能平铺成一张歌单 | 已解决 | 最终组数必须与有效分支一致；每个有效分支单独成组，禁止重新合并。 |
 | R25 | 搜索结果缺少紧凑共现证据 | 已解决 | MCP / CLI 搜索新增当前 bounded 返回行的 canonical `facet_counts`；明确排除标题、艺人和 aliases。 |
 | R26 | 12/12 静态覆盖率容易被理解成真实行为通过 | 已解决 | 指标改称 conversation-contract coverage；无 trace 时行为为 unmeasured，只有显式 trace 才产生独立 behavior metrics。 |
-| R27 | 新鲜真实模型复测 | 已补测，核心行为通过 | 最小新鲜环境中的真实回答保留三个方向、三次独立检索并分组三组输出；runtime behavior 5/5、100%。完整证据与 capture 边界见真实对话验收报告。 |
-| R28 | 真实首轮检索的端到端 token 与等待过重 | 阻塞 Ready，待讨论 | 单样本约 163 秒、390,859 input tokens（350,976 cached）；Plugin Eval + observed usage 为 C / 77、high risk。优先讨论“50-row 扫描 + 紧凑返回投影”，本轮不直接修改。 |
+| R27 | 新鲜真实模型复测 | 已补测，核心行为通过 | 最小新鲜环境中的真实回答保留三个方向、三次独立检索并分组三组输出；最终 runtime behavior 16/16、100%。完整证据与 capture 边界见真实对话验收报告。 |
+| R28 | 真实首轮检索的端到端 token 与等待过重 | 实现层阻塞已解，端到端继续观察 | v0.8.0 实施 all-match discovery + 紧凑代表性页；当前载荷比旧流程下降约 90.6%，真实 input 下降约 62.6%，最终为 63 秒。但单样本 Plugin Eval 仍为 C / 81，不声称性能基线已完成。 |
 | R29 | 多分支首轮后的“这个方向”引用可能含糊 | 非阻塞观察 | 三组同时展示时没有紧接着要求用户选定组；单独回复“再来一些”可能缺少当前方向。先纳入后续真实样本，不因此否定本次分组行为通过。 |
+| R30 | 模型在后端代表性页上二次删歌、重排或跨组去重 | 已解决 | 用户未指定数量时由后端默认页决定当前数量；最终组必须与后端页 IDs 和顺序完全一致，重叠歌在每个真实匹配组中保留并标注。 |
+| R31 | 非 MCP 环境中的源码探测、重读 Skill 和 help 试错放大宿主轮次 | 已解决 | 工具列表无 `music_kb_status` 时立即走已知只读 CLI；不探测 MCP resources、源码或 help，除非真实参数错误。 |
+| R32 | 普通首轮不必要加载结果不足、追加、详情和纠错全部后续规则 | 已解决 | 将后续契约移入 `references/followups.md`，只在对应回合加载；当前首轮真实验收未加载该文件。 |
+| R33 | 跨组重复虽保留，但用户看不出为何重复 | 已解决 | 每个相关分组都保留记录，并在条目旁用“也符合：……”说明另一方向；最终真实回答的两个重复录音在两边共出现 4 个标注。 |
+| R34 | 裸试听 URL 降低可扫读性和可点击性 | 已解决 | 每首歌使用 runtime `listen_url` 生成 Markdown 链接；最终真实回答 15/15 均为可点击链接。 |
 
 ## Round 31 追加决策：候选层 → 详情层
 
@@ -159,11 +170,34 @@ benchmark 边界处理，不再新增 UX 议题；本轮脑爆正式结束。
 - 当前证据指向四次最多 50-row 的完整结果载荷及多轮上下文累积，而不是 facets 的数据库
   计算成本。是否加入“扫描范围 / 返回投影”分离需先讨论，本轮未修改实现。
 
+## v0.8.0 代表性紧凑检索与最终验收
+
+- `music_kb_discover` 对完整 canonical 命中集计算 `match_count` 和 facets，不返回歌曲 records；
+  `music_kb_recommend` 返回后端代表性排序的紧凑页，并用 `next_offset` 稳定继续。
+- 当前真实场景的 discovery + 三个分支载荷为 15,544 bytes，比 v0.7.5 四次完整记录的
+  165,201 bytes 下降约 90.6%。后端微基准显示这一取舍只增加约几十毫秒，不是端到端
+  63 秒的主要来源。
+- 第一次 v0.8.0 隔离运行真实失败：漏掉 `soul=7` 方向，并把每组后端返回的 6 首自行删成
+  5 首。扩展后 validator 为 7/9，失败项正是方向完整性和页面保真。
+- 回归修复增加方向 ledger、当前已确认场景的三方向守卫、后端默认页以及最终机械 preflight。
+  不再先请求大页再由模型按标题或跨组去重做二次 top-5 cutoff。
+- 非 MCP 环境改为直接走已知只读 CLI fallback，普通首轮不加载 deferred follow-up 规则。
+- 最终真实运行在空工作目录中完成：三个方向、三次独立 recommendation、每组 5 首与后端页
+  原序一致，跨组重复保留且双向标注，15 个试听地址均为 Markdown 链接，后续指引和完整描述
+  入口都存在。runtime behavior 16/16；静态与真实行为合计 32/32 custom checks。
+- Plugin Eval 不带 observed usage 时为 A / 100、low risk；带最终单样本时为 C / 81、high risk，
+  `observed/static active input=64.22x`。这是后续累积更多 cold/warm 样本的理由，不是恢复 50-row
+  完整载荷或继续在模型层追加挑歌规则的理由。
+
+详细数据、失败轨迹和最终轨迹见
+[代表性紧凑检索与真实对话验收](../benchmarks/2026-07-22-music-kb-ranked-compact-retrieval.md)。
+
 ## 相关记录
 
 - [头脑风暴记录](../brainstorms/2026-07-20-music-kb-conversation-ux.md)
 - [详情体量 benchmark](../benchmarks/2026-07-22-music-kb-conversation-ux-full-analysis.md)
 - [v0.7.5 真实对话验收](../benchmarks/2026-07-22-music-kb-live-conversation-acceptance.md)
+- [v0.8.0 代表性紧凑检索与真实对话验收](../benchmarks/2026-07-22-music-kb-ranked-compact-retrieval.md)
 - [conversation-UX metric pack](../../plugins/music-kb/evals/conversation-ux/emit-conversation-ux.py)
 - Issue #38 / Draft PR #39：撤回的固定规则方案，仅作为历史证据
 - Issue #41 / Draft PR #46：当前已批准的 UX 实现和讨论记录

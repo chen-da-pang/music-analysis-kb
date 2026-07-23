@@ -150,6 +150,28 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--artist", default="", help="Artist/alias filter")
     search.add_argument("--limit", type=int, default=10, help="Maximum records (bounded to 50)")
 
+    discover = commands.add_parser(
+        "discover",
+        help="Count matching analyses and return facets without song records",
+    )
+    _add_database_argument(discover)
+    discover.add_argument("--query", default="", help="Full-text or generic alias query")
+    discover.add_argument("--tag", action="append", default=[], help="Exact tag or alias; repeat for AND matching")
+    discover.add_argument("--title", default="", help="Title/alias filter")
+    discover.add_argument("--artist", default="", help="Artist/alias filter")
+
+    recommend = commands.add_parser(
+        "recommend",
+        help="Return a compact representative page from matching analyses",
+    )
+    _add_database_argument(recommend)
+    recommend.add_argument("--query", default="", help="Full-text or generic alias query")
+    recommend.add_argument("--tag", action="append", default=[], help="Exact tag or alias; repeat for AND matching")
+    recommend.add_argument("--title", default="", help="Title/alias filter")
+    recommend.add_argument("--artist", default="", help="Artist/alias filter")
+    recommend.add_argument("--limit", type=int, default=5, help="Maximum compact records (bounded to 50)")
+    recommend.add_argument("--offset", type=int, default=0, help="Stable continuation offset from a prior page")
+
     getter = commands.add_parser("get", help="Fetch one public canonical analysis")
     _add_database_argument(getter)
     getter.add_argument("recording_id")
@@ -395,6 +417,30 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             ),
         )
         return 0, result
+    if args.command == "discover":
+        return 0, _with_repository(
+            args.db,
+            read_only=True,
+            operation=lambda repo: repo.discover(
+                query=args.query,
+                tags=args.tag,
+                title=args.title,
+                artist=args.artist,
+            ),
+        )
+    if args.command == "recommend":
+        return 0, _with_repository(
+            args.db,
+            read_only=True,
+            operation=lambda repo: repo.recommend(
+                query=args.query,
+                tags=args.tag,
+                title=args.title,
+                artist=args.artist,
+                limit=args.limit,
+                offset=args.offset,
+            ),
+        )
     if args.command == "get":
         return 0, _with_repository(
             args.db,

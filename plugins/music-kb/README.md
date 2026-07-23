@@ -13,18 +13,26 @@ The retrieval Skill is designed for a first request in ordinary language. A
 user can say, for example, “我需要一些 R&B、温暖的、关于爱情的歌” or “找一些
 有氛围感的歌”，without learning canonical English tags or MCP syntax.
 
-For a clear request, the Skill searches first and briefly states how it
-understood the request. Every bounded search now returns canonical
-`facet_counts`, explicitly scoped to the returned rows rather than the whole
-corpus. For a broad subjective request with two or more important supported
-directions, the Skill must run two or three distinct branch searches and keep
-each successful branch in its own answer group. Three supported important
-directions cannot be silently reduced to two, and searched branches cannot be
-flattened back into one song list. The most likely direction is shown first;
-overlapping songs remain in each matching direction. A selected direction
-becomes the conversation context without silently triggering another search.
-Large result sets start with a representative, expandable page; small sets can
-be shown in full.
+For a clear request, the Skill retrieves first and briefly states how it
+understood the request. Broad subjective requests begin with
+`music_kb_discover`: SQLite counts every canonical match and returns
+`facet_counts` without serializing song records. Each supported direction then
+uses its own `music_kb_recommend` call. The backend hard-filters the requested
+conditions, orders matches by group representativeness, and adds secondary-tag
+diversity only among near-relevance rows. The model receives a compact page
+containing titles, artists, matching evidence, selection evidence, and listening
+links rather than full tag dumps and source metadata. Internal selection-basis
+codes are translated into short plain-language reasons rather than shown to the
+user.
+
+Two or three supported directions stay in separate answer groups; three
+important directions cannot be silently reduced to two or flattened into one
+song list. The most likely direction is shown first, and overlapping songs
+remain in each matching direction. A selected direction becomes the
+conversation context without silently triggering another retrieval. Large
+result sets start with a representative, expandable page; small sets can be
+shown in full. Stable `next_offset` continuation prevents “再来一些” and
+“换一批” from repeating the first page.
 
 The exact first-page quantity and the semantics of “再来一些” versus “换一批”
 now keep the selected direction: “再来一些” appends new results to the current
@@ -76,7 +84,8 @@ The bundled conversation metric pack reports static contract coverage by
 default. It deliberately marks runtime behavior as unmeasured unless
 `MUSIC_KB_CONVERSATION_TRACE` points to a normalized trace matching
 `evals/conversation-ux/trace-schema.json`; only then does it report separate
-branch-execution and grouped-rendering behavior metrics.
+direction discovery, compact ranked retrieval, branch execution, and grouped
+rendering behavior metrics.
 
 The publisher-only `music-kb publish push` command fans out an immutable
 release over SSH/rsync using a private peer TOML file; see

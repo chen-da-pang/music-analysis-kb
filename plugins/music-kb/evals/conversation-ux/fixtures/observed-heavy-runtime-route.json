@@ -1,0 +1,105 @@
+{
+  "schema_version": 3,
+  "scenario_id": "warm-rnb-love-observed-heavy-runtime-route",
+  "normalization_note": "Synthetic v3 regression preserving a functionally correct three-group answer while exercising every forbidden runtime-routing detour.",
+  "runtime": {
+    "capture_complete": true,
+    "events": [
+      {"event_id": "event-skill-read-1", "kind": "skill_read", "target": "skills/music-kb/SKILL.md"},
+      {"event_id": "event-skill-read-2", "kind": "skill_read", "target": "skills/music-kb/SKILL.md:middle"},
+      {"event_id": "event-skill-read-3", "kind": "skill_read", "target": "skills/music-kb/SKILL.md:retrieval"},
+      {"event_id": "event-mcp-probe", "kind": "mcp_resource_probe", "target": "list_mcp_resources"},
+      {"event_id": "event-implementation-scan", "kind": "implementation_inspection", "target": "plugin source and README"},
+      {"event_id": "event-help-probe", "kind": "help_probe", "target": "music-kb recommend --help"},
+      {"event_id": "event-binary-probe", "kind": "binary_resolution_probe", "target": ".venv/bin/music-kb"},
+      {"event_id": "event-status-path-failed", "kind": "retrieval_call", "call_id": "status-path-failed", "operation": "status", "transport": "cli", "entrypoint": "music-kb", "arguments": {}, "succeeded": false},
+      {"event_id": "event-status-private", "kind": "retrieval_call", "call_id": "status-1", "operation": "status", "transport": "cli", "entrypoint": "/tmp/plugin/.venv/bin/music-kb", "arguments": {}, "succeeded": true},
+      {"event_id": "event-discover", "kind": "retrieval_call", "call_id": "discover-1", "operation": "discover", "transport": "cli", "entrypoint": "/tmp/plugin/.venv/bin/music-kb", "arguments": {"tags": ["r&b", "warm", "love"]}, "succeeded": true},
+      {"event_id": "event-branch-1", "kind": "retrieval_call", "call_id": "branch-1", "operation": "recommend", "transport": "cli", "entrypoint": "/tmp/plugin/.venv/bin/music-kb", "arguments": {"tags": ["r&b", "warm", "love", "hopeful"]}, "succeeded": true},
+      {"event_id": "event-branch-2", "kind": "retrieval_call", "call_id": "branch-2", "operation": "recommend", "transport": "cli", "entrypoint": "/tmp/plugin/.venv/bin/music-kb", "arguments": {"tags": ["r&b", "warm", "love", "melancholic"]}, "succeeded": true},
+      {"event_id": "event-branch-3", "kind": "retrieval_call", "call_id": "branch-3", "operation": "recommend", "transport": "cli", "entrypoint": "/tmp/plugin/.venv/bin/music-kb", "arguments": {"tags": ["soul", "warm", "love"]}, "succeeded": true},
+      {"event_id": "event-branch-2-duplicate", "kind": "retrieval_call", "call_id": "branch-2-duplicate", "operation": "recommend", "transport": "cli", "entrypoint": "/tmp/plugin/.venv/bin/music-kb", "arguments": {"tags": ["r&b", "warm", "love", "melancholic"]}, "succeeded": true}
+    ]
+  },
+  "base_discovery": {
+    "call_id": "discover-1",
+    "tool": "music_kb_discover",
+    "arguments": {"tags": ["r&b", "warm", "love"]},
+    "result": {
+      "match_count": 53,
+      "facet_counts": [
+        {"namespace": "genre", "name": "soul", "count": 7},
+        {"namespace": "mood", "name": "hopeful", "count": 22},
+        {"namespace": "mood", "name": "melancholic", "count": 47}
+      ],
+      "facet_scope": {
+        "kind": "all_matches",
+        "recording_count": 53,
+        "facet_count": 3
+      }
+    }
+  },
+  "supported_directions": [
+    {"id": "emotional-warmth", "important": true},
+    {"id": "warm-melancholic", "important": true},
+    {"id": "soul-direction", "important": true}
+  ],
+  "selected_direction_ids": ["emotional-warmth", "warm-melancholic", "soul-direction"],
+  "branch_recommendations": [
+    {
+      "call_id": "branch-1",
+      "direction_id": "emotional-warmth",
+      "tool": "music_kb_recommend",
+      "arguments": {"tags": ["r&b", "warm", "love", "hopeful"]},
+      "result_count": 1,
+      "match_count": 22,
+      "payload_bytes": 900,
+      "result_fields": ["recording_id", "title", "artists", "matched_tags", "representative_tags", "selection_basis", "listen_url"],
+      "result_recording_ids": ["emotional-1"],
+      "selection_scope": {"kind": "ranked_representative_results"},
+      "credible_results": true
+    },
+    {
+      "call_id": "branch-2",
+      "direction_id": "warm-melancholic",
+      "tool": "music_kb_recommend",
+      "arguments": {"tags": ["r&b", "warm", "love", "melancholic"]},
+      "result_count": 1,
+      "match_count": 47,
+      "payload_bytes": 900,
+      "result_fields": ["recording_id", "title", "artists", "matched_tags", "representative_tags", "selection_basis", "listen_url"],
+      "result_recording_ids": ["melancholic-1"],
+      "selection_scope": {"kind": "ranked_representative_results"},
+      "credible_results": true
+    },
+    {
+      "call_id": "branch-3",
+      "direction_id": "soul-direction",
+      "tool": "music_kb_recommend",
+      "arguments": {"tags": ["soul", "warm", "love"]},
+      "result_count": 1,
+      "match_count": 7,
+      "payload_bytes": 900,
+      "result_fields": ["recording_id", "title", "artists", "matched_tags", "representative_tags", "selection_basis", "listen_url"],
+      "result_recording_ids": ["soul-1"],
+      "selection_scope": {"kind": "ranked_representative_results"},
+      "credible_results": true
+    }
+  ],
+  "final_response": {
+    "layout": "grouped",
+    "grouped_direction_ids": ["emotional-warmth", "warm-melancholic", "soul-direction"],
+    "reported_separately_direction_ids": [],
+    "grouped_recording_ids": {
+      "emotional-warmth": ["emotional-1"],
+      "warm-melancholic": ["melancholic-1"],
+      "soul-direction": ["soul-1"]
+    },
+    "exposed_internal_fields": [],
+    "followup_actions": ["再来一些", "换一批"],
+    "complete_description_offer": true,
+    "overlap_labels_disclosed": true,
+    "listening_links_markdown": true,
+    "ungrouped_recording_ids": []
+  }
+}

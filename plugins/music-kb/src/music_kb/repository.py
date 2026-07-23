@@ -13,6 +13,13 @@ from urllib.parse import urlsplit
 from .campaign_delivery import CampaignDeliveryEntry, group_campaign_delivery, to_import_payload
 from .errors import NotFoundError, ValidationError
 from .normalization import fts_query, normalized, require_text
+from .retrieval import (
+    CandidateEvidence,
+    CandidateSelection,
+    DIVERSITY_NAMESPACES,
+    EvidenceTag,
+    select_representative_candidates,
+)
 from .schema import SCHEMA_VERSION, connect, ensure_initialized
 from .tagging import PARSER_SOURCE, extract_music_flamingo_metadata
 
@@ -20,6 +27,8 @@ from .tagging import PARSER_SOURCE, extract_music_flamingo_metadata
 MAX_SEARCH_LIMIT = 50
 MAX_FACET_LIMIT = 100
 DEFAULT_SEARCH_FACETS_PER_NAMESPACE = 5
+DEFAULT_DISCOVERY_FACETS_PER_NAMESPACE = 20
+REPRESENTATIVE_POOL_SIZE = 50
 DEFAULT_ENRICH_BATCH_SIZE = 500
 DEFAULT_IMPORT_BATCH_SIZE = 500
 IMPORT_LOOKUP_CACHE_SIZE = 8_192
@@ -1607,16 +1616,14 @@ class MusicKBRepository:
             "counts": counts,
         }
 
-    def search(
+    def _search_filters(
         self,
         *,
         query: str = "",
         tags: Sequence[str] = (),
         title: str = "",
         artist: str = "",
-        limit: int = 10,
-    ) -> list[dict[str, Any]]:
-        limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+    ) -> tuple[list[str], list[Any]]:
         clauses = ["r.canonical_analysis_id IS NOT NULL"]
         params: list[Any] = []
         if query.strip():
@@ -1636,6 +1643,25 @@ class MusicKBRepository:
                 candidate_sql, candidate_params = self._tag_candidate_sql(str(tag))
                 clauses.append(f"r.id IN ({candidate_sql})")
                 params.extend(candidate_params)
+
+        return clauses, params
+
+    def search(
+        self,
+        *,
+        query: str = "",
+        tags: Sequence[str] = (),
+        title: str = "",
+        artist: str = "",
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+        clauses, params = self._search_filters(
+            query=query,
+            tags=tags,
+            title=title,
+            artist=artist,
+        )
 
         rows = self.connection.execute(
             f"""
@@ -1701,6 +1727,402 @@ class MusicKBRepository:
                 "max_per_namespace": facet_limit,
             },
         }
+
+    def discover(
+        self,
+        *,
+        query: str = "",
+        tags: Sequence[str] = (),
+        title: str = "",
+        artist: str = "",
+        per_namespace_limit: int = DEFAULT_DISCOVERY_FACETS_PER_NAMESPACE,
+    ) -> dict[str, Any]:
+        """Return complete match counts and facets without serializing songs."""
+
+        clauses, params = self._search_filters(
+            query=query,
+            tags=tags,
+            title=title,
+            artist=artist,
+        )
+        match_count = int(
+            self.connection.execute(
+                f"SELECT COUNT(*) FROM recording r WHERE {' AND '.join(clauses)}",
+                tuple(params),
+            ).fetchone()[0]
+        )
+        facet_limit = max(1, min(int(per_namespace_limit), MAX_FACET_LIMIT))
+        facet_counts, facet_selection = self._tag_facet_counts_for_filters(
+            clauses,
+            params,
+            per_namespace_limit=facet_limit,
+            namespaces=DIVERSITY_NAMESPACES,
+            include_cutoff_ties=True,
+        )
+        return {
+            "match_count": match_count,
+            "facet_counts": facet_counts,
+            "facet_scope": {
+                "kind": "all_matches",
+                "recording_count": match_count,
+                "facet_count": len(facet_counts),
+                "namespaces": list(DIVERSITY_NAMESPACES),
+                "per_namespace_target": facet_limit,
+                "cutoff_ties_included": True,
+                "truncated_namespaces": facet_selection["truncated_namespaces"],
+            },
+        }
+
+    def recommend(
+        self,
+        *,
+        query: str = "",
+        tags: Sequence[str] = (),
+        title: str = "",
+        artist: str = "",
+        limit: int = 5,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return a compact, stable page chosen for relevance and bounded diversity."""
+
+        applied_limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+        applied_offset = max(0, int(offset))
+        clauses, params = self._search_filters(
+            query=query,
+            tags=tags,
+            title=title,
+            artist=artist,
+        )
+        match_count = int(
+            self.connection.execute(
+                f"SELECT COUNT(*) FROM recording r WHERE {' AND '.join(clauses)}",
+                tuple(params),
+            ).fetchone()[0]
+        )
+        resolved_tags = self._resolved_search_tags(tags)
+        excluded_tag_ids = {int(item["id"]) for item in resolved_tags}
+        tag_frequency = self._candidate_tag_frequency(
+            clauses,
+            params,
+            excluded_tag_ids=excluded_tag_ids,
+        )
+
+        selections = []
+        block_offset = (applied_offset // REPRESENTATIVE_POOL_SIZE) * REPRESENTATIVE_POOL_SIZE
+        within_block = applied_offset - block_offset
+        while len(selections) < applied_limit and block_offset < match_count:
+            ranked_block = self._ranked_candidate_block(
+                clauses,
+                params,
+                excluded_tag_ids=excluded_tag_ids,
+                offset=block_offset,
+            )
+            if not ranked_block:
+                break
+            evidence = self._candidate_evidence(
+                ranked_block,
+                tag_frequency=tag_frequency,
+                excluded_tag_ids=excluded_tag_ids,
+            )
+            ordered = select_representative_candidates(evidence)
+            remaining = applied_limit - len(selections)
+            selections.extend(ordered[within_block : within_block + remaining])
+            block_offset += REPRESENTATIVE_POOL_SIZE
+            within_block = 0
+
+        compact_results = self._compact_recommendations(
+            selections,
+            matched_tags=resolved_tags,
+        )
+        next_offset = applied_offset + len(compact_results)
+        has_more = next_offset < match_count
+        return {
+            "results": compact_results,
+            "count": len(compact_results),
+            "match_count": match_count,
+            "limit_applied": applied_limit,
+            "offset_applied": applied_offset,
+            "next_offset": next_offset if has_more else None,
+            "has_more": has_more,
+            "selection_scope": {
+                "kind": "ranked_representative_results",
+                "ranking": "required_match_then_group_representativeness",
+                "diversity": "bounded_secondary_tag_coverage",
+                "pool_block_size": REPRESENTATIVE_POOL_SIZE,
+            },
+        }
+
+    def _tag_facet_counts_for_filters(
+        self,
+        clauses: Sequence[str],
+        params: Sequence[Any],
+        *,
+        per_namespace_limit: int,
+        namespaces: Sequence[str] = (),
+        include_cutoff_ties: bool = False,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        namespace_clause = ""
+        namespace_params: list[Any] = []
+        if namespaces:
+            namespace_placeholders = ", ".join("?" for _ in namespaces)
+            namespace_clause = f" AND t.namespace IN ({namespace_placeholders})"
+            namespace_params.extend(namespaces)
+        rows = self.connection.execute(
+            f"""
+            SELECT t.namespace, t.canonical_name AS name,
+                   COUNT(DISTINCT r.id) AS tag_count
+            FROM recording r
+            JOIN analysis_revision ar ON ar.id = r.canonical_analysis_id
+            JOIN analysis_tag at ON at.analysis_id = ar.id
+            JOIN tag t ON t.id = at.tag_id
+            WHERE {' AND '.join(clauses)}
+              AND t.namespace NOT IN ('title', 'artist')
+              {namespace_clause}
+            GROUP BY t.namespace, t.canonical_name
+            ORDER BY t.namespace, tag_count DESC, t.canonical_name
+            """,
+            (*params, *namespace_params),
+        )
+        returned_by_namespace: Counter[str] = Counter()
+        available_by_namespace: Counter[str] = Counter()
+        cutoff_by_namespace: dict[str, int] = {}
+        facets: list[dict[str, Any]] = []
+        for row in rows:
+            namespace = str(row["namespace"])
+            tag_count = int(row["tag_count"])
+            available_by_namespace[namespace] += 1
+            at_target = returned_by_namespace[namespace] >= per_namespace_limit
+            tied_at_cutoff = (
+                include_cutoff_ties
+                and namespace in cutoff_by_namespace
+                and tag_count == cutoff_by_namespace[namespace]
+            )
+            if at_target and not tied_at_cutoff:
+                continue
+            returned_by_namespace[namespace] += 1
+            if returned_by_namespace[namespace] == per_namespace_limit:
+                cutoff_by_namespace[namespace] = tag_count
+            facets.append(
+                {
+                    "namespace": namespace,
+                    "name": str(row["name"]),
+                    "count": tag_count,
+                }
+            )
+        truncated_namespaces = [
+            {
+                "namespace": namespace,
+                "returned": returned_by_namespace[namespace],
+                "available": available,
+            }
+            for namespace, available in sorted(available_by_namespace.items())
+            if returned_by_namespace[namespace] < available
+        ]
+        return facets, {"truncated_namespaces": truncated_namespaces}
+
+    def _resolved_search_tags(self, tags: Sequence[str]) -> list[dict[str, Any]]:
+        resolved: list[dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        for value in tags:
+            key = normalized(str(value))
+            if not key:
+                continue
+            rows = self.connection.execute(
+                """
+                SELECT DISTINCT t.id, t.namespace, t.canonical_name
+                FROM tag t LEFT JOIN tag_alias ta ON ta.tag_id = t.id
+                WHERE t.normalized_name = ? OR ta.normalized_alias = ?
+                ORDER BY CASE WHEN t.normalized_name = ? THEN 0 ELSE 1 END,
+                         t.namespace, t.canonical_name
+                """,
+                (key, key, key),
+            )
+            for row in rows:
+                tag_id = int(row["id"])
+                if tag_id in seen_ids:
+                    continue
+                seen_ids.add(tag_id)
+                resolved.append(
+                    {
+                        "id": tag_id,
+                        "namespace": str(row["namespace"]),
+                        "name": str(row["canonical_name"]),
+                    }
+                )
+        return resolved
+
+    @staticmethod
+    def _tag_filter_sql(excluded_tag_ids: set[int]) -> tuple[str, list[Any]]:
+        namespace_placeholders = ", ".join("?" for _ in DIVERSITY_NAMESPACES)
+        sql = f"t.namespace IN ({namespace_placeholders})"
+        params: list[Any] = list(DIVERSITY_NAMESPACES)
+        if excluded_tag_ids:
+            tag_placeholders = ", ".join("?" for _ in excluded_tag_ids)
+            sql += f" AND at.tag_id NOT IN ({tag_placeholders})"
+            params.extend(sorted(excluded_tag_ids))
+        return sql, params
+
+    def _candidate_tag_frequency(
+        self,
+        clauses: Sequence[str],
+        params: Sequence[Any],
+        *,
+        excluded_tag_ids: set[int],
+    ) -> dict[int, EvidenceTag]:
+        tag_filter_sql, tag_params = self._tag_filter_sql(excluded_tag_ids)
+        rows = self.connection.execute(
+            f"""
+            WITH candidates AS (
+                SELECT r.id AS recording_id, r.canonical_analysis_id AS analysis_id
+                FROM recording r
+                WHERE {' AND '.join(clauses)}
+            )
+            SELECT at.tag_id, t.namespace, t.canonical_name,
+                   COUNT(DISTINCT c.recording_id) AS frequency
+            FROM candidates c
+            JOIN analysis_tag at ON at.analysis_id = c.analysis_id
+            JOIN tag t ON t.id = at.tag_id
+            WHERE {tag_filter_sql}
+            GROUP BY at.tag_id, t.namespace, t.canonical_name
+            """,
+            (*params, *tag_params),
+        )
+        return {
+            int(row["tag_id"]): EvidenceTag(
+                namespace=str(row["namespace"]),
+                name=str(row["canonical_name"]),
+                frequency=int(row["frequency"]),
+            )
+            for row in rows
+        }
+
+    def _ranked_candidate_block(
+        self,
+        clauses: Sequence[str],
+        params: Sequence[Any],
+        *,
+        excluded_tag_ids: set[int],
+        offset: int,
+    ) -> list[tuple[str, float]]:
+        tag_filter_sql, tag_params = self._tag_filter_sql(excluded_tag_ids)
+        rows = self.connection.execute(
+            f"""
+            WITH candidates AS (
+                SELECT r.id AS recording_id, r.canonical_analysis_id AS analysis_id
+                FROM recording r
+                WHERE {' AND '.join(clauses)}
+            ),
+            tag_frequency AS (
+                SELECT at.tag_id, COUNT(DISTINCT c.recording_id) AS frequency
+                FROM candidates c
+                JOIN analysis_tag at ON at.analysis_id = c.analysis_id
+                JOIN tag t ON t.id = at.tag_id
+                WHERE {tag_filter_sql}
+                GROUP BY at.tag_id
+            ),
+            candidate_scores AS (
+                SELECT c.recording_id,
+                       COALESCE(SUM(tag_frequency.frequency), 0) AS representative_score
+                FROM candidates c
+                LEFT JOIN analysis_tag at ON at.analysis_id = c.analysis_id
+                LEFT JOIN tag_frequency ON tag_frequency.tag_id = at.tag_id
+                GROUP BY c.recording_id
+            )
+            SELECT recording_id, representative_score
+            FROM candidate_scores
+            ORDER BY representative_score DESC, recording_id
+            LIMIT ? OFFSET ?
+            """,
+            (*params, *tag_params, REPRESENTATIVE_POOL_SIZE, max(0, int(offset))),
+        )
+        return [
+            (str(row["recording_id"]), float(row["representative_score"]))
+            for row in rows
+        ]
+
+    def _candidate_evidence(
+        self,
+        ranked_block: Sequence[tuple[str, float]],
+        *,
+        tag_frequency: Mapping[int, EvidenceTag],
+        excluded_tag_ids: set[int],
+    ) -> list[CandidateEvidence]:
+        if not ranked_block:
+            return []
+        recording_ids = [recording_id for recording_id, _ in ranked_block]
+        placeholders = ", ".join("?" for _ in recording_ids)
+        tag_filter_sql, tag_params = self._tag_filter_sql(excluded_tag_ids)
+        rows = self.connection.execute(
+            f"""
+            SELECT r.id AS recording_id, at.tag_id
+            FROM recording r
+            JOIN analysis_tag at ON at.analysis_id = r.canonical_analysis_id
+            JOIN tag t ON t.id = at.tag_id
+            WHERE r.id IN ({placeholders}) AND {tag_filter_sql}
+            ORDER BY r.id, t.namespace, t.canonical_name
+            """,
+            (*recording_ids, *tag_params),
+        )
+        tags_by_recording: dict[str, list[EvidenceTag]] = {
+            recording_id: [] for recording_id in recording_ids
+        }
+        for row in rows:
+            tag = tag_frequency.get(int(row["tag_id"]))
+            if tag is not None:
+                tags_by_recording[str(row["recording_id"])].append(tag)
+        return [
+            CandidateEvidence(
+                recording_id=recording_id,
+                representative_score=representative_score,
+                tags=tuple(tags_by_recording[recording_id]),
+            )
+            for recording_id, representative_score in ranked_block
+        ]
+
+    def _compact_recommendations(
+        self,
+        selections: Sequence[CandidateSelection],
+        *,
+        matched_tags: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not selections:
+            return []
+        recording_ids = [str(selection.recording_id) for selection in selections]
+        placeholders = ", ".join("?" for _ in recording_ids)
+        rows = self.connection.execute(
+            f"""
+            SELECT id, canonical_title, version_label
+            FROM recording
+            WHERE id IN ({placeholders})
+            """,
+            tuple(recording_ids),
+        )
+        recordings = {str(row["id"]): row for row in rows}
+        public_matched_tags = [
+            {"namespace": str(tag["namespace"]), "name": str(tag["name"])}
+            for tag in matched_tags
+        ]
+        results: list[dict[str, Any]] = []
+        for selection in selections:
+            recording_id = str(selection.recording_id)
+            row = recordings[recording_id]
+            source_links = self._source_links(recording_id)
+            results.append(
+                {
+                    "recording_id": recording_id,
+                    "title": str(row["canonical_title"]),
+                    "version_label": str(row["version_label"]),
+                    "artists": self._artist_names(recording_id),
+                    "matched_tags": public_matched_tags,
+                    "representative_tags": [
+                        {"namespace": tag.namespace, "name": tag.name}
+                        for tag in selection.representative_tags
+                    ],
+                    "selection_basis": str(selection.selection_basis),
+                    "listen_url": source_links[0]["url"] if source_links else None,
+                }
+            )
+        return results
 
     def tag_facet_counts(
         self,

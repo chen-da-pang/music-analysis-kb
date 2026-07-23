@@ -85,14 +85,56 @@ def main() -> None:
     target_kind = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("PLUGIN_EVAL_TARGET_KIND", "unknown")
     skill_path, manifest_path = _locate(target, target_kind)
     skill = _read(skill_path)
-    normalized_skill = re.sub(r"\s+", " ", skill)
+    followups = _read(
+        skill_path.parent / "references" / "followups.md" if skill_path is not None else None
+    )
+    normalized_skill = re.sub(r"\s+", " ", f"{skill}\n{followups}")
     manifest = _manifest(manifest_path)
     checks: list[dict[str, Any]] = []
+
+    routing_heading = "## Runtime routing — do this first"
+    routing_heading_index = skill.find(routing_heading)
+    safety_heading_index = skill.find("## Safety and data boundary")
+    routing_phrases = (
+        "If `music_kb_status` appears in the provided tool list",
+        "immediately run the PATH command `music-kb --json doctor`",
+        "music-kb --json discover --tag",
+        "Do not call `list_mcp_resources`",
+        "Do not scan plugin directories",
+        "README text",
+        "`.venv/bin/music-kb`",
+        "Do not inspect `--help` unless",
+        "Do not reread this Skill",
+        "Do not repeat a successful discovery or recommendation with identical",
+        "Run each branch recommendation as its own call",
+        "A complete first read",
+        "do not use sed, cat, or another file",
+    )
+    routing_ok = (
+        bool(skill)
+        and 0 <= routing_heading_index < safety_heading_index
+        and all(phrase in skill for phrase in routing_phrases)
+    )
+    checks.append(
+        _check(
+            "music-kb-ux-runtime-routing-first",
+            routing_ok,
+            "The Skill exposes the direct MCP-or-PATH route before the conversation contract.",
+            evidence=[
+                f"routing_heading_index={routing_heading_index}",
+                f"safety_heading_index={safety_heading_index}",
+            ]
+            + [phrase for phrase in routing_phrases if phrase in skill],
+            remediation=[
+                "Put the one-read MCP-or-PATH route first and explicitly forbid resource probes, implementation scans, private binaries, help probes, and duplicate retrieval."
+            ],
+        )
+    )
 
     branching_phrases = (
         "## Conversation UX contract",
         "Broad subjective requests use real-result branches",
-        "tag co-occurrence",
+        "music_kb_discover",
         "at most **three**",
         "most likely interpretation",
         "one short reason",
@@ -110,16 +152,20 @@ def main() -> None:
     )
 
     branch_execution_phrases = (
-        "facet_scope.kind=returned_results",
+        "facet_scope.kind=all_matches",
         "two or more user-relevant interpretations",
         "at least two and at most **three**",
         "exactly three important directions",
         "do not silently reduce them to one or two",
-        "separate bounded `music_kb_search`",
-        "A label without its own search call",
-        "never flatten or recombine searched branches",
-        "final answer must contain one separate group",
-        "Never merge those groups into a flat list",
+        "A smaller match count alone does not make it unimportant",
+        "direction ledger",
+        "do not start branch calls from a partial list",
+        "non-zero `hopeful`, `melancholic`, and `soul` facets",
+        "separate `music_kb_recommend`",
+        "A label without its own recommendation call",
+        "Finish all selected calls before answering",
+        "never flatten or recombine recommended branches",
+        "the final answer must contain one separate group per recommendation",
     )
     branch_execution_ok = bool(skill) and all(
         phrase in normalized_skill for phrase in branch_execution_phrases
@@ -133,7 +179,7 @@ def main() -> None:
                 phrase for phrase in branch_execution_phrases if phrase in normalized_skill
             ],
             remediation=[
-                "Require two or three supported directions, one search per direction, and one final group per valid search."
+                "Require two or three supported directions, one recommendation per direction, and one final group per valid branch."
             ],
         )
     )
@@ -162,6 +208,8 @@ def main() -> None:
         "representative candidates",
         "grouped, batched presentation",
         "exact first-page number is intentionally still a calibration parameter",
+        "omit the recommendation `limit` argument",
+        "show every row returned on that page",
     )
     progressive_ok = bool(skill) and all(phrase in normalized_skill for phrase in progressive_phrases)
     checks.append(
@@ -194,7 +242,7 @@ def main() -> None:
     )
 
     guidance_phrases = (
-        "Make follow-up actions learnable in the answer",
+        "Make the first answer learnable",
         "你可以这样继续",
         "“再来一些”",
         "保持这个方向",
@@ -202,7 +250,7 @@ def main() -> None:
         "“换一批”",
         "替换当前展示",
         "之前的结果仍留在对话记录里",
-        "Do not repeat the full guide in unrelated answers",
+        "Keep these two affordances distinct",
     )
     guidance_ok = bool(skill) and all(phrase in normalized_skill for phrase in guidance_phrases)
     checks.append(
@@ -244,14 +292,14 @@ def main() -> None:
     )
 
     detail_selection_phrases = (
-        "Offer selected complete descriptions after candidates",
+        "After any non-empty candidate list",
         "visible sequence number",
         "序号",
         "歌名",
         "前几首",
         "全部",
         "description dimension is optional",
-        "Do not fetch canonical analyses merely in anticipation",
+        "Fetch canonical analysis only after a user selection",
     )
     detail_selection_ok = bool(skill) and all(
         phrase in normalized_skill for phrase in detail_selection_phrases
@@ -320,13 +368,13 @@ def main() -> None:
     )
 
     evidence_phrases = (
-        "ordered for retrieval",
+        "orders exact matches by group representativeness",
         "small shortlist",
         "facet_counts",
-        "facet_scope.kind=returned_results",
+        "facet_scope.kind=all_matches",
         "listen_url",
         "search_projection_state",
-        "Do not infer mood",
+        "do not infer mood",
     )
     evidence_ok = bool(skill) and all(phrase in normalized_skill for phrase in evidence_phrases)
     checks.append(
@@ -336,6 +384,50 @@ def main() -> None:
             "Candidate claims are evidence-backed and preserve the read-only link contract.",
             evidence=[phrase for phrase in evidence_phrases if phrase in normalized_skill],
             remediation=["Keep bounded canonical verification, status gating, and runtime listen URLs."],
+        )
+    )
+
+    compact_phrases = (
+        "without song records",
+        "matched_tags",
+        "representative_tags",
+        "selection_basis",
+        "do not call the page a universal",
+        "next_offset",
+        "legacy `music_kb_search` row order",
+        "omit full tag dumps",
+        "Never retrieve a larger page and then prune, reorder, or silently de-duplicate it",
+        "displayed IDs must exactly equal",
+        "Compact recommendations expose `listen_url` but omit",
+    )
+    compact_ok = bool(skill) and all(phrase in normalized_skill for phrase in compact_phrases)
+    checks.append(
+        _check(
+            "music-kb-ux-ranked-compact-retrieval",
+            compact_ok,
+            "Direction discovery and ranked recommendation keep intermediate retrieval out of the model context.",
+            evidence=[phrase for phrase in compact_phrases if phrase in normalized_skill],
+            remediation=[
+                "Use all-match facet discovery, backend-ranked compact rows, stable continuation, and lazy canonical details."
+            ],
+        )
+    )
+
+    rendering_phrases = (
+        "Markdown listening link",
+        "也符合：",
+        "cross-group duplicate",
+    )
+    rendering_ok = bool(skill) and all(phrase in normalized_skill for phrase in rendering_phrases)
+    checks.append(
+        _check(
+            "music-kb-ux-rendering-contract",
+            rendering_ok,
+            "The written contract makes listening links and cross-group overlap disclosure visible to users.",
+            evidence=[phrase for phrase in rendering_phrases if phrase in normalized_skill],
+            remediation=[
+                "Require Markdown listening links and a short overlap label whenever a recording appears in more than one direction."
+            ],
         )
     )
 
