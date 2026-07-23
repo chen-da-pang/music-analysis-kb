@@ -16,8 +16,11 @@ from a completed CNB canonical delivery. The atom has four bounded stages:
 3. Write a JSONL queue containing only songs that are not already downloaded.
 4. Run the deterministic `scripts/download_music_queue.py` worker directly in
    one serial process. It uses `musicdl` with
-   `KugouMusicClient`, updates the inventory after every attempt, and writes an
-   identity-bound lyric receipt from the exact result's `SongInfo.lyric`.
+   `KugouMusicClient`, first resolves the queue's exact Kugou mix-song page to
+   one verified audio hash, and falls back to title/artist search only when the
+   direct parser cannot produce an audio URL. It updates the inventory after
+   every attempt and writes an identity-bound lyric receipt from the exact
+   result's `SongInfo.lyric`.
 
 If the primary worker leaves songs as `no_results`, run the separate fallback
 atom through the same direct-executor boundary. It consumes only an explicit no-results queue and runs
@@ -95,7 +98,10 @@ python3 .../download_music_queue.py \
 ```
 
 The direct path keeps exact MixSongID validation, inventory/progress atomic
-writes, and append-only lyric receipts in the same worker. `--executor claude`
+writes, and append-only lyric receipts in the same worker. Its default
+`--lookup-mode exact-page-first` prevents `musicdl` from expanding several
+title/artist candidates when the queue already has an exact Kugou source URL;
+`--lookup-mode search-only` is the measured rollback path. `--executor claude`
 is available only for a bounded compatibility retry; it preserves the old
 serial chunk path and inherits `http_proxy`/`https_proxy` when `--proxy` is
 provided.

@@ -201,7 +201,7 @@ def test_exact_match_records_selected_result_metadata(monkeypatch, tmp_path: Pat
     assert summary["timing"]["items"] == 1
     assert summary["timing"]["downloaded_bytes"] == len(b"exact")
     assert set(summary["timing"]["stage_totals_ms"]) == {
-        "search_ms",
+        "lookup_ms",
         "download_ms",
         "lyrics_ms",
         "lyric_receipt_write_ms",
@@ -213,8 +213,164 @@ def test_exact_match_records_selected_result_metadata(monkeypatch, tmp_path: Pat
     assert timing["downloaded_bytes"] == len(b"exact")
     assert all(
         timing[stage] >= 0
-        for stage in ("search_ms", "download_ms", "lyrics_ms", "lyric_receipt_write_ms", "commit_ms", "total_ms")
+        for stage in ("lookup_ms", "search_ms", "download_ms", "lyrics_ms", "lyric_receipt_write_ms", "commit_ms", "total_ms")
     )
+
+
+def test_exact_page_lookup_resolves_one_verified_hash_without_title_search(monkeypatch, tmp_path: Path) -> None:
+    module = _module()
+    parser_inputs: list[dict[str, object]] = []
+
+    class FakeKugouClient:
+        def _parsewithofficialapiv1(self, search_result):
+            parser_inputs.append(dict(search_result))
+            return SimpleNamespace(
+                source="KugouMusicClient",
+                song_name=search_result["songname"],
+                singers=search_result["singername"],
+                identifier=search_result["hash"],
+                with_valid_download_url=True,
+                raw_data={"search": dict(search_result), "lyric": {"candidates": []}},
+            )
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            config = kwargs["init_music_clients_cfg"]["KugouMusicClient"]
+            assert config["maintain_session"] is True
+            assert kwargs["clients_threadings"] == {"KugouMusicClient": 1}
+            self.work_dir = Path(config["work_dir"])
+            self.music_clients = {"KugouMusicClient": FakeKugouClient()}
+
+        def search(self, _query: str):
+            raise AssertionError("exact page lookup must not do a title/artist search")
+
+        def download(self, items):
+            assert len(items) == 1
+            path = self.work_dir / "KugouMusicClient" / "exact-page.mp3"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"exact-page")
+            items[0].save_path = str(path)
+            return items
+
+    _install_fake_musicdl(monkeypatch, FakeClient)
+    queue, inventory, work_dir, progress, log = _queue(tmp_path, title="空心 (Live)", artist="黄霄雲、刘端端")
+    row = json.loads(queue.read_text(encoding="utf-8"))
+    row["play_link"] = "https://www.kugou.com/mixsong/agent_gateway/exact.html"
+    queue.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    page = (
+        "<script>var dataFromSmarty = "
+        + json.dumps(
+            [
+                {
+                    "mixsongid": "1",
+                    "hash": "A" * 32,
+                    "timelength": 123000,
+                    "audio_name": "黄霄雲、刘端端 - 空心 (Live)",
+                    "song_name": "空心 (Live)",
+                    "artist_name": "黄霄雲、刘端端",
+                }
+            ],
+            ensure_ascii=False,
+        )
+        + ",// 当前页面歌曲信息</script>"
+    ).encode("utf-8")
+    monkeypatch.setattr(module, "_fetch_url", lambda _url, *, timeout: page)
+
+    summary = module.run_download(queue, inventory, work_dir, progress, log, "test-run", None, False, 0, 0, 10, 5)
+
+    assert summary["downloaded"] == 1
+    assert summary["direct_page_lookups"] == 1
+    assert summary["search_fallback_lookups"] == 0
+    assert summary["timing"]["lookup_methods"] == {module.DIRECT_DOWNLOAD_LOOKUP_METHOD: 1}
+    assert parser_inputs == [
+        {
+            "MixSongID": "1",
+            "mixsongid": "1",
+            "hash": "A" * 32,
+            "FileHash": "A" * 32,
+            "songname": "空心 (Live)",
+            "SongName": "空心 (Live)",
+            "singername": "黄霄雲、刘端端",
+            "SingerName": "黄霄雲、刘端端",
+            "filename": "黄霄雲、刘端端 - 空心 (Live)",
+            "FileName": "黄霄雲、刘端端 - 空心 (Live)",
+            "timelen": 123000,
+            "duration": 123.0,
+        }
+    ]
+    saved = json.loads(inventory.read_text(encoding="utf-8"))["songs"][0]["download"]
+    assert saved["lookup_method"] == module.DIRECT_DOWNLOAD_LOOKUP_METHOD
+    assert saved["lookup_evidence"]["page_file_hash"] == "A" * 32
+
+
+def test_exact_page_lookup_falls_back_to_exact_id_search_when_official_parser_has_no_url(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _module()
+    search_calls: list[str] = []
+
+    class FakeKugouClient:
+        def _parsewithofficialapiv1(self, _search_result):
+            return SimpleNamespace(with_valid_download_url=False, identifier="A" * 32)
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.work_dir = Path(kwargs["init_music_clients_cfg"]["KugouMusicClient"]["work_dir"])
+            self.music_clients = {"KugouMusicClient": FakeKugouClient()}
+            self.fallback = SimpleNamespace(
+                source="KugouMusicClient",
+                song_name="空心 (Live)",
+                singers="黄霄雲、刘端端",
+                identifier="fallback-hash",
+                lyric="[00:01.00]回退歌词\n",
+                raw_data={"search": {"MixSongID": "1"}, "lyric": {"candidates": [{"id": "fallback"}]}},
+            )
+
+        def search(self, query: str):
+            search_calls.append(query)
+            return {"KugouMusicClient": [self.fallback]}
+
+        def download(self, items):
+            assert items == [self.fallback]
+            path = self.work_dir / "KugouMusicClient" / "fallback.mp3"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fallback")
+            self.fallback.save_path = str(path)
+            return [self.fallback]
+
+    _install_fake_musicdl(monkeypatch, FakeClient)
+    queue, inventory, work_dir, progress, log = _queue(tmp_path, title="空心 (Live)", artist="黄霄雲、刘端端")
+    row = json.loads(queue.read_text(encoding="utf-8"))
+    row["play_link"] = "https://www.kugou.com/mixsong/agent_gateway/fallback.html"
+    queue.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    page = (
+        "<script>var dataFromSmarty = "
+        + json.dumps(
+            [
+                {
+                    "mixsongid": "1",
+                    "hash": "A" * 32,
+                    "timelength": 123000,
+                    "audio_name": "黄霄雲、刘端端 - 空心 (Live)",
+                    "song_name": "空心 (Live)",
+                    "artist_name": "黄霄雲、刘端端",
+                }
+            ],
+            ensure_ascii=False,
+        )
+        + ",// 当前页面歌曲信息</script>"
+    ).encode("utf-8")
+    monkeypatch.setattr(module, "_fetch_url", lambda _url, *, timeout: page)
+
+    summary = module.run_download(queue, inventory, work_dir, progress, log, "test-run", None, False, 0, 0, 10, 5)
+
+    assert summary["downloaded"] == 1
+    assert summary["direct_page_lookups"] == 0
+    assert summary["search_fallback_lookups"] == 1
+    assert search_calls == ["空心 (Live) 黄霄雲、刘端端"]
+    saved = json.loads(inventory.read_text(encoding="utf-8"))["songs"][0]["download"]
+    assert saved["lookup_method"] == module.SEARCH_DOWNLOAD_LOOKUP_METHOD
+    assert saved["lookup_evidence"]["direct_lookup_response_kind"] == "direct_musicdl_no_download_url"
 
 
 def test_download_worker_repairs_pending_musicdl_lyric_via_exact_page(monkeypatch, tmp_path: Path) -> None:

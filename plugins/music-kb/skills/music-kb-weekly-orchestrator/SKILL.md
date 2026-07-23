@@ -83,10 +83,12 @@ be purged, so inventory—not file presence alone—is the dedupe record.
    analysis result.
 6. **`claude_download`** — retain this historical atom name but default to one
    fixed direct worker. It must use `musicdl`'s `MusicClient` plus
-   `KugouMusicClient`; it must not call `kugou-cli` or the legacy full-database
-   downloader. Keep one song-level inventory row per platform identity and do
-   not run concurrent workers against shared state. `--executor claude` is only
-   a bounded compatibility retry.
+   `KugouMusicClient`; it must first use the queue's exact mix-song page and
+   verified audio hash to resolve one track, then fall back to title/artist
+   search only when that direct path cannot produce an audio URL. It must not
+   call `kugou-cli` or the legacy full-database downloader. Keep one song-level
+   inventory row per platform identity and do not run concurrent workers against
+   shared state. `--executor claude` is only a bounded compatibility retry.
 7. **`fallback_download`** — directly process only the primary worker's
    recorded `no_results`, in the configured fallback order, with the
    duration/size checks. Preserve failed/no-result states for retry; the legacy

@@ -209,6 +209,12 @@ def main() -> int:
         default=os.environ.get("MUSICDL_PYTHON", "python3"),
         help="Python executable with musicdl for the fixed worker (default: $MUSICDL_PYTHON or python3)",
     )
+    parser.add_argument(
+        "--lookup-mode",
+        choices=("exact-page-first", "search-only"),
+        default="exact-page-first",
+        help="Use the queue's exact Kugou mix-song page before legacy title/artist search (default).",
+    )
     parser.add_argument("--model")
     parser.add_argument("--max-budget-usd", type=float)
     parser.add_argument("--timeout-seconds", type=int, default=86_400)
@@ -347,6 +353,7 @@ def main() -> int:
             "chunks": len(legacy_chunks),
             "executor": args.executor,
             "worker_python": args.worker_python,
+            "lookup_mode": args.lookup_mode,
             "reuse_queue": args.reuse_queue,
             "lyrics_receipt": str(lyrics_receipt),
             "timing": {**timing, "total_ms": elapsed_ms(run_started)},
@@ -380,6 +387,8 @@ def main() -> int:
             str(lyrics_receipt),
             "--item-timeout-seconds",
             str(args.item_timeout_seconds),
+            "--lookup-mode",
+            args.lookup_mode,
         ]
 
     chunk_receipts: list[dict[str, Any]] = []
@@ -527,6 +536,7 @@ def main() -> int:
         "chunks": chunk_receipts,
         "executor": args.executor,
         "worker_python": args.worker_python,
+        "lookup_mode": args.lookup_mode,
         "reuse_queue": args.reuse_queue,
         "run_dir": str(run_dir),
         "worker_stdout": str(worker_stdout) if worker_stdout is not None else None,

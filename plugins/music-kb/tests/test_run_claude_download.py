@@ -133,6 +133,7 @@ def test_direct_executor_runs_one_worker_without_claude(
         if script == "download_music_queue.py":
             direct_queue = Path(values[values.index("--queue") + 1])
             assert direct_queue.name == "download-queue-direct.jsonl"
+            assert values[values.index("--lookup-mode") + 1] == "exact-page-first"
             assert [json.loads(line)["identity_key"] for line in direct_queue.read_text(encoding="utf-8").splitlines()] == [
                 "kugou:1",
                 "kugou:2",
@@ -194,6 +195,7 @@ def test_direct_executor_runs_one_worker_without_claude(
     assert len(worker_calls) == 1
     assert all("claude" not in value.casefold() for call in calls for value in call)
     assert summary["executor"] == "direct"
+    assert summary["lookup_mode"] == "exact-page-first"
     assert summary["queued_for_attempt"] == 2
     assert summary["worker_progress"] == {
         "queue": 2,

@@ -21,6 +21,7 @@ import signal
 import tempfile
 import time
 import unicodedata
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,10 +33,12 @@ from urllib.request import Request, urlopen
 
 MATCH_POLICY = "exact_kugou_mix_song_id_title_compatible_artist_v2"
 LYRIC_RECEIPT_SCHEMA_VERSION = 1
-DOWNLOAD_TIMING_SCHEMA_VERSION = 1
+DOWNLOAD_TIMING_SCHEMA_VERSION = 2
 LYRIC_QUERY_METHOD = "musicdl_kugou_exact_mix_song_id_v1"
 DIRECT_LYRIC_QUERY_METHOD = "kugou_mixsong_page_exact_lyrics_v1"
 DIRECT_HASH_LYRIC_QUERY_METHOD = "kugou_verified_audio_hash_exact_lyrics_v1"
+DIRECT_DOWNLOAD_LOOKUP_METHOD = "kugou_exact_mixsong_page_filehash_official_musicdl_v1"
+SEARCH_DOWNLOAD_LOOKUP_METHOD = "musicdl_title_artist_exact_mixsong_fallback_v1"
 LYRIC_NORMALIZER_VERSION = "lrc-v1"
 
 _KUGOU_MIXSONG_HOST = "www.kugou.com"
@@ -80,6 +83,21 @@ class ItemTimeoutError(RuntimeError):
 
 class DirectKugouLyricError(RuntimeError):
     """An auditable error from the exact Kugou mix-song lyric path."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        response_kind: str,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.response_kind = response_kind
+        self.evidence = dict(evidence or {})
+
+
+class DirectKugouDownloadError(RuntimeError):
+    """An auditable failure in the exact-page download lookup fast path."""
 
     def __init__(
         self,
@@ -785,6 +803,117 @@ def direct_kugou_lyric_receipt(
     )
 
 
+def direct_kugou_download_item(
+    candidate: Mapping[str, Any],
+    *,
+    kugou_client: Any,
+    timeout: float,
+) -> tuple[Any | None, dict[str, Any]]:
+    """Build one downloadable musicdl item from the queue's exact MixSongID URL.
+
+    ``musicdl.search(title + artist)`` expands several text-search candidates
+    into downloadable tracks before the caller can discard the wrong IDs.  Our
+    queue already carries a platform-bound MixSongID page, so this fast path
+    fetches that page once, validates its identity, and asks musicdl's official
+    Kugou parser to resolve only the corresponding audio hash.  Any parser or
+    platform failure returns a recorded reason and lets the caller use the
+    existing exact-ID text-search fallback.
+    """
+
+    expected_track_key = expected_kugou_track_key(candidate)
+    mixsong_url = exact_kugou_mixsong_url(candidate)
+    parser = getattr(kugou_client, "_parsewithofficialapiv1", None)
+    if not expected_track_key or not mixsong_url or not callable(parser):
+        return None, {"lookup_method": SEARCH_DOWNLOAD_LOOKUP_METHOD}
+
+    try:
+        try:
+            page_payload = _fetch_url(mixsong_url, timeout=timeout)
+        except Exception as exc:  # pragma: no cover - network-dependent
+            raise DirectKugouDownloadError(
+                f"Kugou mix-song page request failed: {exc}",
+                response_kind="direct_mixsong_page_request_failed",
+                evidence={"kugou_mixsong_url": mixsong_url},
+            ) from exc
+        track, identity_evidence = _page_track_for_mix_song_id(
+            _mixsong_page_tracks(page_payload), expected_track_key
+        )
+        raw_hash, _keyword, duration_ms = _page_track_lyric_query(track, candidate)
+        file_hash = normalized_kugou_file_hash(raw_hash)
+        if file_hash is None:
+            raise DirectKugouDownloadError(
+                "Kugou mix-song page did not provide a canonical audio hash",
+                response_kind="direct_invalid_platform_hash",
+            )
+        title = str(track.get("song_name") or candidate.get("title") or "").strip()
+        artist = str(track.get("artist_name") or candidate.get("artist") or "").strip()
+        filename = str(track.get("audio_name") or "").strip() or " - ".join(
+            value for value in (artist, title) if value
+        )
+        if not title or not artist or not filename:
+            raise DirectKugouDownloadError(
+                "Kugou mix-song page did not provide the metadata required by musicdl",
+                response_kind="direct_missing_platform_metadata",
+            )
+        exact_search_result = {
+            "MixSongID": expected_track_key,
+            "mixsongid": expected_track_key,
+            "hash": file_hash,
+            "FileHash": file_hash,
+            "songname": title,
+            "SongName": title,
+            "singername": artist,
+            "SingerName": artist,
+            "filename": filename,
+            "FileName": filename,
+            "timelen": duration_ms,
+            "duration": duration_ms / 1000,
+        }
+        with item_timeout(timeout):
+            item = parser(exact_search_result)
+        if not getattr(item, "with_valid_download_url", False):
+            raise DirectKugouDownloadError(
+                "musicdl official Kugou parser did not return a valid audio URL",
+                response_kind="direct_musicdl_no_download_url",
+            )
+        if normalized_kugou_file_hash(getattr(item, "identifier", None)) != file_hash:
+            raise DirectKugouDownloadError(
+                "musicdl official Kugou parser returned a different audio hash",
+                response_kind="direct_musicdl_hash_mismatch",
+            )
+        if expected_track_key not in result_kugou_track_keys(item):
+            raise DirectKugouDownloadError(
+                "musicdl direct item did not retain the exact MixSongID",
+                response_kind="direct_musicdl_identity_mismatch",
+            )
+    except (DirectKugouLyricError, DirectKugouDownloadError) as exc:
+        return None, {
+            "lookup_method": SEARCH_DOWNLOAD_LOOKUP_METHOD,
+            "direct_lookup_response_kind": exc.response_kind,
+            "direct_lookup_reason": str(exc),
+            **exc.evidence,
+        }
+    except ItemTimeoutError as exc:
+        return None, {
+            "lookup_method": SEARCH_DOWNLOAD_LOOKUP_METHOD,
+            "direct_lookup_response_kind": "direct_timeout",
+            "direct_lookup_reason": str(exc),
+        }
+
+    evidence = {
+        "lookup_method": DIRECT_DOWNLOAD_LOOKUP_METHOD,
+        "kugou_mixsong_url": mixsong_url,
+        **identity_evidence,
+        "page_file_hash": file_hash,
+        "page_duration_ms": duration_ms,
+        "source_page_sha256": hashlib.sha256(page_payload).hexdigest(),
+    }
+    raw_data = getattr(item, "raw_data", None)
+    if isinstance(raw_data, dict):
+        raw_data["download_lookup"] = evidence
+    return item, evidence
+
+
 def direct_kugou_hash_lyric_receipt(
     candidate: Mapping[str, Any],
     *,
@@ -1078,7 +1207,7 @@ def percentile_ms(values: list[float], percentile: float) -> float | None:
 def summarize_download_timing(item_timings: list[Mapping[str, Any]], worker_started: float) -> dict[str, Any]:
     """Return compact, comparable timings without changing download behavior."""
 
-    stage_names = ("search_ms", "download_ms", "lyrics_ms", "lyric_receipt_write_ms", "commit_ms")
+    stage_names = ("lookup_ms", "download_ms", "lyrics_ms", "lyric_receipt_write_ms", "commit_ms")
     stage_totals = {
         name: round(sum(float(item.get(name) or 0.0) for item in item_timings), 3)
         for name in stage_names
@@ -1095,6 +1224,11 @@ def summarize_download_timing(item_timings: list[Mapping[str, Any]], worker_star
         "downloaded_bytes": downloaded_bytes,
         "downloaded_bytes_per_second": round(downloaded_bytes * 1000 / total_ms, 3) if total_ms else None,
         "search_attempts": sum(int(item.get("search_attempts") or 0) for item in item_timings),
+        "lookup_methods": dict(
+            sorted(
+                Counter(str(item.get("lookup_method") or "unknown") for item in item_timings).items()
+            )
+        ),
         "stage_totals_ms": stage_totals,
         "p50_item_ms": percentile_ms(item_totals, 0.5),
         "p95_item_ms": percentile_ms(item_totals, 0.95),
@@ -1115,9 +1249,12 @@ def run_download(
     search_size: int,
     item_timeout_seconds: float,
     lyrics_receipt_path: Path | None = None,
+    lookup_mode: str = "exact-page-first",
 ) -> dict[str, Any]:
     if item_timeout_seconds <= 0:
         raise ValueError("item-timeout-seconds must be positive")
+    if lookup_mode not in {"exact-page-first", "search-only"}:
+        raise ValueError("lookup_mode must be 'exact-page-first' or 'search-only'")
     queue = load_queue(queue_path)
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     lyrics_receipt_path = (
@@ -1157,6 +1294,8 @@ def run_download(
         *,
         item_started: float,
         status: str,
+        lookup_method: str = "not_attempted",
+        lookup_ms: float = 0.0,
         search_attempts: int = 0,
         search_ms: float = 0.0,
         download_ms: float = 0.0,
@@ -1167,6 +1306,8 @@ def run_download(
     ) -> dict[str, Any]:
         timing = {
             "status": status,
+            "lookup_method": lookup_method,
+            "lookup_ms": round(lookup_ms, 3),
             "search_attempts": search_attempts,
             "search_ms": round(search_ms, 3),
             "download_ms": round(download_ms, 3),
@@ -1201,6 +1342,8 @@ def run_download(
         "lyrics_instrumental": 0,
         "lyrics_platform_unavailable": 0,
         "lyrics_pending": 0,
+        "direct_page_lookups": 0,
+        "search_fallback_lookups": 0,
         "lyrics_receipt": str(lyrics_receipt_path.resolve()),
         "dry_run": dry_run,
     }
@@ -1229,8 +1372,19 @@ def run_download(
             "KugouMusicClient": {
                 "work_dir": str(work_dir),
                 "search_size_per_source": search_size,
+                # One serial worker can safely retain Kugou's HTTP session;
+                # otherwise musicdl recreates it before every request.
+                "maintain_session": True,
             }
         },
+        # The worker supplies one verified track at a time. Avoid creating a
+        # five-thread pool for every single-file transfer.
+        clients_threadings={"KugouMusicClient": 1},
+    )
+    kugou_client = (
+        client.music_clients.get("KugouMusicClient")
+        if isinstance(getattr(client, "music_clients", None), Mapping)
+        else None
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1266,80 +1420,128 @@ def run_download(
             timing = record_item_timing(identity, item_started=item_started, status="no_results")
             commit_state(timing, item_started=item_started)
             continue
-        found: list[Any] | None = None
-        last_error = None
+        lookup_started = time.monotonic()
+        lookup_method = SEARCH_DOWNLOAD_LOOKUP_METHOD
+        lookup_evidence: dict[str, Any] = {}
+        best: Any | None = None
         search_attempts = 0
-        search_started = time.monotonic()
-        for attempt in range(retries + 1):
-            search_attempts += 1
-            try:
-                with item_timeout(item_timeout_seconds):
-                    found = client.search(f"{title} {artist}").get("KugouMusicClient", [])
-                break
-            except ItemTimeoutError as exc:
-                # A timeout is a bounded, auditable failure. Retrying the same
-                # request would only delay the rest of the queue.
-                last_error = str(exc)
-                break
-            except Exception as exc:  # pragma: no cover - network-dependent
-                last_error = str(exc)
-                if attempt < retries:
-                    time.sleep(3)
-        search_ms = elapsed_ms(search_started)
-        if found is None:
-            summary["failed"] += 1
-            progress.setdefault("downloaded", {}).pop(identity, None)
-            record_attempt(item, "failed", error=last_error or "search failed")
-            progress["results"][identity] = {"status": "failed", "error": last_error, "at": now_iso()}
-            timing = record_item_timing(
-                identity,
-                item_started=item_started,
-                status="failed",
-                search_attempts=search_attempts,
-                search_ms=search_ms,
-                error=last_error or "search failed",
+        search_ms = 0.0
+        last_error: str | None = None
+        if lookup_mode == "exact-page-first":
+            best, lookup_evidence = direct_kugou_download_item(
+                candidate,
+                kugou_client=kugou_client,
+                timeout=item_timeout_seconds,
             )
-            commit_state(timing, item_started=item_started)
-            continue
-        if not found:
-            summary["no_results"] += 1
-            progress.setdefault("downloaded", {}).pop(identity, None)
-            record_attempt(item, "no_results")
-            progress["results"][identity] = {"status": "no_results", "at": now_iso()}
-            timing = record_item_timing(
-                identity,
-                item_started=item_started,
-                status="no_results",
-                search_attempts=search_attempts,
-                search_ms=search_ms,
-            )
-            commit_state(timing, item_started=item_started)
-            continue
+            lookup_method = str(lookup_evidence.get("lookup_method") or SEARCH_DOWNLOAD_LOOKUP_METHOD)
 
-        best = choose_match(found, title, artist, platform_track_key=expected_track_key)
         if best is None:
-            summary["no_results"] += 1
-            progress.setdefault("downloaded", {}).pop(identity, None)
-            audit = {
-                "reason": "no_exact_platform_identity_title_artist_match",
-                "match_policy": MATCH_POLICY,
-                "expected_kugou_mix_song_id": expected_track_key,
-                "candidate_count": len(found),
-                "rejected_candidates": rejected_candidate_metadata(found),
-            }
-            record_attempt(item, "no_results", **audit)
-            progress["results"][identity] = {"status": "no_results", "at": now_iso(), **audit}
-            timing = record_item_timing(
-                identity,
-                item_started=item_started,
-                status="no_results",
-                search_attempts=search_attempts,
-                search_ms=search_ms,
-            )
-            commit_state(timing, item_started=item_started)
-            continue
+            lookup_method = SEARCH_DOWNLOAD_LOOKUP_METHOD
+            found: list[Any] | None = None
+            search_started = time.monotonic()
+            for attempt in range(retries + 1):
+                search_attempts += 1
+                try:
+                    with item_timeout(item_timeout_seconds):
+                        found = client.search(f"{title} {artist}").get("KugouMusicClient", [])
+                    break
+                except ItemTimeoutError as exc:
+                    # A timeout is a bounded, auditable failure. Retrying the same
+                    # request would only delay the rest of the queue.
+                    last_error = str(exc)
+                    break
+                except Exception as exc:  # pragma: no cover - network-dependent
+                    last_error = str(exc)
+                    if attempt < retries:
+                        time.sleep(3)
+            search_ms = elapsed_ms(search_started)
+            if found is None:
+                lookup_ms = elapsed_ms(lookup_started)
+                summary["failed"] += 1
+                progress.setdefault("downloaded", {}).pop(identity, None)
+                audit = {
+                    "lookup_method": lookup_method,
+                    **lookup_evidence,
+                }
+                record_attempt(item, "failed", error=last_error or "search failed", **audit)
+                progress["results"][identity] = {
+                    "status": "failed",
+                    "error": last_error,
+                    "at": now_iso(),
+                    **audit,
+                }
+                timing = record_item_timing(
+                    identity,
+                    item_started=item_started,
+                    status="failed",
+                    lookup_method=lookup_method,
+                    lookup_ms=lookup_ms,
+                    search_attempts=search_attempts,
+                    search_ms=search_ms,
+                    error=last_error or "search failed",
+                )
+                commit_state(timing, item_started=item_started)
+                continue
+            if not found:
+                lookup_ms = elapsed_ms(lookup_started)
+                summary["no_results"] += 1
+                progress.setdefault("downloaded", {}).pop(identity, None)
+                audit = {
+                    "lookup_method": lookup_method,
+                    **lookup_evidence,
+                }
+                record_attempt(item, "no_results", **audit)
+                progress["results"][identity] = {"status": "no_results", "at": now_iso(), **audit}
+                timing = record_item_timing(
+                    identity,
+                    item_started=item_started,
+                    status="no_results",
+                    lookup_method=lookup_method,
+                    lookup_ms=lookup_ms,
+                    search_attempts=search_attempts,
+                    search_ms=search_ms,
+                )
+                commit_state(timing, item_started=item_started)
+                continue
 
-        matched = result_metadata(best)
+            best = choose_match(found, title, artist, platform_track_key=expected_track_key)
+            if best is None:
+                lookup_ms = elapsed_ms(lookup_started)
+                summary["no_results"] += 1
+                progress.setdefault("downloaded", {}).pop(identity, None)
+                audit = {
+                    "reason": "no_exact_platform_identity_title_artist_match",
+                    "match_policy": MATCH_POLICY,
+                    "expected_kugou_mix_song_id": expected_track_key,
+                    "candidate_count": len(found),
+                    "rejected_candidates": rejected_candidate_metadata(found),
+                    "lookup_method": lookup_method,
+                    **lookup_evidence,
+                }
+                record_attempt(item, "no_results", **audit)
+                progress["results"][identity] = {"status": "no_results", "at": now_iso(), **audit}
+                timing = record_item_timing(
+                    identity,
+                    item_started=item_started,
+                    status="no_results",
+                    lookup_method=lookup_method,
+                    lookup_ms=lookup_ms,
+                    search_attempts=search_attempts,
+                    search_ms=search_ms,
+                )
+                commit_state(timing, item_started=item_started)
+                continue
+
+        lookup_ms = elapsed_ms(lookup_started)
+        if lookup_method == DIRECT_DOWNLOAD_LOOKUP_METHOD:
+            summary["direct_page_lookups"] += 1
+        else:
+            summary["search_fallback_lookups"] += 1
+        matched = {
+            **result_metadata(best),
+            "lookup_method": lookup_method,
+            "lookup_evidence": lookup_evidence,
+        }
         download_started = time.monotonic()
         download_ms = 0.0
         lyrics_ms = 0.0
@@ -1469,14 +1671,22 @@ def run_download(
                 download_ms = elapsed_ms(download_started)
             item_error = str(exc)
             summary["failed"] += 1
-            record_attempt(item, "failed", error=item_error)
-            progress["results"][identity] = {"status": "failed", "error": item_error, "at": now_iso()}
+            audit = {"lookup_method": lookup_method, **lookup_evidence}
+            record_attempt(item, "failed", error=item_error, **audit)
+            progress["results"][identity] = {
+                "status": "failed",
+                "error": item_error,
+                "at": now_iso(),
+                **audit,
+            }
             log(f"FAILED {exc}")
         status = str(progress["results"].get(identity, {}).get("status") or "failed")
         timing = record_item_timing(
             identity,
             item_started=item_started,
             status=status,
+            lookup_method=lookup_method,
+            lookup_ms=lookup_ms,
             search_attempts=search_attempts,
             search_ms=search_ms,
             download_ms=download_ms,
@@ -1787,6 +1997,12 @@ def main() -> int:
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--search-size", type=int, default=3)
     parser.add_argument(
+        "--lookup-mode",
+        choices=("exact-page-first", "search-only"),
+        default="exact-page-first",
+        help="Resolve the queue's exact Kugou mix-song page before legacy text search (default).",
+    )
+    parser.add_argument(
         "--item-timeout-seconds",
         type=float,
         default=60.0,
@@ -1830,6 +2046,7 @@ def main() -> int:
         args.search_size,
         args.item_timeout_seconds,
         lyrics_receipt,
+        args.lookup_mode,
     )
     return 0
 

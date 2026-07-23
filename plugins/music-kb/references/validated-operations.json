@@ -25,7 +25,7 @@
   ],
   "rules": [
     "榜单输入必须先保存原始 JSON，再进行规范化和去重。",
-    "下载默认由 wrapper 直接运行一个固定 worker；worker 使用 musicdl 的 MusicClient + KugouMusicClient。--executor claude 仅保留为受限兼容回退，多个 worker 不得共享 inventory、progress 或歌词 receipt。",
+    "下载默认由 wrapper 直接运行一个固定 worker；worker 先用队列已绑定的 Kugou MixSong 页面和 audio hash 精确解析单首，再在该路径失败时回退 musicdl 标题/艺人搜索。worker 使用 musicdl 的 MusicClient + KugouMusicClient，保持一个串行 HTTP session。--executor claude 仅保留为受限兼容回退，多个 worker 不得共享 inventory、progress 或歌词 receipt。",
     "历史去重依赖 song_inventory.json，不依赖音频文件继续存在。",
     "入库前必须保留歌曲级 source_url；source_links 数量必须等于 source_tracks 数量。",
     "只同步 immutable snapshot，不同步 writable master database。",
@@ -60,7 +60,7 @@
       "effective_method": "先重建 song_inventory.json；downloaded 且文件存在或 retention=purged_after_analysis 时跳过，missing/failed/no_results 才进入队列。"
     },
     "claude_download": {
-      "effective_method": "run_claude_download.py 默认直接启动一次 download_music_queue.py，保持单进程拥有 inventory、progress 和歌词 receipt；--executor claude 只用于显式兼容重试。worker 不调用 kugou-cli 或旧 batch_download.py，以 Kugou MixSongID 精确校验搜索结果，并从 SongInfo.lyric 或精确页面/hash 回退写结构化 receipt；不得扫描 LRC，网络/解析/identity 失败写 pending。"
+      "effective_method": "run_claude_download.py 默认直接启动一次 download_music_queue.py，保持单进程拥有 inventory、progress 和歌词 receipt；--executor claude 只用于显式兼容重试。worker 默认以队列已绑定的 Kugou MixSong 页面验证平台 ID、取得 page hash 并用 musicdl 官方 Kugou解析器只解析该单首，避免文本搜索展开多个候选；无有效 URL、页面或解析失败时才回退标题/艺人搜索，并仍以 MixSongID 精确校验。worker 不调用 kugou-cli 或旧 batch_download.py，并从 SongInfo.lyric 或精确页面/hash 回退写结构化 receipt；不得扫描 LRC，网络/解析/identity 失败写 pending。"
     },
     "fallback_download": {
       "effective_method": "只处理主 Kugou worker 已记录为 no_results 的队列；run_claude_fallback.py 默认直接串行运行 download_music_fallback.py，--executor claude 仅保留为显式兼容回退。按 fallback-download-profile.json 的 QQ、咪咕、酷我顺序逐来源搜索，严格匹配规范化标题和歌手（含显式艺名别名），下载后必须验证文件大于 1 MB 且 ffprobe 时长至少 60 秒，成功后才更新 song_inventory.json；每来源 90 秒硬超时，失败和 no_results 保留可审计状态。"
