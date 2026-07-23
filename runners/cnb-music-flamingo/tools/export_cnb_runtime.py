@@ -28,6 +28,15 @@ MAX_FILE_BYTES = 1024 * 1024
 
 ROOT_FILES = frozenset({".cnb.yml", ".dockerignore", ".gitignore", "README.md"})
 ROOT_DIRECTORIES = frozenset({".cnb", "config", "scripts", "tests"})
+MANUAL_QUALITY_ROUTE_PATHS = frozenset(
+    {
+        "scripts/devgpu_run_manual_kugou_quality_rerun.sh",
+        "scripts/manual_kugou_quality_route.py",
+        "scripts/check_manual_gpu_gate.py",
+        "scripts/prepare_kugou_quality_rerun.sh",
+        "scripts/prepare_kugou_quality_rerun.py",
+    }
+)
 REQUIRED_PATHS = frozenset(
     {
         ".cnb.yml",
@@ -38,7 +47,7 @@ REQUIRED_PATHS = frozenset(
         "README.md",
         "config/env.example",
     }
-)
+) | MANUAL_QUALITY_ROUTE_PATHS
 
 AUDIO_EXTENSIONS = frozenset(
     {
