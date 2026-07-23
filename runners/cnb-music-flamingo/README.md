@@ -124,7 +124,13 @@ The terminal command must declare all of the following explicitly:
 - a GPU family/profile pair (`L40` + `nvidia-l40/full_precision/bfloat16`, or
   `H20` + `nvidia-h20/full_precision/bfloat16`), with the corresponding clean
   allocation floor; and
+- the exact quality controls `MUSIC_FLAMINGO_REPETITION_PENALTY=1.08` and
+  `MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE=4`; and
 - durable checkpointing for every selected track.
+
+CNB WebIDE terminals do **not** inherit the `vscode.env` map.  The values in
+`.cnb.yml` are therefore visible defaults only; the terminal command must
+explicitly export both quality controls below.
 
 For example, a one-song L40 probe is launched from the terminal only after an
 overlay branch has supplied the campaign-specific values:
@@ -140,6 +146,8 @@ export MUSIC_FLAMINGO_QUALITY_SOURCE_EXPECTED_COUNT=229
 export MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT=1
 export MUSIC_FLAMINGO_LEDGER_BRANCH=campaign-results/kugou-weekly-20260721-quality-rerun-l40-probe-1
 export MUSIC_FLAMINGO_EXECUTION_PROFILE=nvidia-l40/full_precision/bfloat16
+export MUSIC_FLAMINGO_REPETITION_PENALTY=1.08
+export MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE=4
 export MUSIC_FLAMINGO_DURABLE_LEDGER_REQUIRED=1
 export MUSIC_FLAMINGO_LEDGER_CHECKPOINT_EVERY=1
 bash scripts/devgpu_run_manual_kugou_quality_rerun.sh

@@ -41,6 +41,9 @@ _MIN_FREE_MIB = {
     "H20": 87_000,
 }
 _SAFE_BRANCH_SUFFIX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_MAX_MANUAL_SELECTED_COUNT = 5
+_REQUIRED_REPETITION_PENALTY = "1.08"
+_REQUIRED_NO_REPEAT_NGRAM_SIZE = "4"
 
 
 def _positive_integer(value: object, *, field: str) -> int:
@@ -128,6 +131,33 @@ def _validate_manifest_sha256(source_manifest: Path, expected_sha256: object) ->
     return actual
 
 
+def _quality_generation_controls(
+    repetition_penalty: object,
+    no_repeat_ngram_size: object,
+) -> dict[str, float | int]:
+    """Require the manual route's audited anti-repetition settings exactly.
+
+    Normal campaigns retain their independent runtime defaults.  This selected
+    quality route is only admissible when it records the exact controls that
+    ``audit_kugou_quality_rerun.py`` requires, rather than merely accepting any
+    syntactically valid generation setting.
+    """
+    if str(repetition_penalty).strip() != _REQUIRED_REPETITION_PENALTY:
+        raise ManualQualityRouteError(
+            "MUSIC_FLAMINGO_REPETITION_PENALTY must be exactly "
+            f"{_REQUIRED_REPETITION_PENALTY} for the manual quality route"
+        )
+    if str(no_repeat_ngram_size).strip() != _REQUIRED_NO_REPEAT_NGRAM_SIZE:
+        raise ManualQualityRouteError(
+            "MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE must be exactly "
+            f"{_REQUIRED_NO_REPEAT_NGRAM_SIZE} for the manual quality route"
+        )
+    return {
+        "repetition_penalty": float(_REQUIRED_REPETITION_PENALTY),
+        "no_repeat_ngram_size": int(_REQUIRED_NO_REPEAT_NGRAM_SIZE),
+    }
+
+
 def validate_manual_quality_request(
     *,
     repo_root: Path,
@@ -144,6 +174,8 @@ def validate_manual_quality_request(
     minimum_free_mib: int,
     max_selected_count: int,
     max_utilization_percent: int,
+    repetition_penalty: object,
+    no_repeat_ngram_size: object,
 ) -> dict[str, object]:
     """Validate an explicit selection without consulting any campaign ledger."""
     root = Path(repo_root).resolve()
@@ -155,6 +187,11 @@ def validate_manual_quality_request(
     source_expected_count = _positive_integer(source_expected_count, field="source_expected_count")
     expected_count = _positive_integer(expected_count, field="expected_count")
     max_selected_count = _positive_integer(max_selected_count, field="max_selected_count")
+    if max_selected_count > _MAX_MANUAL_SELECTED_COUNT:
+        raise ManualQualityRouteError(
+            "max_selected_count must not exceed the manual quality-route ceiling of "
+            f"{_MAX_MANUAL_SELECTED_COUNT}"
+        )
     if expected_count > max_selected_count:
         raise ManualQualityRouteError(
             f"expected_count={expected_count} exceeds manual maximum {max_selected_count}"
@@ -166,6 +203,7 @@ def validate_manual_quality_request(
         raise ManualQualityRouteError("campaign_id must not be empty")
     primary_ledger_branch, isolated_ledger_branch = _quality_ledger_branch(campaign_id, ledger_branch)
     gpu, minimum_free_mib = _gpu_contract(expected_gpu, execution_profile, minimum_free_mib)
+    generation_controls = _quality_generation_controls(repetition_penalty, no_repeat_ngram_size)
     actual_manifest_sha256 = _validate_manifest_sha256(source_manifest, source_manifest_sha256)
     items = load_campaign_manifest_items(
         source_manifest,
@@ -201,6 +239,7 @@ def validate_manual_quality_request(
         "execution_profile": execution_profile,
         "minimum_free_mib": minimum_free_mib,
         "max_utilization_percent": max_utilization_percent,
+        "generation_controls": generation_controls,
     }
 
 
@@ -239,6 +278,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--minimum-free-mib", type=int, required=True)
     parser.add_argument("--max-selected-count", type=int, default=5)
     parser.add_argument("--max-utilization-percent", type=int, default=0)
+    parser.add_argument("--repetition-penalty", required=True)
+    parser.add_argument("--no-repeat-ngram-size", required=True)
     parser.add_argument("--receipt", type=Path)
     return parser.parse_args(argv)
 
@@ -261,6 +302,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             minimum_free_mib=args.minimum_free_mib,
             max_selected_count=args.max_selected_count,
             max_utilization_percent=args.max_utilization_percent,
+            repetition_penalty=args.repetition_penalty,
+            no_repeat_ngram_size=args.no_repeat_ngram_size,
         )
         if args.receipt is not None:
             _atomic_write_json(args.receipt, result)

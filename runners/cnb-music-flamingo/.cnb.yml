@@ -370,6 +370,8 @@ $:
       MUSIC_FLAMINGO_MAX_NEW_TOKENS: '2048'
       MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS: '240'
       MUSIC_FLAMINGO_OUTPUT_NAME: manual_quality_rerun
+      MUSIC_FLAMINGO_REPETITION_PENALTY: '1.08'
+      MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE: '4'
       MUSIC_FLAMINGO_PROMPT: Describe this track in full detail - tell me the genre, tempo, broad tonal center, rhythmic feel,
         instrumentation, vocal character, production style, structure, and overall mood and atmosphere it creates. Focus only
         on audible musical and performance details. Ignore lyrical content entirely and do not mention, summarize, quote,

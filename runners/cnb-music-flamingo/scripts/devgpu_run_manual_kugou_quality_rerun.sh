@@ -24,6 +24,17 @@ execution_profile="${MUSIC_FLAMINGO_EXECUTION_PROFILE:?MUSIC_FLAMINGO_EXECUTION_
 expected_gpu="${MUSIC_FLAMINGO_MANUAL_GPU_NAME:-L40}"
 max_selected_count="${MUSIC_FLAMINGO_MANUAL_MAX_SELECTED_COUNT:-5}"
 max_utilization_percent="${MUSIC_FLAMINGO_MANUAL_GPU_MAX_UTILIZATION_PERCENT:-0}"
+repetition_penalty="${MUSIC_FLAMINGO_REPETITION_PENALTY:?MUSIC_FLAMINGO_REPETITION_PENALTY is required}"
+no_repeat_ngram_size="${MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE:?MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE is required}"
+
+[[ "$repetition_penalty" == "1.08" ]] || {
+  echo 'Manual quality route requires MUSIC_FLAMINGO_REPETITION_PENALTY=1.08.' >&2
+  exit 2
+}
+[[ "$no_repeat_ngram_size" == "4" ]] || {
+  echo 'Manual quality route requires MUSIC_FLAMINGO_NO_REPEAT_NGRAM_SIZE=4.' >&2
+  exit 2
+}
 
 case "$expected_gpu" in
   L40) default_minimum_free_mib=40000 ;;
@@ -92,6 +103,8 @@ python scripts/manual_kugou_quality_route.py \
   --minimum-free-mib "$minimum_free_mib" \
   --max-selected-count "$max_selected_count" \
   --max-utilization-percent "$max_utilization_percent" \
+  --repetition-penalty "$repetition_penalty" \
+  --no-repeat-ngram-size "$no_repeat_ngram_size" \
   --receipt "$run_dir/manual_quality_request.json"
 
 # Gate 1 is deliberately before any model import.  A second independent gate
