@@ -85,9 +85,11 @@ be purged, so inventory—not file presence alone—is the dedupe record.
    `musicdl`'s `MusicClient` plus `KugouMusicClient`; it must not call
    `kugou-cli` or the legacy full-database downloader. Keep one song-level
    inventory row per platform identity.
-7. **`fallback_download`** — ask Claude Code to process only the primary
-   worker's recorded `no_results` or `failed` states, in the configured fallback order, with the
-   duration/size checks. Preserve failed/no-result states for retry.
+7. **`fallback_download`** — ask Claude Code to start the fixed detached
+   worker for only the primary worker's recorded `no_results` or `failed`
+   states, in the configured fallback order, with the duration/size checks.
+   The outer wrapper waits for the completion receipt; Claude Code must not
+   restart a long-running worker. Preserve failed/no-result states for retry.
 8. **`cnb_input_materialization`** — consume only newly downloaded queue rows;
    verify file existence, identity, SHA-256, byte count, and `source_url`; use
    hardlinks into an isolated staging directory and write the LF JSONL manifest.

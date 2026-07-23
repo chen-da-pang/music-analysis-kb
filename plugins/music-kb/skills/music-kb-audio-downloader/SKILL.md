@@ -137,7 +137,10 @@ automatically.
 The fallback queue must contain only records whose current inventory status is
 `no_results` or `failed`; it records the original status for audit. Before a
 real run, use `--dry-run` and review the queue count and status breakdown.
-Claude Code must run this fixed command and wait for its progress receipt:
+Claude Code must run the fixed short launcher exactly once. The launcher starts
+the fixed worker under a detached supervisor; the outer wrapper, not Claude
+Code's Bash session, waits for its completion receipt. This prevents a long
+download from being killed or restarted by a tool timeout:
 
 ```bash
 python3 music-analysis-kb/plugins/music-kb/scripts/download_music_fallback.py \
