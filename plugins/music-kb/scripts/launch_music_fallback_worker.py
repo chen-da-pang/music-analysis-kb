@@ -35,7 +35,7 @@ def atomic_write_json(path: Path, value: Any) -> None:
 
 def worker_command(args: argparse.Namespace) -> list[str]:
     command = [
-        sys.executable,
+        args.worker_python,
         str(Path(__file__).resolve().with_name("download_music_fallback.py")),
         "--queue",
         str(args.queue),
@@ -78,6 +78,8 @@ def supervisor_command(args: argparse.Namespace) -> list[str]:
         str(args.completion_receipt),
         "--worker-log",
         str(args.worker_log),
+        "--worker-python",
+        args.worker_python,
     ]
     if args.dry_run:
         command.append("--dry-run")
@@ -112,6 +114,7 @@ def supervise(args: argparse.Namespace) -> int:
         "supervisor_pid": os.getpid(),
         "worker_command": command,
         "worker_log": str(log_path.resolve()),
+        "worker_python": args.worker_python,
         "exit_code": exit_code,
         "error": error,
     }
@@ -140,6 +143,7 @@ def launch(args: argparse.Namespace) -> int:
         "supervisor_command": command,
         "completion_receipt": str(args.completion_receipt.resolve()),
         "worker_log": str(args.worker_log.resolve()),
+        "worker_python": args.worker_python,
     }
     atomic_write_json(launch_path, receipt)
     print(json.dumps(receipt, ensure_ascii=False))
@@ -157,6 +161,7 @@ def main() -> int:
     parser.add_argument("--launch-receipt", type=Path, required=True)
     parser.add_argument("--completion-receipt", type=Path, required=True)
     parser.add_argument("--worker-log", type=Path, required=True)
+    parser.add_argument("--worker-python", required=True, help="Python interpreter already verified to import musicdl")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--supervise", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()

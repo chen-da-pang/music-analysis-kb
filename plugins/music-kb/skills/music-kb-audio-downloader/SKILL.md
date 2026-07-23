@@ -142,6 +142,10 @@ the fixed worker under a detached supervisor; the outer wrapper, not Claude
 Code's Bash session, waits for its completion receipt. This prevents a long
 download from being killed or restarted by a tool timeout:
 
+Before launching, the wrapper resolves `--worker-python` (or
+`MUSICDL_PYTHON`) and proves that it can import `musicdl`; do not assume the
+plugin virtual environment contains the downloader dependency.
+
 ```bash
 python3 music-analysis-kb/plugins/music-kb/scripts/download_music_fallback.py \
   --queue data/download_runs/<run-id>/fallback_queue.jsonl \

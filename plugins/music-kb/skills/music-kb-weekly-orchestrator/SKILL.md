@@ -89,7 +89,8 @@ be purged, so inventory—not file presence alone—is the dedupe record.
    worker for only the primary worker's recorded `no_results` or `failed`
    states, in the configured fallback order, with the duration/size checks.
    The outer wrapper waits for the completion receipt; Claude Code must not
-   restart a long-running worker. Preserve failed/no-result states for retry.
+   restart a long-running worker. It must validate the selected Python can
+   import `musicdl` before launch. Preserve failed/no-result states for retry.
 8. **`cnb_input_materialization`** — consume only newly downloaded queue rows;
    verify file existence, identity, SHA-256, byte count, and `source_url`; use
    hardlinks into an isolated staging directory and write the LF JSONL manifest.

@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -58,6 +59,41 @@ def wait_for_completion(launch: dict, completion_path: Path, timeout_seconds: in
     raise RuntimeError(f"detached fallback worker timed out after {timeout_seconds}s")
 
 
+def resolve_musicdl_python(explicit: str | None) -> str:
+    candidates: list[str] = []
+    for candidate in (explicit, os.environ.get("MUSICDL_PYTHON"), sys.executable, shutil.which("python3")):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    micromamba_root = Path.home() / ".local" / "share" / "micromamba" / "envs"
+    if micromamba_root.is_dir():
+        for candidate in sorted(micromamba_root.glob("*/bin/python3")):
+            rendered = str(candidate)
+            if rendered not in candidates:
+                candidates.append(rendered)
+    checked: list[str] = []
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if not path.is_file():
+            continue
+        try:
+            result = subprocess.run(
+                [str(path), "-c", "import musicdl"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except OSError:
+            continue
+        checked.append(str(path))
+        if result.returncode == 0:
+            return str(path.resolve())
+    raise RuntimeError(
+        "no Python interpreter can import musicdl; supply --worker-python or MUSICDL_PYTHON "
+        f"(checked: {', '.join(checked) or 'none'})"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, required=True)
@@ -69,12 +105,14 @@ def main() -> int:
     parser.add_argument("--operations-file", type=Path, default=Path(__file__).resolve().parents[1] / "references" / "validated-operations.json")
     parser.add_argument("--profile", type=Path, default=Path(__file__).resolve().parents[1] / "references" / "fallback-download-profile.json")
     parser.add_argument("--retry-statuses", help="Override comma-separated retry statuses from the fallback profile")
+    parser.add_argument("--worker-python", help="Python interpreter that imports musicdl; defaults to MUSICDL_PYTHON or a validated local interpreter")
     args = parser.parse_args()
     started_at = now_iso()
     workspace = args.workspace.expanduser().resolve()
     operations = args.operations_file.expanduser().resolve()
     profile = args.profile.expanduser().resolve()
     load_validated_operations(operations, required_atom="fallback_download")
+    worker_python = resolve_musicdl_python(args.worker_python)
     profile_data = json.loads(profile.read_text(encoding="utf-8"))
     retry_statuses = args.retry_statuses or ",".join(profile_data.get("retry_statuses", ["no_results", "failed"]))
     run_dir = workspace / "data" / "download_runs" / args.run_id
@@ -120,6 +158,8 @@ def main() -> int:
         str(completion_receipt),
         "--worker-log",
         str(worker_log),
+        "--worker-python",
+        worker_python,
     ]
     if args.dry_run:
         values.append("--dry-run")
@@ -168,6 +208,7 @@ def main() -> int:
         "progress": str(progress),
         "operations_sha256": sha256_file(operations),
         "profile": str(profile),
+        "worker_python": worker_python,
     }
     atom_exit_code = 0
     if launch_receipt.is_file():
@@ -202,7 +243,7 @@ def main() -> int:
         "finished_at": now_iso(),
         "run_id": args.run_id,
         "atom": "fallback_download",
-        "inputs": {"inventory": str(inventory), "profile": str(profile), "queue": str(queue), "retry_statuses": manifest["retry_statuses"]},
+        "inputs": {"inventory": str(inventory), "profile": str(profile), "queue": str(queue), "retry_statuses": manifest["retry_statuses"], "worker_python": worker_python},
         "outputs": summary,
         "operations_file": str(operations),
         "operations_sha256": sha256_file(operations),
