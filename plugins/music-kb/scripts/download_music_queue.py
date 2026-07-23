@@ -435,27 +435,47 @@ def _mixsong_page_tracks(payload: bytes) -> list[Mapping[str, Any]]:
     return tracks
 
 
+def _page_mix_song_id(track: Mapping[str, Any]) -> str:
+    for key in ("mixsongid", "mix_song_id", "MixSongID"):
+        if track.get(key) is not None:
+            return str(track[key]).strip()
+    return ""
+
+
 def _page_track_for_mix_song_id(
     tracks: list[Mapping[str, Any]], expected_track_key: str
-) -> Mapping[str, Any]:
-    matches = [
-        track
-        for track in tracks
-        if str(
-            track.get("mixsongid")
-            or track.get("mix_song_id")
-            or track.get("MixSongID")
-            or ""
-        ).strip()
-        == expected_track_key
-    ]
+) -> tuple[Mapping[str, Any], dict[str, Any]]:
+    returned_ids = sorted({_page_mix_song_id(track) for track in tracks})
+    matches = [track for track in tracks if _page_mix_song_id(track) == expected_track_key]
     if len(matches) != 1:
+        # Some agent_gateway pages expose the exact URL, hash and duration but
+        # deliberately render ``mixsongid: 0``. The source URL was already
+        # bound to the requested platform ID by the queue materializer, so a
+        # singleton zero-ID page remains identity-bound without falling back to
+        # title/artist matching. A nonzero conflicting ID is always rejected.
+        if len(tracks) == 1 and set(returned_ids).issubset({"", "0"}):
+            return (
+                tracks[0],
+                {
+                    "page_kugou_mix_song_id": returned_ids[0] if returned_ids else None,
+                    "identity_verification": "queue_exact_source_url_page_id_unavailable_v1",
+                },
+            )
         raise DirectKugouLyricError(
             "Kugou mix-song page identity does not match the requested MixSongID",
             response_kind="direct_identity_mismatch",
-            evidence={"page_matching_mix_song_id_count": len(matches)},
+            evidence={
+                "page_matching_mix_song_id_count": len(matches),
+                "page_returned_mix_song_ids": returned_ids,
+            },
         )
-    return matches[0]
+    return (
+        matches[0],
+        {
+            "page_kugou_mix_song_id": expected_track_key,
+            "identity_verification": "mixsong_page_echo_v1",
+        },
+    )
 
 
 def _page_track_lyric_query(
@@ -521,9 +541,11 @@ def _direct_kugou_lyric_item(
 ) -> tuple[Any, dict[str, Any]]:
     """Fetch lyrics through the exact MixSongID -> hash -> lyric chain.
 
-    The page must echo the queue's MixSongID before its hash is trusted.  The
-    platform lyric search is then called with that hash and exact duration;
-    no title/artist matching or downloaded audio is involved.
+    The page must echo the queue's MixSongID before its hash is trusted. A
+    singleton ``mixsongid: 0`` page is the documented platform exception: its
+    exact queue source URL remains the identity proof. The platform lyric
+    search is then called with that hash and exact duration; no title/artist
+    matching or downloaded audio is involved.
     """
 
     try:
@@ -534,7 +556,9 @@ def _direct_kugou_lyric_item(
             response_kind="direct_mixsong_page_request_failed",
             evidence={"kugou_mixsong_url": mixsong_url},
         ) from exc
-    track = _page_track_for_mix_song_id(_mixsong_page_tracks(page_payload), expected_track_key)
+    track, identity_evidence = _page_track_for_mix_song_id(
+        _mixsong_page_tracks(page_payload), expected_track_key
+    )
     file_hash, keyword, duration_ms = _page_track_lyric_query(track, candidate)
     search_url = "https://lyrics.kugou.com/search?" + urlencode(
         {"keyword": keyword, "duration": str(duration_ms), "hash": file_hash}
@@ -559,7 +583,7 @@ def _direct_kugou_lyric_item(
     candidates = [item for item in raw_candidates if isinstance(item, Mapping)]
     evidence = {
         "kugou_mixsong_url": mixsong_url,
-        "page_kugou_mix_song_id": expected_track_key,
+        **identity_evidence,
         "page_file_hash": file_hash,
         "page_duration_ms": duration_ms,
         "source_page_sha256": hashlib.sha256(page_payload).hexdigest(),

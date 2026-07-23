@@ -451,6 +451,95 @@ def test_exact_mixsong_zero_lyric_candidates_is_platform_unavailable(monkeypatch
     assert receipt["evidence"]["query_method"] == module.DIRECT_LYRIC_QUERY_METHOD
 
 
+def test_exact_source_url_can_prove_a_singleton_page_with_zero_mixsong_id(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _module()
+    queue, _inventory, work_dir, progress, log = _queue(
+        tmp_path, title="空心 (Live)", artist="黄霄雲、刘端端"
+    )
+    source_url = "https://www.kugou.com/mixsong/agent_gateway/zero-id.html"
+    row = json.loads(queue.read_text(encoding="utf-8"))
+    row["source_url"] = source_url
+    queue.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    page, search, download = _direct_kugou_responses("0")
+
+    def fake_fetch(url: str, *, timeout: float) -> bytes:
+        assert timeout == 5
+        if url == source_url:
+            return page
+        if url.startswith("https://lyrics.kugou.com/search?"):
+            return search
+        if url.startswith("https://lyrics.kugou.com/download?"):
+            return download
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(module, "_fetch_url", fake_fetch)
+    receipt_path = tmp_path / "backfill-lyrics.jsonl"
+    summary = module.run_lyrics_only(
+        queue,
+        work_dir,
+        progress,
+        log,
+        "lyrics-only-zero-page-id",
+        None,
+        False,
+        0,
+        0,
+        10,
+        5,
+        receipt_path,
+    )
+
+    assert summary["available"] == 1
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["evidence"]["page_kugou_mix_song_id"] == "0"
+    assert (
+        receipt["evidence"]["identity_verification"]
+        == "queue_exact_source_url_page_id_unavailable_v1"
+    )
+
+
+def test_nonzero_page_mixsong_id_mismatch_stays_pending(monkeypatch, tmp_path: Path) -> None:
+    module = _module()
+    queue, _inventory, work_dir, progress, log = _queue(
+        tmp_path, title="空心 (Live)", artist="黄霄雲、刘端端"
+    )
+    source_url = "https://www.kugou.com/mixsong/agent_gateway/wrong-id.html"
+    row = json.loads(queue.read_text(encoding="utf-8"))
+    row["source_url"] = source_url
+    queue.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    page, _search, _download = _direct_kugou_responses("999")
+
+    def fake_fetch(url: str, *, timeout: float) -> bytes:
+        assert timeout == 5
+        if url == source_url:
+            return page
+        raise AssertionError(f"a nonzero identity mismatch must stop before lyrics: {url}")
+
+    monkeypatch.setattr(module, "_fetch_url", fake_fetch)
+    receipt_path = tmp_path / "backfill-lyrics.jsonl"
+    summary = module.run_lyrics_only(
+        queue,
+        work_dir,
+        progress,
+        log,
+        "lyrics-only-wrong-page-id",
+        None,
+        False,
+        0,
+        0,
+        10,
+        5,
+        receipt_path,
+    )
+
+    assert summary["pending"] == 1
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["evidence"]["response_kind"] == "direct_identity_mismatch"
+    assert receipt["evidence"]["page_returned_mix_song_ids"] == ["999"]
+
+
 def test_lyrics_only_worker_rejects_html_failure_payload(monkeypatch, tmp_path: Path) -> None:
     module = _module()
 
