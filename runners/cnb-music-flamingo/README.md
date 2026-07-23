@@ -107,8 +107,48 @@ run `bash scripts/devgpu_run_batch.sh` again from its WebIDE terminal unless you
 supply a new `MUSIC_FLAMINGO_RUN_ID`; the automatic stage is the authoritative route
 for this event.
 
-The generic `vscode` event starts only the viewer. It is the manual route: set a fresh
-`MUSIC_FLAMINGO_RUN_ID` before each terminal-launched batch.
+The generic `vscode` event opens a **manual-only** Dev GPU terminal. It never
+starts a model, restores a ledger, hydrates LFS, or invokes
+`devgpu_run_kugou_campaign.sh`. This is the only route for a controlled
+single-song or selected-quality retry after changing GPU family.
+
+The terminal command must declare all of the following explicitly:
+
+- a source manifest and a strictly increasing selection file;
+- the exact source-manifest SHA-256 from the receipt-bound campaign;
+- `MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT`, matching the selection exactly
+  (the route caps a manual run at five tracks);
+- a ledger branch named
+  `campaign-results/<campaign-id>-quality-rerun-<attempt>`; the primary
+  `campaign-results/<campaign-id>` branch is refused;
+- a GPU family/profile pair (`L40` + `nvidia-l40/full_precision/bfloat16`, or
+  `H20` + `nvidia-h20/full_precision/bfloat16`), with the corresponding clean
+  allocation floor; and
+- durable checkpointing for every selected track.
+
+For example, a one-song L40 probe is launched from the terminal only after an
+overlay branch has supplied the campaign-specific values:
+
+```bash
+export MUSIC_FLAMINGO_MANUAL_QUALITY_ROUTE=1
+export MUSIC_FLAMINGO_CAMPAIGN_ID=kugou-weekly-20260721
+export MUSIC_FLAMINGO_QUALITY_SOURCE_MANIFEST=data/input/campaign-kugou-weekly-20260721/manifest.jsonl
+export MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT=data/input/campaign-kugou-weekly-20260721
+export MUSIC_FLAMINGO_QUALITY_SELECTION_FILE=data/input/campaign-kugou-weekly-20260721/quality_probe_1.txt
+export MUSIC_FLAMINGO_CAMPAIGN_MANIFEST_SHA256=516aa4cab74a9d9c0ec426659a2f221257934fbe77e6ec23d774adf9108549f6
+export MUSIC_FLAMINGO_QUALITY_SOURCE_EXPECTED_COUNT=229
+export MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT=1
+export MUSIC_FLAMINGO_LEDGER_BRANCH=campaign-results/kugou-weekly-20260721-quality-rerun-l40-probe-1
+export MUSIC_FLAMINGO_EXECUTION_PROFILE=nvidia-l40/full_precision/bfloat16
+export MUSIC_FLAMINGO_DURABLE_LEDGER_REQUIRED=1
+export MUSIC_FLAMINGO_LEDGER_CHECKPOINT_EVERY=1
+bash scripts/devgpu_run_manual_kugou_quality_rerun.sh
+```
+
+The route validates the request without reading the primary ledger, creates a
+compact sparse-LFS manifest, then performs a clean-GPU gate both before LFS
+hydration and immediately before model load. A failed gate writes its receipt
+and exits without an inference attempt.
 
 The viewer uses one atomic `run_status.json` document. It never combines a newly
 started PID with an exit code from a previous run; a hard-killed process is shown as

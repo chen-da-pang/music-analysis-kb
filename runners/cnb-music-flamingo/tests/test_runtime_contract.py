@@ -404,6 +404,43 @@ class CNBConfigurationContractTests(unittest.TestCase):
         self.assertIn("prepare_kugou_quality_rerun.sh", stages["Hydrate and rerun selected KuGou outputs"])
         self.assertIn("campaign_ledger_git.sh restore", stages["Restore isolated quality-rerun ledger"])
 
+    def test_vscode_is_manual_only_and_cannot_start_the_primary_campaign_runner(self) -> None:
+        workspace = self.load_config()["$"]["vscode"][0]
+        env = workspace["env"]
+        stages = {stage["name"]: stage.get("script", "") for stage in workspace["stages"]}
+        self.assertEqual(env["MUSIC_FLAMINGO_MANUAL_QUALITY_ROUTE"], "1")
+        self.assertEqual(env["MUSIC_FLAMINGO_MANUAL_GPU_NAME"], "L40")
+        self.assertEqual(str(env["MUSIC_FLAMINGO_MANUAL_GPU_MIN_FREE_MIB"]), "40000")
+        self.assertEqual(str(env["MUSIC_FLAMINGO_MANUAL_MAX_SELECTED_COUNT"]), "5")
+        for forbidden in (
+            "MUSIC_FLAMINGO_CAMPAIGN_ID",
+            "MUSIC_FLAMINGO_LEDGER_BRANCH",
+            "MUSIC_FLAMINGO_QUALITY_SELECTION_FILE",
+            "MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT",
+            "MUSIC_FLAMINGO_CAMPAIGN_MANIFEST_SHA256",
+        ):
+            self.assertNotIn(forbidden, env)
+        terminal_script = stages["Open manual-only Dev GPU terminal"]
+        self.assertNotIn("devgpu_run_kugou_campaign.sh", terminal_script)
+        self.assertNotIn(
+            "bash scripts/devgpu_run_manual_kugou_quality_rerun.sh",
+            [line.strip() for line in terminal_script.splitlines()],
+        )
+
+        manual = (REPO_ROOT / "scripts/devgpu_run_manual_kugou_quality_rerun.sh").read_text(encoding="utf-8")
+        self.assertNotIn("prepare_kugou_campaign_shard.sh", manual)
+        self.assertNotIn("devgpu_run_kugou_campaign.sh", manual)
+        self.assertIn("manual_kugou_quality_route.py", manual)
+        self.assertIn("prepare_kugou_quality_rerun.sh", manual)
+        self.assertLess(
+            manual.index("manual_gpu_gate_before_hydrate.json"),
+            manual.index("prepare_kugou_quality_rerun.sh"),
+        )
+        self.assertLess(
+            manual.index("prepare_kugou_quality_rerun.sh"),
+            manual.index("manual_gpu_gate_pre_model.json"),
+        )
+
 
 class ArtifactRetentionContractTests(unittest.TestCase):
     def test_remote_batch_routes_package_and_upload_run_evidence(self) -> None:
