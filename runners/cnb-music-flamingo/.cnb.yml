@@ -345,8 +345,9 @@ $:
         - moss-music-sglang-cuda-model
         type: docker
   vscode:
-  # This branch is a one-shot Dev GPU recovery route.  The build-GPU quota is
-  # exhausted, while the independent Dev-GPU allowance remains available.
+  # A Dev GPU terminal only.  It must never auto-start a campaign runner:
+  # callers first create an explicit quality selection and isolated ledger
+  # branch, then launch the manual script themselves from the terminal.
   - git:
       lfs: false
     docker:
@@ -368,37 +369,26 @@ $:
       CNB_RUNTIME_IMAGE: docker.cnb.cool/wuyoumusic/moss-music-runner@sha256:a04cdbc02ef0f0958282e7bbf8c3a15b3a3105f4d17c95db88c98d1fc5f3657b
       MUSIC_FLAMINGO_MAX_NEW_TOKENS: '2048'
       MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS: '240'
-      MUSIC_FLAMINGO_OUTPUT_NAME: campaign_kugou_20260716_431
+      MUSIC_FLAMINGO_OUTPUT_NAME: manual_quality_rerun
       MUSIC_FLAMINGO_PROMPT: Describe this track in full detail - tell me the genre, tempo, broad tonal center, rhythmic feel,
         instrumentation, vocal character, production style, structure, and overall mood and atmosphere it creates. Focus only
         on audible musical and performance details. Ignore lyrical content entirely and do not mention, summarize, quote,
         or transcribe any lyrics.
       MUSIC_FLAMINGO_RUN_ID: ${CNB_BUILD_ID}
-      MUSIC_FLAMINGO_CAMPAIGN_ID: kugou-20260716-431
-      MUSIC_FLAMINGO_CAMPAIGN_SOURCE_MANIFEST: data/input/campaign-kugou-20260716-431/manifest.jsonl
-      MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT: data/input/campaign-kugou-20260716-431
-      MUSIC_FLAMINGO_CAMPAIGN_TRANSPORT: git-objects
-      MUSIC_FLAMINGO_CAMPAIGN_GIT_OBJECTS_MAX_BYTES: '5000000000'
-      MUSIC_FLAMINGO_CAMPAIGN_GIT_OBJECTS_MAX_FILE_BYTES: '268435456'
-      MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT: '431'
-      MUSIC_FLAMINGO_CAMPAIGN_SHARD_INDEX: '1'
-      MUSIC_FLAMINGO_CAMPAIGN_SHARD_COUNT: '4'
-      MUSIC_FLAMINGO_CAMPAIGN_SHARD_ID: kugou-20260716-431-s1
-      MUSIC_FLAMINGO_CAMPAIGN_MAX_ELAPSED_SECONDS: '11000'
-      MUSIC_FLAMINGO_CAMPAIGN_MAX_PENDING_ITEMS: '0'
-      MUSIC_FLAMINGO_CONTINUE_ON_ERROR: '1'
+      MUSIC_FLAMINGO_MANUAL_QUALITY_ROUTE: '1'
+      MUSIC_FLAMINGO_MANUAL_GPU_NAME: L40
+      MUSIC_FLAMINGO_MANUAL_GPU_MIN_FREE_MIB: '40000'
+      MUSIC_FLAMINGO_MANUAL_GPU_MAX_UTILIZATION_PERCENT: '0'
+      MUSIC_FLAMINGO_MANUAL_MAX_SELECTED_COUNT: '5'
       MUSIC_FLAMINGO_EXECUTION_PROFILE: nvidia-l40/full_precision/bfloat16
-      MUSIC_FLAMINGO_DURABLE_LEDGER_REQUIRED: '1'
-      MUSIC_FLAMINGO_LEDGER_CHECKPOINT_EVERY: '5'
-      MUSIC_FLAMINGO_LEDGER_REPO_URL: https://cnb.cool/wuyoumusic/moss-music-runner.git
-      MUSIC_FLAMINGO_LEDGER_BRANCH: campaign-results/kugou-20260716-431
-      MUSIC_FLAMINGO_LEDGER_GIT_USER_NAME: CNB Music Campaign Ledger
-      MUSIC_FLAMINGO_LEDGER_GIT_USER_EMAIL: cnb-ledger@wuyoumusic.invalid
       MUSIC_FLAMINGO_DETAILED_CUDA_TELEMETRY: '0'
     stages:
-    - name: Validate and run 431-song KuGou Dev GPU shard
-      timeout: 4h
-      script: bash scripts/devgpu_run_kugou_campaign.sh
+    - name: Open manual-only Dev GPU terminal
+      script: |
+        set -eu
+        echo 'No model, LFS hydrate, campaign planner, or ledger restore is run automatically.'
+        echo 'Create an explicit quality selection and isolated quality ledger branch, then run:'
+        echo '  bash scripts/devgpu_run_manual_kugou_quality_rerun.sh'
     lock:
       key: music-flamingo-output-writer
       wait: true
