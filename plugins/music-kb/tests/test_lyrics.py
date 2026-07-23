@@ -408,6 +408,56 @@ def test_materialized_lyrics_backfill_queue_is_operational_jsonl(unresolved_mast
     assert row["source_track_id"] == "kugou-123456"
 
 
+def test_materialized_lyrics_backfill_queue_attaches_only_exact_inventory_hashes(
+    unresolved_master_database, tmp_path: Path
+) -> None:
+    with MusicKBRepository(unresolved_master_database) as repository:
+        _make_fixture_source_exact_kugou(repository)
+
+    inventory = tmp_path / "song_inventory.json"
+    inventory.write_text(
+        json.dumps(
+            {
+                "songs": [
+                    {
+                        "identity_key": "kugou:123456",
+                        "download": {
+                            "status": "downloaded",
+                            "retention": "purged_after_analysis",
+                            "path": "old/fixture - ABCDEF0123456789ABCDEF0123456789.mp3",
+                        },
+                    },
+                    {
+                        "identity_key": "kugou:654321",
+                        "download": {
+                            "status": "downloaded",
+                            "path": "old/unrelated - 0123456789ABCDEF0123456789ABCDEF.flac",
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "operations" / "lyrics-backfill-with-archive.jsonl"
+
+    result = materialize_lyric_backfill_queue(
+        unresolved_master_database, output, inventory=inventory
+    )
+
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["archived_kugou_file_hash"] == "ABCDEF0123456789ABCDEF0123456789"
+    assert row["archived_kugou_file_hash_provenance"] == {
+        "method": "song_inventory_download_path_exact_identity_v1",
+        "inventory_identity_key": "kugou:123456",
+        "download_status": "downloaded",
+        "download_retention": "purged_after_analysis",
+        "inventory_relative_audio_path": "old/fixture - ABCDEF0123456789ABCDEF0123456789.mp3",
+    }
+    assert result["archived_hash_bridge"]["attached"] == 1
+    assert result["archived_hash_bridge"]["available"] == 2
+
+
 def test_initialize_migrates_v6_database_without_fabricating_lyrics(tmp_path: Path) -> None:
     database = tmp_path / "legacy.sqlite"
     initialize_database(database)

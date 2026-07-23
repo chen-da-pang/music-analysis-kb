@@ -589,3 +589,209 @@ def test_lyrics_only_worker_rejects_html_failure_payload(monkeypatch, tmp_path: 
     assert receipt["status"] == "pending"
     assert receipt["evidence"]["response_kind"] == "invalid_lyric_payload"
     assert "lyric_text" not in receipt
+
+
+def _empty_mixsong_page() -> bytes:
+    return (
+        '<script>var dataFromSmarty = [{"hash":null,"author_name":"","song_name":"",'
+        '"audio_name":"","album_id":0,"timelength":0,"mixsongid":0}],'
+        "// 当前页面歌曲信息</script>"
+    ).encode("utf-8")
+
+
+def test_lyrics_only_worker_uses_verified_archived_hash_after_empty_page(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _module()
+    queue, _inventory, work_dir, progress, log = _queue(
+        tmp_path, title="空心 (Live)", artist="黄霄雲、刘端端"
+    )
+    source_url = "https://www.kugou.com/mixsong/agent_gateway/archived-hash.html"
+    row = json.loads(queue.read_text(encoding="utf-8"))
+    row.update(
+        {
+            "source_url": source_url,
+            "archived_kugou_file_hash": "A" * 32,
+            "archived_kugou_file_hash_provenance": {
+                "method": "song_inventory_download_path_exact_identity_v1",
+                "inventory_identity_key": "kugou:1",
+                "download_status": "downloaded",
+                "download_retention": "purged_after_analysis",
+                "inventory_relative_audio_path": "old/fixture - " + "A" * 32 + ".mp3",
+            },
+        }
+    )
+    queue.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    _page, search, download = _direct_kugou_responses()
+
+    def fake_fetch(url: str, *, timeout: float) -> bytes:
+        assert timeout == 5
+        if url == source_url:
+            return _empty_mixsong_page()
+        if url.startswith("https://lyrics.kugou.com/search?"):
+            assert "duration=-1" in url
+            assert "hash=" + "A" * 32 in url
+            return search
+        if url.startswith("https://lyrics.kugou.com/download?"):
+            return download
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(module, "_fetch_url", fake_fetch)
+    receipt_path = tmp_path / "backfill-lyrics.jsonl"
+    summary = module.run_lyrics_only(
+        queue,
+        work_dir,
+        progress,
+        log,
+        "lyrics-only-archived-hash",
+        None,
+        False,
+        0,
+        0,
+        10,
+        5,
+        receipt_path,
+    )
+
+    assert summary["available"] == 1
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["lyric_text"] == "精确页面歌词"
+    assert receipt["evidence"]["query_method"] == module.DIRECT_HASH_LYRIC_QUERY_METHOD
+    assert (
+        receipt["evidence"]["identity_verification"]
+        == "queue_exact_mixsong_inventory_download_hash_v1"
+    )
+    assert receipt["evidence"]["prior_direct_response_kind"] == "direct_missing_platform_hash"
+
+
+def test_lyrics_only_worker_rejects_an_archived_hash_without_exact_inventory_identity(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _module()
+    queue, _inventory, work_dir, progress, log = _queue(
+        tmp_path, title="空心 (Live)", artist="黄霄雲、刘端端"
+    )
+    source_url = "https://www.kugou.com/mixsong/agent_gateway/bad-archived-hash.html"
+    row = json.loads(queue.read_text(encoding="utf-8"))
+    row.update(
+        {
+            "source_url": source_url,
+            "archived_kugou_file_hash": "A" * 32,
+            "archived_kugou_file_hash_provenance": {
+                "method": "song_inventory_download_path_exact_identity_v1",
+                "inventory_identity_key": "kugou:999",
+                "download_status": "downloaded",
+            },
+        }
+    )
+    queue.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def fake_fetch(url: str, *, timeout: float) -> bytes:
+        assert timeout == 5
+        if url == source_url:
+            return _empty_mixsong_page()
+        raise AssertionError(f"unproven archived hash must not query lyrics: {url}")
+
+    monkeypatch.setattr(module, "_fetch_url", fake_fetch)
+    receipt_path = tmp_path / "backfill-lyrics.jsonl"
+    summary = module.run_lyrics_only(
+        queue,
+        work_dir,
+        progress,
+        log,
+        "lyrics-only-bad-archived-hash",
+        None,
+        False,
+        0,
+        0,
+        10,
+        5,
+        receipt_path,
+    )
+
+    assert summary["pending"] == 1
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["evidence"]["response_kind"] == "direct_missing_platform_hash"
+
+
+def test_download_worker_uses_exact_musicdl_hash_when_page_is_empty(monkeypatch, tmp_path: Path) -> None:
+    module = _module()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.work_dir = Path(kwargs["init_music_clients_cfg"]["KugouMusicClient"]["work_dir"])
+            self.exact = SimpleNamespace(
+                source="KugouMusicClient",
+                song_name="空心 (Live)",
+                singers="黄霄雲、刘端端",
+                identifier="B" * 32,
+                lyric="<html>missing</html>",
+                raw_data={"search": {"MixSongID": "1"}, "lyric": {"candidates": []}},
+            )
+
+        def search(self, _query: str):
+            return {"KugouMusicClient": [self.exact]}
+
+        def download(self, _items):
+            path = self.work_dir / "KugouMusicClient" / "exact.mp3"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"exact")
+            return [
+                SimpleNamespace(
+                    save_path=str(path),
+                    source=self.exact.source,
+                    # A downloaded object with a different ID cannot prove its
+                    # hash belongs to the selected MixSongID. The fallback must
+                    # retain the exact-ID validated search result's hash.
+                    identifier="C" * 32,
+                    lyric=self.exact.lyric,
+                    raw_data={"search": {"MixSongID": "different"}, "lyric": {"candidates": []}},
+                )
+            ]
+
+    _install_fake_musicdl(monkeypatch, FakeClient)
+    queue, inventory, work_dir, progress, log = _queue(
+        tmp_path, title="空心 (Live)", artist="黄霄雲、刘端端"
+    )
+    source_url = "https://www.kugou.com/mixsong/agent_gateway/future-empty.html"
+    row = json.loads(queue.read_text(encoding="utf-8"))
+    row["source_url"] = source_url
+    queue.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    _page, search, download = _direct_kugou_responses()
+
+    def fake_fetch(url: str, *, timeout: float) -> bytes:
+        assert timeout == 5
+        if url == source_url:
+            return _empty_mixsong_page()
+        if url.startswith("https://lyrics.kugou.com/search?"):
+            assert module.signal.getitimer(module.signal.ITIMER_REAL)[0] > 0
+            assert "hash=" + "B" * 32 in url
+            assert "hash=" + "C" * 32 not in url
+            return search
+        if url.startswith("https://lyrics.kugou.com/download?"):
+            return download
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(module, "_fetch_url", fake_fetch)
+    summary = module.run_download(
+        queue,
+        inventory,
+        work_dir,
+        progress,
+        log,
+        "future-download-hash-lyrics",
+        None,
+        False,
+        0,
+        0,
+        10,
+        5,
+    )
+
+    assert summary["downloaded"] == 1
+    assert summary["lyrics_available"] == 1
+    receipt = json.loads((tmp_path / "lyrics-receipts.jsonl").read_text(encoding="utf-8"))
+    assert receipt["lyric_text"] == "精确页面歌词"
+    assert receipt["evidence"]["query_method"] == module.DIRECT_HASH_LYRIC_QUERY_METHOD
+    assert receipt["evidence"]["identity_verification"] == "musicdl_exact_mixsong_id_file_hash_v1"
+    assert receipt["evidence"]["musicdl_hash_identity_source"] == "musicdl_search_result_exact_mixsong_id_v1"

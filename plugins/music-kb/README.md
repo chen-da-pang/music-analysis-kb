@@ -49,9 +49,14 @@ For legacy source rows, the chart database is used only as an exact public
 play-link to MixSongID bridge, never as a title/artist match. The real command
 writes receipts under `data/weekly_runs/<run-id>/lyrics-backfill/` and imports
 them into the supplied publisher master; it never re-downloads or scans
-existing audio/LRC files. If `musicdl` returns an empty or invalid lyric during
-a future audio download, the download worker retries that same exact-source
-path before recording a pending lyric result.
+existing audio/LRC files. When an old exact page no longer exposes a usable
+hash, the materialized queue may carry one archived `musicdl` hash only from a
+same-`kugou:<MixSongID>`, successfully downloaded inventory record; conflicting
+or unproven inventory values are ignored. That no-duration request accepts only
+one usable lyric candidate, otherwise it remains pending. If `musicdl` returns
+an empty or invalid lyric during a future audio download, the worker retries
+the exact page and then only the already MixSongID-validated search-result hash
+before recording a pending lyric result.
 
 The complete publisher-side weekly run is `music-kb weekly-run`. It records a
 run state and one receipt per atom under `data/weekly_runs/<run-id>/`, reads the

@@ -32,6 +32,7 @@ MATCH_POLICY = "exact_kugou_mix_song_id_title_compatible_artist_v2"
 LYRIC_RECEIPT_SCHEMA_VERSION = 1
 LYRIC_QUERY_METHOD = "musicdl_kugou_exact_mix_song_id_v1"
 DIRECT_LYRIC_QUERY_METHOD = "kugou_mixsong_page_exact_lyrics_v1"
+DIRECT_HASH_LYRIC_QUERY_METHOD = "kugou_verified_audio_hash_exact_lyrics_v1"
 LYRIC_NORMALIZER_VERSION = "lrc-v1"
 
 _KUGOU_MIXSONG_HOST = "www.kugou.com"
@@ -44,6 +45,7 @@ _KUGOU_BROWSER_HEADERS = {
     ),
 }
 _DATA_FROM_SMARTY_ASSIGNMENT = re.compile(r"var\s+dataFromSmarty\s*=\s*", re.IGNORECASE)
+_KUGOU_FILE_HASH = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
 _DIRECT_RETRYABLE_RESPONSE_KINDS = frozenset(
     {
         "direct_mixsong_page_request_failed",
@@ -376,6 +378,21 @@ def exact_kugou_mixsong_url(candidate: Mapping[str, Any]) -> str | None:
     return value
 
 
+def normalized_kugou_file_hash(value: Any) -> str | None:
+    """Return a Kugou audio hash only when it has the canonical shape."""
+
+    file_hash = str(value or "").strip().upper()
+    return file_hash if _KUGOU_FILE_HASH.fullmatch(file_hash) else None
+
+
+def verified_musicdl_file_hash(item: Any, expected_track_key: str | None) -> str | None:
+    """Return a hash only when this musicdl object carries the exact MixSongID."""
+
+    if not expected_track_key or expected_track_key not in result_kugou_track_keys(item):
+        return None
+    return normalized_kugou_file_hash(getattr(item, "identifier", None))
+
+
 def _fetch_url(url: str, *, timeout: float) -> bytes:
     """Fetch a bounded Kugou response; kept small so tests can replace it."""
 
@@ -532,36 +549,26 @@ def _lyric_candidate_evidence(candidate: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _direct_kugou_lyric_item(
+def _direct_kugou_lyric_item_from_hash(
     candidate: Mapping[str, Any],
     *,
-    mixsong_url: str,
-    expected_track_key: str,
+    file_hash: str,
+    keyword: str,
+    duration_ms: int | None,
+    evidence: Mapping[str, Any],
     timeout: float,
 ) -> tuple[Any, dict[str, Any]]:
-    """Fetch lyrics through the exact MixSongID -> hash -> lyric chain.
+    """Fetch a lyric after an already identity-bound Kugou audio hash is known."""
 
-    The page must echo the queue's MixSongID before its hash is trusted. A
-    singleton ``mixsongid: 0`` page is the documented platform exception: its
-    exact queue source URL remains the identity proof. The platform lyric
-    search is then called with that hash and exact duration; no title/artist
-    matching or downloaded audio is involved.
-    """
-
-    try:
-        page_payload = _fetch_url(mixsong_url, timeout=timeout)
-    except Exception as exc:  # pragma: no cover - network-dependent
+    expected_track_key = expected_kugou_track_key(candidate)
+    if not expected_track_key:
         raise DirectKugouLyricError(
-            f"Kugou mix-song page request failed: {exc}",
-            response_kind="direct_mixsong_page_request_failed",
-            evidence={"kugou_mixsong_url": mixsong_url},
-        ) from exc
-    track, identity_evidence = _page_track_for_mix_song_id(
-        _mixsong_page_tracks(page_payload), expected_track_key
-    )
-    file_hash, keyword, duration_ms = _page_track_lyric_query(track, candidate)
+            "queue row has no exact Kugou MixSongID",
+            response_kind="unsupported_source_identity",
+        )
+    query_duration = duration_ms if duration_ms is not None else -1
     search_url = "https://lyrics.kugou.com/search?" + urlencode(
-        {"keyword": keyword, "duration": str(duration_ms), "hash": file_hash}
+        {"keyword": keyword, "duration": str(query_duration), "hash": file_hash}
     )
     try:
         lyric_search = _json_payload(
@@ -581,12 +588,10 @@ def _direct_kugou_lyric_item(
             response_kind="direct_invalid_lyric_search_response",
         )
     candidates = [item for item in raw_candidates if isinstance(item, Mapping)]
-    evidence = {
-        "kugou_mixsong_url": mixsong_url,
-        **identity_evidence,
-        "page_file_hash": file_hash,
-        "page_duration_ms": duration_ms,
-        "source_page_sha256": hashlib.sha256(page_payload).hexdigest(),
+    receipt_evidence = {
+        **dict(evidence),
+        "lyric_search_hash": file_hash,
+        "lyric_search_duration": query_duration,
         "lyric_candidate_count": len(candidates),
     }
     response_candidates = [_lyric_candidate_evidence(item) for item in candidates]
@@ -594,8 +599,8 @@ def _direct_kugou_lyric_item(
         return (
             SimpleNamespace(
                 source="KugouMusicClient",
-                song_name=str(track.get("song_name") or candidate.get("title") or ""),
-                singers=str(track.get("artist_name") or candidate.get("artist") or ""),
+                song_name=str(candidate.get("title") or ""),
+                singers=str(candidate.get("artist") or ""),
                 identifier=file_hash,
                 lyric=None,
                 raw_data={
@@ -603,28 +608,41 @@ def _direct_kugou_lyric_item(
                     "lyric": {"candidates": []},
                 },
             ),
-            evidence,
+            receipt_evidence,
         )
     usable_candidates = [
         item
         for item in candidates
         if item.get("id") is not None and str(item.get("accesskey") or "").strip()
     ]
-    selected = next(
-        (item for item in usable_candidates if _lyric_candidate_is_duration_compatible(item, duration_ms)),
-        usable_candidates[0] if usable_candidates else None,
-    )
+    if duration_ms is None:
+        selected = usable_candidates[0] if len(usable_candidates) == 1 else None
+        duration_compatible: bool | None = None
+        if len(usable_candidates) > 1:
+            raise DirectKugouLyricError(
+                "Kugou hash lyric lookup returned multiple usable candidates without a duration",
+                response_kind="direct_ambiguous_hash_lyric_candidates",
+                evidence={**receipt_evidence, "lyric_candidates": response_candidates[:10]},
+            )
+    else:
+        selected = next(
+            (item for item in usable_candidates if _lyric_candidate_is_duration_compatible(item, duration_ms)),
+            usable_candidates[0] if usable_candidates else None,
+        )
+        duration_compatible = (
+            _lyric_candidate_is_duration_compatible(selected, duration_ms)
+            if selected is not None
+            else None
+        )
     if selected is None:
         raise DirectKugouLyricError(
             "Kugou lyric search candidates did not include a usable result",
             response_kind="direct_invalid_lyric_search_response",
-            evidence={**evidence, "lyric_candidates": response_candidates[:10]},
+            evidence={**receipt_evidence, "lyric_candidates": response_candidates[:10]},
         )
     selected_id = str(selected["id"])
-    evidence["selected_lyric_candidate_id"] = selected_id
-    evidence["selected_lyric_candidate_duration_compatible"] = _lyric_candidate_is_duration_compatible(
-        selected, duration_ms
-    )
+    receipt_evidence["selected_lyric_candidate_id"] = selected_id
+    receipt_evidence["selected_lyric_candidate_duration_compatible"] = duration_compatible
     download_url = "https://lyrics.kugou.com/download?" + urlencode(
         {
             "ver": "1",
@@ -645,14 +663,14 @@ def _direct_kugou_lyric_item(
         raise DirectKugouLyricError(
             f"Kugou lyric download request failed: {exc}",
             response_kind="direct_lyric_download_request_failed",
-            evidence=evidence,
+            evidence=receipt_evidence,
         ) from exc
     encoded_lyric = lyric_download.get("content")
     if not isinstance(encoded_lyric, str) or not encoded_lyric:
         raise DirectKugouLyricError(
             "Kugou lyric download did not provide encoded lyric content",
             response_kind="direct_missing_lyric_content",
-            evidence=evidence,
+            evidence=receipt_evidence,
         )
     try:
         lyric = base64.b64decode(encoded_lyric.encode("ascii"), validate=True).decode("utf-8")
@@ -660,13 +678,13 @@ def _direct_kugou_lyric_item(
         raise DirectKugouLyricError(
             "Kugou lyric download content could not be decoded as UTF-8 LRC",
             response_kind="direct_invalid_lyric_content",
-            evidence=evidence,
+            evidence=receipt_evidence,
         ) from exc
     return (
         SimpleNamespace(
             source="KugouMusicClient",
-            song_name=str(track.get("song_name") or candidate.get("title") or ""),
-            singers=str(track.get("artist_name") or candidate.get("artist") or ""),
+            song_name=str(candidate.get("title") or ""),
+            singers=str(candidate.get("artist") or ""),
             identifier=file_hash,
             lyric=lyric,
             raw_data={
@@ -678,8 +696,55 @@ def _direct_kugou_lyric_item(
                 },
             },
         ),
-        evidence,
+        receipt_evidence,
     )
+
+
+def _direct_kugou_lyric_item(
+    candidate: Mapping[str, Any],
+    *,
+    mixsong_url: str,
+    expected_track_key: str,
+    timeout: float,
+) -> tuple[Any, dict[str, Any]]:
+    """Fetch lyrics through the exact MixSongID -> page hash -> lyric chain.
+
+    The page must echo the queue's MixSongID before its hash is trusted. A
+    singleton ``mixsongid: 0`` page is the documented platform exception: its
+    exact queue source URL remains the identity proof. The platform lyric
+    search is then called with that hash and exact duration; no title/artist
+    matching or downloaded audio is involved.
+    """
+
+    try:
+        page_payload = _fetch_url(mixsong_url, timeout=timeout)
+    except Exception as exc:  # pragma: no cover - network-dependent
+        raise DirectKugouLyricError(
+            f"Kugou mix-song page request failed: {exc}",
+            response_kind="direct_mixsong_page_request_failed",
+            evidence={"kugou_mixsong_url": mixsong_url},
+        ) from exc
+    track, identity_evidence = _page_track_for_mix_song_id(
+        _mixsong_page_tracks(page_payload), expected_track_key
+    )
+    file_hash, keyword, duration_ms = _page_track_lyric_query(track, candidate)
+    item, evidence = _direct_kugou_lyric_item_from_hash(
+        candidate,
+        file_hash=file_hash,
+        keyword=keyword,
+        duration_ms=duration_ms,
+        evidence={
+            "kugou_mixsong_url": mixsong_url,
+            **identity_evidence,
+            "page_file_hash": file_hash,
+            "page_duration_ms": duration_ms,
+            "source_page_sha256": hashlib.sha256(page_payload).hexdigest(),
+        },
+        timeout=timeout,
+    )
+    item.song_name = str(track.get("song_name") or candidate.get("title") or "")
+    item.singers = str(track.get("artist_name") or candidate.get("artist") or "")
+    return item, evidence
 
 
 def direct_kugou_lyric_receipt(
@@ -713,6 +778,124 @@ def direct_kugou_lyric_receipt(
         item,
         run_id=run_id,
         query_method=DIRECT_LYRIC_QUERY_METHOD,
+        evidence_extra=evidence,
+    )
+
+
+def direct_kugou_hash_lyric_receipt(
+    candidate: Mapping[str, Any],
+    *,
+    file_hash: Any,
+    run_id: str,
+    timeout: float,
+    identity_verification: str,
+    evidence_extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Fetch lyrics with a hash that was already bound to the exact MixSongID.
+
+    This intentionally does not search by title/artist for identity.  The
+    caller supplies a hash only after proving its link to the queued
+    ``MixSongID``; title/artist merely form Kugou's required lookup keyword.
+    When the lyric API returns several usable candidates without a duration,
+    the result stays pending rather than choosing one heuristically.
+    """
+
+    expected_track_key = expected_kugou_track_key(candidate)
+    verified_hash = normalized_kugou_file_hash(file_hash)
+    title = str(candidate.get("title") or "").strip()
+    artist = str(candidate.get("artist") or "").strip()
+    keyword = " - ".join(part for part in (artist, title) if part)
+    if not expected_track_key or not verified_hash:
+        return None
+    if not keyword:
+        return lyric_receipt_for_match(
+            candidate,
+            None,
+            run_id=run_id,
+            reason="queue row has no title or artist for the verified Kugou hash lyric lookup",
+            response_kind="direct_missing_platform_metadata",
+            query_method=DIRECT_HASH_LYRIC_QUERY_METHOD,
+            evidence_extra={
+                "identity_verification": identity_verification,
+                "verified_kugou_file_hash": verified_hash,
+                **dict(evidence_extra or {}),
+            },
+        )
+    evidence = dict(evidence_extra or {})
+    evidence.update(
+        {
+            "identity_verification": identity_verification,
+            "verified_kugou_file_hash": verified_hash,
+        }
+    )
+    try:
+        item, direct_evidence = _direct_kugou_lyric_item_from_hash(
+            candidate,
+            file_hash=verified_hash,
+            keyword=keyword,
+            duration_ms=None,
+            evidence=evidence,
+            timeout=timeout,
+        )
+    except DirectKugouLyricError as exc:
+        return lyric_receipt_for_match(
+            candidate,
+            None,
+            run_id=run_id,
+            reason=str(exc),
+            response_kind=exc.response_kind,
+            query_method=DIRECT_HASH_LYRIC_QUERY_METHOD,
+            evidence_extra={**evidence, **exc.evidence},
+        )
+    return lyric_receipt_for_match(
+        candidate,
+        item,
+        run_id=run_id,
+        query_method=DIRECT_HASH_LYRIC_QUERY_METHOD,
+        evidence_extra=direct_evidence,
+    )
+
+
+def _archived_kugou_hash_proof(candidate: Mapping[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """Validate the inventory-to-queue proof before trusting an archived hash."""
+
+    expected_track_key = expected_kugou_track_key(candidate)
+    expected_identity = f"kugou:{expected_track_key}" if expected_track_key else ""
+    candidate_identity = str(candidate.get("identity_key") or "").strip()
+    provenance = candidate.get("archived_kugou_file_hash_provenance")
+    verified_hash = normalized_kugou_file_hash(candidate.get("archived_kugou_file_hash"))
+    if (
+        not expected_identity
+        or candidate_identity != expected_identity
+        or not verified_hash
+        or not isinstance(provenance, Mapping)
+        or provenance.get("method") != "song_inventory_download_path_exact_identity_v1"
+        or str(provenance.get("inventory_identity_key") or "").strip() != expected_identity
+        or str(provenance.get("download_status") or "").strip() != "downloaded"
+    ):
+        return None
+    return verified_hash, {
+        "inventory_identity_key": expected_identity,
+        "inventory_download_retention": provenance.get("download_retention"),
+        "inventory_relative_audio_path": provenance.get("inventory_relative_audio_path"),
+    }
+
+
+def direct_kugou_archived_hash_lyric_receipt(
+    candidate: Mapping[str, Any], *, run_id: str, timeout: float
+) -> dict[str, Any] | None:
+    """Use only a validated, exact-identity archived Kugou audio hash."""
+
+    proof = _archived_kugou_hash_proof(candidate)
+    if proof is None:
+        return None
+    file_hash, evidence = proof
+    return direct_kugou_hash_lyric_receipt(
+        candidate,
+        file_hash=file_hash,
+        run_id=run_id,
+        timeout=timeout,
+        identity_verification="queue_exact_mixsong_inventory_download_hash_v1",
         evidence_extra=evidence,
     )
 
@@ -1052,6 +1235,7 @@ def run_download(
             with item_timeout(item_timeout_seconds):
                 downloaded = client.download([best])
             raw_path = None
+            result: Any | None = None
             if downloaded:
                 result = downloaded[0]
                 raw_path = getattr(result, "save_path", None) or getattr(result, "saved_path", None)
@@ -1079,24 +1263,71 @@ def run_download(
                 "at": now_iso(),
                 **matched,
             }
-            lyric_source = result if downloaded and getattr(result, "raw_data", None) is not None else best
+            lyric_source = result if result is not None and getattr(result, "raw_data", None) is not None else best
             receipt = lyric_receipt_for_match(candidate, lyric_source, run_id=run_id)
             # Audio downloads still use musicdl as their primary path.  When
             # its lyric attachment is absent or a known bad payload, retry the
-            # lyric only through the public page that already proves the exact
-            # MixSongID.  This keeps future weekly downloads in the same lyric
-            # coverage contract as the historical backfill without re-downloading
-            # their audio.
+            # lyric through the exact public page first. If an old page no
+            # longer exposes its hash, the exact-ID-validated musicdl search
+            # result carries an independently bound hash, so use it without
+            # re-downloading audio or accepting a title-only match.
             if receipt["status"] == "pending":
+                direct_receipt: dict[str, Any] | None = None
                 try:
                     with item_timeout(item_timeout_seconds):
                         direct_receipt = direct_kugou_lyric_receipt(
                             candidate, run_id=run_id, timeout=item_timeout_seconds
                         )
                 except ItemTimeoutError:
-                    direct_receipt = None
+                    pass
                 if direct_receipt is not None and direct_receipt["status"] != "pending":
                     receipt = direct_receipt
+                if receipt["status"] == "pending":
+                    musicdl_hash: str | None = None
+                    musicdl_hash_identity_source: str | None = None
+                    for source, source_label in (
+                        (best, "musicdl_search_result_exact_mixsong_id_v1"),
+                        (result, "musicdl_download_result_exact_mixsong_id_v1"),
+                    ):
+                        candidate_hash = verified_musicdl_file_hash(source, expected_track_key)
+                        if candidate_hash is not None:
+                            musicdl_hash = candidate_hash
+                            musicdl_hash_identity_source = source_label
+                            break
+                    direct_hash_receipt: dict[str, Any] | None = None
+                    if musicdl_hash is not None:
+                        hash_evidence = {
+                            "musicdl_matched_kugou_mix_song_id": expected_track_key,
+                            "musicdl_hash_identity_source": musicdl_hash_identity_source,
+                            "prior_direct_response_kind": (
+                                direct_receipt["evidence"].get("response_kind")
+                                if direct_receipt is not None
+                                and isinstance(direct_receipt.get("evidence"), Mapping)
+                                else None
+                            ),
+                        }
+                        try:
+                            with item_timeout(item_timeout_seconds):
+                                direct_hash_receipt = direct_kugou_hash_lyric_receipt(
+                                    candidate,
+                                    file_hash=musicdl_hash,
+                                    run_id=run_id,
+                                    timeout=item_timeout_seconds,
+                                    identity_verification="musicdl_exact_mixsong_id_file_hash_v1",
+                                    evidence_extra=hash_evidence,
+                                )
+                        except ItemTimeoutError as exc:
+                            direct_hash_receipt = lyric_receipt_for_match(
+                                candidate,
+                                None,
+                                run_id=run_id,
+                                reason=str(exc),
+                                response_kind="direct_timeout",
+                                query_method=DIRECT_HASH_LYRIC_QUERY_METHOD,
+                                evidence_extra=hash_evidence,
+                            )
+                    if direct_hash_receipt is not None:
+                        receipt = direct_hash_receipt
             try:
                 append_lyric_receipt(lyrics_receipt_path, receipt)
                 progress["lyrics"][identity] = lyric_progress_metadata(receipt)
@@ -1276,7 +1507,41 @@ def run_lyrics_only(
                     if response_kind not in _DIRECT_RETRYABLE_RESPONSE_KINDS or attempt >= retries:
                         break
                     time.sleep(3)
-            if direct_receipt is not None:
+            archived_hash_receipt: dict[str, Any] | None = None
+            if direct_receipt is None or direct_receipt["status"] == "pending":
+                for attempt in range(retries + 1):
+                    try:
+                        with item_timeout(item_timeout_seconds):
+                            archived_hash_receipt = direct_kugou_archived_hash_lyric_receipt(
+                                candidate, run_id=run_id, timeout=item_timeout_seconds
+                            )
+                    except ItemTimeoutError as exc:
+                        archived_hash_receipt = lyric_receipt_for_match(
+                            candidate,
+                            None,
+                            run_id=run_id,
+                            reason=str(exc),
+                            response_kind="direct_timeout",
+                            query_method=DIRECT_HASH_LYRIC_QUERY_METHOD,
+                        )
+                    if archived_hash_receipt is None:
+                        break
+                    response_kind = str(
+                        archived_hash_receipt["evidence"].get("response_kind") or ""
+                    )
+                    if response_kind not in _DIRECT_RETRYABLE_RESPONSE_KINDS or attempt >= retries:
+                        break
+                    time.sleep(3)
+            if archived_hash_receipt is not None:
+                if direct_receipt is not None:
+                    archived_hash_receipt["evidence"]["prior_direct_response_kind"] = (
+                        direct_receipt["evidence"].get("response_kind")
+                    )
+                    archived_hash_receipt["evidence"]["prior_direct_reason"] = (
+                        direct_receipt["evidence"].get("reason")
+                    )
+                receipt = archived_hash_receipt
+            elif direct_receipt is not None:
                 receipt = direct_receipt
             elif not title or not artist:
                 receipt = lyric_receipt_for_match(

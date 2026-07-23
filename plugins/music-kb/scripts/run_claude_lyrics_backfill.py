@@ -175,6 +175,15 @@ def main() -> int:
             "(default: <workspace>/data/music_trends.sqlite)"
         ),
     )
+    parser.add_argument(
+        "--inventory",
+        type=Path,
+        help=(
+            "Durable Kugou download inventory used only to recover an exact archived "
+            "audio hash when an old mix-song page no longer exposes one "
+            "(default: <workspace>/data/song_inventory.json)"
+        ),
+    )
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--claude-bin", default="claude")
     parser.add_argument(
@@ -225,6 +234,11 @@ def main() -> int:
         if args.chart_db is not None
         else workspace / "data" / "music_trends.sqlite"
     )
+    inventory = (
+        args.inventory.expanduser().resolve()
+        if args.inventory is not None
+        else workspace / "data" / "song_inventory.json"
+    )
     operations_file = args.operations_file.expanduser().resolve()
     run_id = args.run_id or now_run_id()
     if args.timeout_seconds < 1:
@@ -258,6 +272,7 @@ def main() -> int:
             inputs={
                 "database": str(database),
                 "chart_database": str(chart_database),
+                "inventory": str(inventory),
                 "workspace": str(workspace),
                 "dry_run": args.dry_run,
                 "max_items": args.max_items,
@@ -284,6 +299,7 @@ def main() -> int:
                     database,
                     queue_path,
                     chart_database=chart_database,
+                    inventory=inventory,
                 )
                 queue_manifest["run_id"] = run_id
                 atomic_write_json(manifest_path, queue_manifest)

@@ -1,6 +1,6 @@
 # #52：复用 CC 下载原子补齐并分发完整歌词
 
-状态：实现中。
+状态：已实现。
 
 ## 目标
 
@@ -69,6 +69,12 @@
 4. 只有返回 source identity 与待绑定的 `source_track` 一致时，回执才可导入；标题/歌手匹配只能帮助下载器找到候选，不能成为歌词身份的最终证据。
 5. 读取或解析失败写入可重试回执，不能写成 `platform_unavailable`。
 
+当 `musicdl` 的歌词为空或无效时，worker 先使用精确 MixSong 页面回显的
+MixSongID、hash 与时长重试；页面不再提供 hash 时，才使用已由精确
+MixSongID 验证的 `musicdl` 搜索结果 hash。下载返回对象自身没有该 exact ID
+证据时，其 hash 不可使用。所有这类歌词请求都受单曲超时限制；没有时长而
+返回多个可用候选时，保持 `pending`，不按标题或歌手猜测。
+
 现有 `.lrc` 可以继续作为下载器副产物，但 SQLite 中的 `recording_lyric.lyric_text` 才是唯一交付源。即使之后删除音频目录，歌词仍可读取。
 
 ## 存量回填：同一 CC 来源、lyrics-only 模式
@@ -76,7 +82,7 @@
 新增一个受现有 CC 编排管理的 `lyrics_backfill` 模式，不下载音频。
 
 1. 从 master 的 `source_track` 生成队列，每项携带 canonical `recording_id`、`source_track.id`、`source_name`、精确 `source_track_id` 和 `source_url`。新行直接使用 `kugou-<MixSongID>`；历史 927 条的 `source_track_id` 是交付键，必须由 `source_url == data/music_trends.sqlite.platform_tracks.play_link` 的**精确**连接取得 `platform_track_key`（MixSongID）。绝不从 URL 片段、标题或歌手猜测 ID。
-2. 固定 worker 使用同一个 `KugouMusicClient` 来源，按精确 identity 取得歌词回执；不得将同名搜索结果直接当作成功。
+2. 固定 worker 默认使用精确 MixSong 页面取得 hash、时长和歌词回执，并验证页面 identity；不得将同名搜索结果直接当作成功。若旧页面不再提供 hash，只能在同一 `kugou:<MixSongID>`、库存状态为 `downloaded`、且历史 `musicdl` 文件名含合法 hash 的三项同时成立时，附带该 hash 作为一次 no-duration 兜底。多个可用歌词候选仍保持 `pending`。
 3. 将 `available`、有证据的 `instrumental` 和有证据的 `platform_unavailable` 幂等写入 master；其余项目保持 `pending` 并可只重试未解决项。
 4. 不读取、移动或重新下载既有音频。历史 `.lrc` 仅可作为人工排障证据，不能绕过 identity 校验。
 

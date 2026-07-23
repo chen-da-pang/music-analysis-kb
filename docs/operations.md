@@ -147,8 +147,8 @@ analysis as a completed analysis.
 ### One-time historical lyric backfill
 
 Before the first v7 release, run the dedicated publisher-only CC wrapper. It
-uses the same validated Kugou `musicdl` worker as new downloads, but never
-opens inventory or downloads audio:
+uses the same validated Kugou lyric path as new downloads, but never rebuilds
+or mutates inventory and never downloads audio:
 
 ```bash
 python3 plugins/music-kb/scripts/run_claude_lyrics_backfill.py \
@@ -164,6 +164,12 @@ Inspect its exact source queue, then rerun without `--dry-run`. For the legacy
 to MixSongID, never a title/artist fallback. The command imports its receipt
 and retains pending results for a later identity-safe retry; no release can
 pass until `music-kb validate` reports zero unresolved lyrics.
+
+When a historical exact page has no usable hash, the wrapper may read the
+inventory solely to attach an archived hash whose `kugou:<MixSongID>` key and
+completed-download status exactly match the queued identity. It never scans
+audio/LRC files or trusts a title/artist match; invalid, conflicting, or
+ambiguous hash-based lyric responses remain pending.
 
 When quota blocks a weekly invocation before analysis, the independent
 destructive cleanup atom can remove completed allowlisted repositories without

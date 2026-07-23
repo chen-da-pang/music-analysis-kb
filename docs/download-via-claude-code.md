@@ -92,6 +92,14 @@ its returned Kugou `MixSongID`/`ID` exactly matches the queue's
 exists, and updates the inventory immediately. It also normalizes the exact
 result's `SongInfo.lyric` into a JSONL receipt with the canonical
 `source_track_id`; a blank/network/parse/identity error remains `pending`.
+If that lyric is blank or invalid, the worker first retries through the exact
+public MixSong page, validating its returned MixSongID before using the page's
+hash and duration. If an old page no longer exposes a hash, it may make one
+more lyrics-only request using the hash from the already MixSongID-validated
+`musicdl` search result. A hash returned only by an unverified download object
+is rejected. Both exact-source retries are bounded by the same per-item timeout;
+without a duration, more than one usable lyric candidate stays `pending` rather
+than being selected by title or artist.
 If a run is interrupted,
 the next run sees the file and skips it. A new chart row with an old
 `mix_song_id` or an already-downloaded normalized title/artist is not queued.
@@ -135,6 +143,14 @@ and receipt under `data/weekly_runs/<run-id>/lyrics-backfill/`, imports the
 receipt via the normal source-identity validation, and exits nonzero if any
 canonical lyric remains unresolved. Use `--allow-incomplete` only for an
 explicit bounded diagnostic pass; it never permits a snapshot or audio cleanup.
+
+The wrapper may read `data/song_inventory.json` only as a historical metadata
+bridge when an exact page no longer exposes a usable hash. It attaches that
+hash only when the same `kugou:<MixSongID>` inventory row records a completed
+download and its archived `musicdl` filename contains one valid Kugou hash.
+It neither opens audio files nor scans LRC files; a conflicting or unproven
+hash is ignored. The no-duration hash path accepts only one usable platform
+lyric candidate, leaving ambiguous responses `pending` for a later exact retry.
 
 ## Removing the local audio after import
 
