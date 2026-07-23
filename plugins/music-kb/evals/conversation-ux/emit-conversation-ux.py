@@ -341,28 +341,38 @@ def main() -> None:
         )
     )
 
-    detail_language_phrases = (
-        "Keep canonical descriptions faithful to the user's language",
-        "user's current language",
-        "complete and faithful Chinese rendering",
-        "Do not summarize away content",
-        "outside the canonical analysis",
-        "English original or a bilingual version",
-        "user explicitly asks",
+    detail_source_fidelity_phrases = (
+        "Preserve canonical output modes and source fidelity",
+        "Music Flamingo source mode",
+        "analysis.raw_text",
+        "Music Flamingo 原文（未改写）",
+        "do **not** translate, paraphrase, reorder, merge, de-duplicate",
+        "Chinese translation mode",
+        "Music Flamingo 摘要（非原文）",
         "raw_text_truncated",
         "retrieval-only",
     )
-    detail_language_ok = bool(skill) and all(
-        phrase in normalized_skill for phrase in detail_language_phrases
-    )
+    legacy_default_translation = "complete and faithful Chinese rendering" in normalized_skill
+    detail_source_fidelity_ok = bool(skill) and all(
+        phrase in normalized_skill for phrase in detail_source_fidelity_phrases
+    ) and not legacy_default_translation
     checks.append(
         _check(
-            "music-kb-ux-detail-language",
-            detail_language_ok,
-            "Complete descriptions follow the user's language without summarization or unsupported additions.",
-            evidence=[phrase for phrase in detail_language_phrases if phrase in normalized_skill],
+            "music-kb-ux-detail-source-fidelity",
+            detail_source_fidelity_ok,
+            "Complete descriptions preserve the canonical Music Flamingo source unless the user explicitly chooses a labelled translation or summary.",
+            evidence=[
+                phrase
+                for phrase in detail_source_fidelity_phrases
+                if phrase in normalized_skill
+            ]
+            + (
+                ["legacy Chinese-default detail contract detected"]
+                if legacy_default_translation
+                else ["no legacy Chinese-default detail contract detected"]
+            ),
             remediation=[
-                "Preserve all canonical content in the user's language, disclose truncation, and show English or bilingual text only on request."
+                "Default complete descriptions to the unchanged analysis.raw_text, and keep translation and summary as explicit labelled modes."
             ],
         )
     )

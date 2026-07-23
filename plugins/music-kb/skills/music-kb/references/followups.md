@@ -65,21 +65,35 @@ parent Skill.
   does not set the size of the first candidate page or change the progressive
   result-volume policy.
 
-## Keep canonical descriptions faithful to the user's language
+## Preserve canonical output modes and source fidelity
 
-- Present a selected description in the user's current language. In a Chinese
-  conversation, provide a complete and faithful Chinese rendering of the
-  canonical analysis.
-- Preserve all substantive content in the source, including rhythm/groove,
-  instrumentation/production, harmony, vocals, lyrical themes, structure, and
-  overall atmosphere when present. Do not summarize away content or add a
-  musical judgment outside the canonical analysis.
-- Do not present translated wording as a new model analysis. Show the English
-  original or a bilingual version only when the user explicitly asks for it;
-  do not double the default output with both languages.
-- Verify `raw_text_truncated` is false before calling the result complete. If
-  the server still reports truncation at its supported maximum, disclose that
-  boundary instead of silently claiming the text is complete.
+- A selected “完整描述”“完整结果”“完整 Music Flamingo 输出” or “原文” defaults
+  to **Music Flamingo source mode**, in every conversation language. Return the
+  canonical `analysis.raw_text` itself, not a new analysis of it.
+- Before calling a source-mode result complete, verify
+  `raw_text_truncated` is false. If it is true at the supported maximum,
+  disclose that the source is truncated; never silently call it complete.
+- Label source mode `Music Flamingo 原文（未改写）`, then render the complete
+  `analysis.raw_text` in a plain-text fenced block. Preserve the original
+  language, every substantive sentence, paragraph order, headings, and repeated
+  passages exactly as returned.
+- In source mode, do **not** translate, paraphrase, reorder, merge, de-duplicate,
+  summarize, relabel internal sections, or add a musical judgment. Do not turn
+  the source into a Chinese outline and call that a complete Music Flamingo
+  output.
+- Use **Chinese translation mode** only when the user explicitly asks for
+  “中文翻译”“翻成中文” or an equivalent request. Label it
+  `Music Flamingo 中文忠实译文（非原文）`; translate paragraph by paragraph,
+  preserving the source order, headings, repeated passages, and every
+  substantive claim. Do not merge sections or turn the translation into a
+  summary. Show the English original or a bilingual version only when explicitly
+  requested.
+- Use **summary mode** only when the user explicitly asks for “摘要”“重点” or
+  an equivalent request. Label it `Music Flamingo 摘要（非原文）`; it may be
+  shorter, but must not be presented as the complete source output.
+- When a user requests only one analysis dimension, return a clearly labelled
+  source-grounded excerpt for that dimension rather than claiming it is a
+  complete description. Keep the current selection and batching rules intact.
 - This remains retrieval-only. Never convert the canonical description into a
   Suno prompt or another generation prompt.
 

@@ -88,8 +88,13 @@ def test_conversation_ux_onboarding_and_contract_are_present() -> None:
         "Deliver complete descriptions in readable batches",
         "at most **four songs per batch**",
         "prefetch canonical analyses",
-        "Keep canonical descriptions faithful to the user's language",
-        "complete and faithful Chinese rendering",
+        "Preserve canonical output modes and source fidelity",
+        "Music Flamingo source mode",
+        "analysis.raw_text",
+        "Music Flamingo 原文（未改写）",
+        "do **not** translate, paraphrase, reorder, merge, de-duplicate",
+        "Chinese translation mode",
+        "Music Flamingo 摘要（非原文）",
         "raw_text_truncated",
         "listen_url",
         "search_projection_state",
@@ -128,7 +133,7 @@ def test_conversation_ux_metric_pack_is_shipped() -> None:
     assert emitter.is_file()
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["name"] == "music-kb-conversation-contract"
-    assert payload["version"] == "0.6.0"
+    assert payload["version"] == "0.7.0"
     assert payload["supportedTargetKinds"] == ["skill", "plugin"]
     assert payload["command"] == ["python3", "./emit-conversation-ux.py"]
     trace_schema = json.loads(
@@ -178,7 +183,7 @@ def test_conversation_ux_metric_pack_passes_the_plugin() -> None:
         "music-kb-ux-insufficient-results",
         "music-kb-ux-detail-selection",
         "music-kb-ux-detail-batching",
-        "music-kb-ux-detail-language",
+        "music-kb-ux-detail-source-fidelity",
         "music-kb-ux-evidence",
         "music-kb-ux-ranked-compact-retrieval",
         "music-kb-ux-rendering-contract",
@@ -530,6 +535,44 @@ def test_conversation_ux_metric_pack_catches_missing_followup_guidance(tmp_path:
     assert guidance["status"] == "fail"
 
 
+def test_conversation_ux_metric_pack_rejects_translation_as_default_detail_mode(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    plugin = tmp_path / "plugin"
+    (plugin / ".codex-plugin").mkdir(parents=True)
+    (plugin / "skills" / "music-kb" / "references").mkdir(parents=True)
+    (plugin / ".codex-plugin" / "plugin.json").write_text(
+        (root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (plugin / "skills" / "music-kb" / "SKILL.md").write_text(
+        (root / "skills" / "music-kb" / "SKILL.md").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    followups = (root / "skills" / "music-kb" / "references" / "followups.md").read_text(
+        encoding="utf-8"
+    )
+    (plugin / "skills" / "music-kb" / "references" / "followups.md").write_text(
+        f"{followups}\ncomplete and faithful Chinese rendering\n",
+        encoding="utf-8",
+    )
+    emitter = root / "evals" / "conversation-ux" / "emit-conversation-ux.py"
+    completed = subprocess.run(
+        ["python3", str(emitter), str(plugin), "plugin"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+    source_fidelity = next(
+        check
+        for check in result["checks"]
+        if check["id"] == "music-kb-ux-detail-source-fidelity"
+    )
+    assert source_fidelity["status"] == "fail"
+
+
 @pytest.mark.parametrize(
     ("removed_phrase", "check_id"),
     [
@@ -546,7 +589,7 @@ def test_conversation_ux_metric_pack_catches_missing_followup_guidance(tmp_path:
         ("all remaining unshown results", "music-kb-ux-insufficient-results"),
         ("description dimension is optional", "music-kb-ux-detail-selection"),
         ("at most **four songs per batch**", "music-kb-ux-detail-batching"),
-        ("complete and faithful Chinese rendering", "music-kb-ux-detail-language"),
+        ("Music Flamingo 原文（未改写）", "music-kb-ux-detail-source-fidelity"),
         ("Markdown listening link", "music-kb-ux-rendering-contract"),
     ],
 )
@@ -591,6 +634,6 @@ def test_plugin_version_is_kept_in_sync() -> None:
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     lockfile = (root / "uv.lock").read_text(encoding="utf-8")
     version = manifest["version"]
-    assert version == "0.8.0"
+    assert version == "0.8.1"
     assert f'version = "{version}"' in pyproject
     assert f'name = "music-kb"\nversion = "{version}"' in lockfile

@@ -902,6 +902,26 @@ follow-up 文件。真实答案完整返回“明亮心动 / 温柔微醺伤感 
 完整方法、载荷对比和证据边界见
 [代表性紧凑检索验收](../benchmarks/2026-07-22-music-kb-ranked-compact-retrieval.md)。
 
+## v0.8.1：完整 Music Flamingo 输出保真修复（真实调用发现）
+
+这不是重新开启脑爆。用户在真实详情调用中选择 7 首歌曲的完整结果后发现：MCP 返回的
+`analysis.raw_text` 均为 `raw_text_truncated=false`，但助手把原文的结构化要点和扩展叙述合并、
+翻译并重组，再称为“完整描述”。数据读取完整，用户端呈现却不再是可核对的 Music Flamingo
+输出。
+
+用户确认将此作为 #41 的缺陷修复。该决定取代 Round 34 对“完整描述默认跟随用户语言”的默认
+输出策略，但不否定翻译本身的价值：
+
+- “完整描述”“完整结果”“完整 Music Flamingo 输出”或“原文”默认返回未改写的
+  `analysis.raw_text`，保留原语言、段落顺序、标题和重复段落；
+- “中文翻译”是显式模式，必须逐段忠实翻译并标明“非原文”；
+- “摘要”“重点”也是显式模式，必须标明“非原文”，不得伪装为完整输出；
+- 仍先验证 `raw_text_truncated=false`，仍保持最多四首一批、按选择惰性获取和 retrieval-only
+  边界。
+
+本修复不修改 MCP、SQLite Schema、快照内容、周更、CNB、peer、音频或提示词流程。它只收紧
+Skill、用户说明与 conversation-UX metric 对详情层的输出保真契约。
+
 ## 记录规则
 
 - 每轮讨论追加一个 `Round N`，不覆盖历史决定。

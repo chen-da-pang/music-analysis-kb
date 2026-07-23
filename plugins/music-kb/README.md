@@ -64,12 +64,13 @@ latter two retrieve more candidates in the current direction.
 Complete descriptions are loaded only for the selected songs. One to four can
 be delivered together; selections of five or more are automatically split into
 batches of at most four, and later batches are not fetched in advance. The
-selected order and current direction stay intact between batches. Descriptions
-follow the user's current language: a Chinese conversation gets a complete,
-faithful Chinese rendering, while English source text or bilingual output is
-shown only when explicitly requested. The Skill does not summarize away source
-content, add unsupported musical judgments, or convert an analysis into a
-generation prompt.
+selected order and current direction stay intact between batches. “完整描述”、
+“完整结果” and “完整 Music Flamingo 输出” return the unmodified canonical
+`analysis.raw_text` by default, even in a Chinese conversation. “中文翻译” and
+“摘要” are explicit, separately labelled modes: a translation keeps the source
+paragraph order and content, while a summary is never presented as the complete
+Music Flamingo output. The Skill does not add unsupported musical judgments or
+convert an analysis into a generation prompt.
 
 From this directory:
 

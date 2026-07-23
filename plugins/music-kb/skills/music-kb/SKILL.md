@@ -137,10 +137,12 @@ For a representative or expandable result, include immediately:
 
 After any non-empty candidate list, ask:
 
-> 想看哪些歌的完整描述？可以回复序号、歌名、“前几首”或“全部”；如果只想看某个方面，也可以顺便说明。
+> 想看哪些歌的完整 Music Flamingo 原文？可以回复序号、歌名、“前几首”或“全部”；也可以在后面加“中文翻译”或“摘要”。
 
-The description dimension is optional; if the user does not name one, return
-the complete description rather than asking for an internal field.
+The description dimension and output mode are optional. Without either, return
+the complete Music Flamingo source text rather than asking for an internal
+field or silently translating it. “中文翻译” and “摘要” are explicit alternate
+modes; load the follow-up rules for their exact fidelity boundary.
 
 Keep these two affordances distinct: the first retrieves more candidates in the
 current direction; the second selects details from songs already displayed.
@@ -157,7 +159,9 @@ current direction; the second selects details from songs already displayed.
 - If a recording appears in more than one group, keep it in every matching group
   and append a short overlap label such as “也符合：Soul 质感”; never leave a
   cross-group duplicate unexplained. Keep recording IDs, full tags, provenance,
-  `selection_basis`, and raw canonical text hidden.
+  `selection_basis`, and raw canonical text hidden until the user selects a
+  description. A selected complete description defaults to the unmodified
+  Music Flamingo source text; load the follow-up rules before rendering it.
 - Before answering, mechanically verify that the direction-ledger count,
   distinct recommendation-call count, and group count match; displayed IDs must
   exactly equal each backend page in the same order, including cross-group
