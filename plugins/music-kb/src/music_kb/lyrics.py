@@ -40,6 +40,12 @@ _METADATA_LINE = re.compile(
     r"^\s*\[(?:ar|al|ti|by|offset|re|ve|tool|length|au):[^\]]*\]\s*$",
     re.IGNORECASE,
 )
+_NON_LYRIC_PAYLOAD_MARKERS = (
+    "<script",
+    "<html",
+    "<!doctype",
+    "获取失败",
+)
 
 
 def normalize_lyric_text(value: object) -> str:
@@ -60,6 +66,21 @@ def normalize_lyric_text(value: object) -> str:
         if line:
             lines.append(line)
     return "\n".join(lines)
+
+
+def is_publishable_lyric_text(value: object) -> bool:
+    """Reject known HTML/error placeholders that are not song lyrics.
+
+    A non-empty response alone is not sufficient evidence of usable lyrics:
+    some upstream Kugou paths return a script-based failure page as text. The
+    markers are deliberately narrow so ordinary lyric lines remain untouched.
+    """
+
+    lyric_text = normalize_lyric_text(value)
+    if not lyric_text:
+        return False
+    folded = lyric_text.casefold()
+    return not any(marker.casefold() in folded for marker in _NON_LYRIC_PAYLOAD_MARKERS)
 
 
 def lyric_text_sha256(value: str) -> str:

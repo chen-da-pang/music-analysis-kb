@@ -33,6 +33,7 @@ LYRIC_NORMALIZER_VERSION = "lrc-v1"
 # guesses. An empty SongInfo.lyric is never enough to publish an exception.
 INSTRUMENTAL_MARKERS = frozenset({"纯音乐，请欣赏", "纯音乐请欣赏", "此歌曲为纯音乐，请您欣赏"})
 PLATFORM_UNAVAILABLE_MARKERS = frozenset({"暂无歌词", "该歌曲暂无歌词", "暂无歌词，敬请期待"})
+NON_LYRIC_PAYLOAD_MARKERS = ("<script", "<html", "<!doctype", "获取失败")
 _TIMESTAMP_PREFIX = re.compile(r"^\s*(?:\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\])+\s*")
 _METADATA_LINE = re.compile(
     r"^\s*\[(?:ar|al|ti|by|offset|re|ve|tool|length|au):[^\]]*\]\s*$",
@@ -308,6 +309,11 @@ def _explicitly_no_platform_lyric(response: Any) -> bool:
     return isinstance(response, Mapping) and isinstance(response.get("candidates"), list) and not response["candidates"]
 
 
+def _is_non_lyric_payload(value: str) -> bool:
+    folded = value.casefold()
+    return any(marker.casefold() in folded for marker in NON_LYRIC_PAYLOAD_MARKERS)
+
+
 def lyric_receipt_for_match(
     candidate: Mapping[str, Any],
     item: Any | None,
@@ -351,6 +357,9 @@ def lyric_receipt_for_match(
             status = "platform_unavailable"
             response_kind = "platform_unavailable_marker"
             final_reason = "exact Kugou lyric response explicitly reports lyrics unavailable"
+        elif _is_non_lyric_payload(readable):
+            response_kind = "invalid_lyric_payload"
+            final_reason = "exact Kugou lyric response was an HTML or failure placeholder, not lyrics"
         else:
             status = "available"
             response_kind = "lyrics_available"

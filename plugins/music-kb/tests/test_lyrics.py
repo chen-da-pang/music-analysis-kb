@@ -8,7 +8,7 @@ import pytest
 
 from music_kb.errors import ValidationError
 from music_kb.lyrics_backfill import materialize_lyric_backfill_queue
-from music_kb.lyrics import LYRIC_NORMALIZER_VERSION, normalize_lyric_text
+from music_kb.lyrics import LYRIC_NORMALIZER_VERSION, is_publishable_lyric_text, normalize_lyric_text
 from music_kb.repository import MusicKBRepository
 from music_kb.schema import SCHEMA_VERSION, initialize_database
 from music_kb.snapshot import create_snapshot, verify_snapshot
@@ -46,6 +46,11 @@ def test_normalize_lyric_text_removes_only_lrc_transport_data() -> None:
     assert normalize_lyric_text(
         "\ufeff[ar:示例乐队]\r\n[00:01.20]第一句\r\n[00:02.00][00:03.00]副歌\r\n[Chorus]\r\n"
     ) == "第一句\n副歌\n[Chorus]"
+
+
+def test_publishable_lyric_text_rejects_html_failure_placeholders() -> None:
+    assert is_publishable_lyric_text("[00:01.00]正常歌词") is True
+    assert is_publishable_lyric_text("<script>window.location='/error'</script>获取失败") is False
 
 
 def test_imported_lyrics_are_identity_bound_readable_and_idempotent(unresolved_master_database) -> None:
@@ -104,6 +109,36 @@ def test_lyric_import_rejects_identity_mismatch_and_preserves_terminal_result(un
         }
         with pytest.raises(ValidationError, match="source_name"):
             repository.import_lyric(invalid)
+
+
+def test_lyric_import_rejects_and_repairs_html_failure_payload(unresolved_master_database) -> None:
+    with MusicKBRepository(unresolved_master_database) as repository:
+        payload = _lyric_payload(repository)
+        payload["lyric_text"] = "<script>window.location='/error'</script>获取失败"
+        with pytest.raises(ValidationError, match="HTML or failure-placeholder"):
+            repository.import_lyric(payload)
+
+        repository.import_lyric(_lyric_payload(repository))
+        recording_id = str(payload["recording_id"])
+        with repository.connection:
+            repository.connection.execute(
+                """
+                UPDATE recording_lyric
+                SET lyric_text = ?, text_sha256 = ?
+                WHERE recording_id = ?
+                """,
+                ("<script>window.location='/error'</script>获取失败", "b" * 64, recording_id),
+            )
+        repaired = repository.repair_invalid_available_lyrics()
+
+        assert repaired == {
+            "scanned_available": 1,
+            "demoted": 1,
+            "recording_ids": [recording_id],
+        }
+        lyric = repository.get_lyrics(recording_id)
+        assert lyric["status"] == "pending"
+        assert lyric["lyric_text"] is None
 
 
 def test_cc_receipt_file_binds_by_source_identity_not_title_artist(

@@ -219,6 +219,14 @@ def main() -> int:
                 "worker_python": args.worker_python,
             },
         ) as outputs:
+            if args.dry_run:
+                invalid_lyric_repair = {
+                    "status": "not_run",
+                    "reason": "dry-run does not modify publisher lyric rows",
+                }
+            else:
+                with MusicKBRepository(database, read_only=False) as repository:
+                    invalid_lyric_repair = repository.repair_invalid_available_lyrics()
             if args.reuse_queue:
                 if not queue_path.is_file() or not manifest_path.is_file():
                     raise RuntimeError("--reuse-queue requires an existing queue.jsonl and queue-manifest.json")
@@ -256,6 +264,7 @@ def main() -> int:
                 "receipt": str(receipt_path),
                 "progress": str(progress_path),
                 "dry_run": args.dry_run,
+                "invalid_lyric_repair": invalid_lyric_repair,
             }
             if args.dry_run:
                 summary["would_process"] = len(selected_rows)
@@ -298,7 +307,7 @@ def main() -> int:
                         "--queue",
                         str(chunk_queue),
                         "--work-dir",
-                        str(workspace / "music_downloads"),
+                        str(work_dir / "musicdl-search-cache"),
                         "--progress",
                         str(progress_path),
                         "--log",

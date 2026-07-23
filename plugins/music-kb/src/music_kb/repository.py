@@ -20,6 +20,7 @@ from .lyrics import (
     LYRIC_STATUS_PLATFORM_UNAVAILABLE,
     LYRIC_STATUSES,
     LYRIC_TERMINAL_STATUSES,
+    is_publishable_lyric_text,
     lyric_text_sha256,
     load_lyric_receipts,
     normalize_lyric_text,
@@ -1678,6 +1679,10 @@ class MusicKBRepository:
             lyric_text = normalize_lyric_text(raw_text)
             if not lyric_text:
                 raise ValidationError("Available lyric text is empty after normalization")
+            if not is_publishable_lyric_text(lyric_text):
+                raise ValidationError(
+                    "Available lyrics must not contain an HTML or failure-placeholder payload"
+                )
             text_sha256 = lyric_text_sha256(lyric_text)
         elif raw_text not in (None, ""):
             raise ValidationError("Only available lyrics may contain lyric_text")
@@ -1889,6 +1894,65 @@ class MusicKBRepository:
         source = Path(path).expanduser().resolve()
         result = self.import_lyric_receipts(load_lyric_receipts(source))
         return {**result, "receipt_file": str(source)}
+
+    def repair_invalid_available_lyrics(self) -> dict[str, Any]:
+        """Demote historical HTML/error placeholders so they are retried.
+
+        This only corrects rows previously marked ``available`` that fail the
+        same narrow publishability gate enforced at import time. It never
+        upgrades or fabricates a lyric result.
+        """
+
+        self._require_writer()
+        rows = list(
+            self.connection.execute(
+                """
+                SELECT recording_id, lyric_text, evidence_json
+                FROM recording_lyric
+                WHERE status = ?
+                ORDER BY recording_id
+                """,
+                (LYRIC_STATUS_AVAILABLE,),
+            )
+        )
+        repaired: list[str] = []
+        with self.connection:
+            for row in rows:
+                if is_publishable_lyric_text(row["lyric_text"]):
+                    continue
+                try:
+                    evidence_value = json.loads(str(row["evidence_json"] or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    evidence_value = {}
+                evidence = dict(evidence_value) if isinstance(evidence_value, Mapping) else {}
+                evidence.update(
+                    {
+                        "reason": (
+                            "Previously accepted lyric text was an HTML or failure placeholder; "
+                            "a fresh exact-identity query is required."
+                        ),
+                        "response_kind": "invalid_lyric_payload_repair",
+                    }
+                )
+                self.connection.execute(
+                    """
+                    UPDATE recording_lyric
+                    SET status = ?, lyric_text = NULL, text_sha256 = NULL,
+                        evidence_json = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE recording_id = ?
+                    """,
+                    (
+                        LYRIC_STATUS_PENDING,
+                        json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                        str(row["recording_id"]),
+                    ),
+                )
+                repaired.append(str(row["recording_id"]))
+        return {
+            "scanned_available": len(rows),
+            "demoted": len(repaired),
+            "recording_ids": repaired,
+        }
 
     def lyric_coverage(self) -> dict[str, int]:
         """Report coverage for the recordings that a public snapshot exposes."""

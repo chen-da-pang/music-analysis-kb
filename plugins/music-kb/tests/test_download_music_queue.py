@@ -238,3 +238,54 @@ def test_lyrics_only_worker_writes_pending_or_available_receipt_without_audio(mo
     assert receipt["status"] == "available"
     assert receipt["lyric_text"] == "只取歌词"
     assert not (work_dir / "KugouMusicClient").exists()
+
+
+def test_lyrics_only_worker_rejects_html_failure_payload(monkeypatch, tmp_path: Path) -> None:
+    module = _module()
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def search(self, _query: str):
+            return {
+                "KugouMusicClient": [
+                    SimpleNamespace(
+                        source="KugouMusicClient",
+                        song_name="空心 (Live)",
+                        singers="黄霄雲、刘端端",
+                        identifier="fixture-hash",
+                        lyric="<script>window.location='/error'</script>获取失败",
+                        raw_data={
+                            "search": {"MixSongID": "1"},
+                            "lyric": {"candidates": [{"id": "fixture"}]},
+                        },
+                    )
+                ]
+            }
+
+    _install_fake_musicdl(monkeypatch, FakeClient)
+    queue, _inventory, work_dir, progress, log = _queue(
+        tmp_path, title="空心 (Live)", artist="黄霄雲、刘端端"
+    )
+    receipt_path = tmp_path / "backfill-lyrics.jsonl"
+    summary = module.run_lyrics_only(
+        queue,
+        work_dir,
+        progress,
+        log,
+        "lyrics-only",
+        None,
+        False,
+        0,
+        0,
+        10,
+        5,
+        receipt_path,
+    )
+
+    assert summary["pending"] == 1
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "pending"
+    assert receipt["evidence"]["response_kind"] == "invalid_lyric_payload"
+    assert "lyric_text" not in receipt
