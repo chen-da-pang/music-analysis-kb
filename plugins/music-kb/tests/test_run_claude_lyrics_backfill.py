@@ -67,3 +67,11 @@ def test_backfill_progress_marks_pending_as_attempted_and_prompt_forbids_audio()
     assert "不能下载音频" in prompt
     assert "不得扫描、移动或手工补写 .lrc" in prompt
     assert "--lyrics-only" in prompt
+
+
+def test_backfill_wrapper_accepts_an_explicit_musicdl_interpreter() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'parser.add_argument(\n        "--worker-python"' in source
+    assert 'default=os.environ.get("MUSICDL_PYTHON", "python3")' in source
+    assert "args.worker_python," in source

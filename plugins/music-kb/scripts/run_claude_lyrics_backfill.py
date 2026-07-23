@@ -152,6 +152,14 @@ def main() -> int:
     )
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--claude-bin", default="claude")
+    parser.add_argument(
+        "--worker-python",
+        default=os.environ.get("MUSICDL_PYTHON", "python3"),
+        help=(
+            "Python executable that already has musicdl installed. "
+            "Defaults to $MUSICDL_PYTHON or python3."
+        ),
+    )
     parser.add_argument("--model")
     parser.add_argument("--max-budget-usd", type=float)
     parser.add_argument("--timeout-seconds", type=int, default=86_400)
@@ -208,6 +216,7 @@ def main() -> int:
                 "workspace": str(workspace),
                 "dry_run": args.dry_run,
                 "max_items": args.max_items,
+                "worker_python": args.worker_python,
             },
         ) as outputs:
             if args.reuse_queue:
@@ -284,7 +293,7 @@ def main() -> int:
                     stderr_path = work_dir / f"claude-stderr-{chunk_index:04d}.log"
                     _write_chunk_queue(chunk_queue, chunk)
                     worker_values = [
-                        "python3",
+                        args.worker_python,
                         str(worker_path),
                         "--queue",
                         str(chunk_queue),
