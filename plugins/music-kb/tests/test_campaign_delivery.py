@@ -302,7 +302,7 @@ def test_delivery_import_preserves_exact_output_whitespace_for_hash_audit(tmp_pa
         assert repository.validate()["valid"] is True
 
 
-def test_snapshot_keeps_only_provenance_for_canonical_campaign_analysis(tmp_path: Path) -> None:
+def test_snapshot_keeps_only_provenance_for_canonical_campaign_analysis(tmp_path: Path, lyric_seed) -> None:
     database = tmp_path / "master.sqlite"
     initialize_database(database)
     records = fixture_records()
@@ -318,6 +318,7 @@ def test_snapshot_keeps_only_provenance_for_canonical_campaign_analysis(tmp_path
     with MusicKBRepository(database) as repository:
         repository.import_campaign_delivery(load_campaign_delivery_file(FIXTURE))
         repository.import_campaign_delivery(load_campaign_delivery_file(replacement_path))
+        lyric_seed(repository)
 
     release = create_snapshot(database, tmp_path / "releases", release_name="fixture-release")
     with MusicKBRepository(release["database"], read_only=True) as snapshot:

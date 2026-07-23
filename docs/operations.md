@@ -47,9 +47,13 @@ when a colleague uses a nonstandard Python installation.
 ### Weekly release flow
 
 1. Import only passed Music Flamingo results into the **local master**.
-2. Run `music-kb validate`.
-3. Build a release with `music-kb snapshot create`.
-4. Inspect the fan-out plan without connecting to anyone:
+2. Import the identity-bound CC lyric receipt with `music-kb import-lyrics`.
+   New tracks receive it during the normal download atom; historical unresolved
+   tracks must first run the no-audio CC backfill described below.
+3. Run `music-kb validate`; release validation requires every canonical
+   recording to be `available`, `instrumental`, or `platform_unavailable`.
+4. Build a release with `music-kb snapshot create`.
+5. Inspect the fan-out plan without connecting to anyone:
 
    ```bash
    cd plugins/music-kb
@@ -59,7 +63,7 @@ when a colleague uses a nonstandard Python installation.
      --dry-run
    ```
 
-5. Publish the exact same release:
+6. Publish the exact same release:
 
    ```bash
    uv run music-kb --json publish push \
@@ -70,7 +74,8 @@ when a colleague uses a nonstandard Python installation.
 ### Complete weekly-run orchestration
 
 For a recurring update, use the publisher-only orchestrator so the capture,
-dedupe, Claude Code download, CNB handoff, import, link gate, snapshot,
+ dedupe, Claude Code download and lyric receipt, CNB handoff, import, link and
+ lyric-coverage gates, snapshot,
 publisher-local current-snapshot install, peer plan, and cleanup receipts share
 one run id:
 
@@ -136,8 +141,35 @@ protected repository's counter remains high after visible cleanup, record
 `server_gc_pending=true`; never delete the protected runtime image or `main`.
 The explicitly bounded `git-objects` route is allowed only when its own total,
 per-file, and Git-headroom gates pass. The orchestrator rejects incomplete
-source links and never treats a dry-run or skipped analysis as a completed
-analysis.
+source links or incomplete lyric coverage and never treats a dry-run or skipped
+analysis as a completed analysis.
+
+### One-time historical lyric backfill
+
+Before the first v7 release, run the dedicated publisher-only CC wrapper. It
+uses the same validated Kugou lyric path as new downloads, but never rebuilds
+or mutates inventory and never downloads audio:
+
+```bash
+python3 plugins/music-kb/scripts/run_claude_lyrics_backfill.py \
+  --workspace /path/to/music-workspace \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --chart-db /path/to/music-workspace/data/music_trends.sqlite \
+  --run-id kugou-lyrics-backfill-2026w30 \
+  --dry-run
+```
+
+Inspect its exact source queue, then rerun without `--dry-run`. For the legacy
+927 records, `--chart-db` is an exact `source_url` -> chart `play_link` bridge
+to MixSongID, never a title/artist fallback. The command imports its receipt
+and retains pending results for a later identity-safe retry; no release can
+pass until `music-kb validate` reports zero unresolved lyrics.
+
+When a historical exact page has no usable hash, the wrapper may read the
+inventory solely to attach an archived hash whose `kugou:<MixSongID>` key and
+completed-download status exactly match the queued identity. It never scans
+audio/LRC files or trusts a title/artist match; invalid, conflicting, or
+ambiguous hash-based lyric responses remain pending.
 
 When quota blocks a weekly invocation before analysis, the independent
 destructive cleanup atom can remove completed allowlisted repositories without
@@ -190,7 +222,7 @@ peer installs.
 
 Never grant client agents write access to a snapshot.
 
-## Schema v6 publisher upgrade
+## Schema v7 publisher upgrade
 
 Before using the 100k generic-import path against a pre-existing schema-v4
 master, run the one-time local migration on the publisher machine:
@@ -200,9 +232,11 @@ music-kb init --db "$HOME/.music-kb/music-master.sqlite"
 music-kb validate --db "$HOME/.music-kb/music-master.sqlite"
 ```
 
-This installs the v5 canonical-switch/exact-tag indexes and the v6
-`source_track.source_url` field, then records the FTS projection state. It
-never rewrites Music Flamingo raw text or uploads data.
+This installs the v5 canonical-switch/exact-tag indexes, the v6
+`source_track.source_url` field, and the empty v7 `recording_lyric` table, then
+records the FTS projection state. The migration never fabricates lyrics or
+rewrites Music Flamingo raw text; an identity-bound CC receipt must fill each
+canonical lyric outcome before a new snapshot can publish.
 Create and distribute a fresh snapshot after the migration; do not try to
 initialize a client snapshot directly.
 

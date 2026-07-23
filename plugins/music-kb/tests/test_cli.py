@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import music_kb.cli as cli
+from music_kb.repository import MusicKBRepository
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "analysis.json"
@@ -167,6 +168,33 @@ def test_cli_rebuild_search_recovers_after_interrupted_jsonl_batch(tmp_path: Pat
     assert json.loads(valid.stdout)["result"]["valid"] is True
 
 
+def test_cli_prepares_identity_bound_lyrics_backfill_queue(tmp_path: Path) -> None:
+    database = tmp_path / "master.sqlite"
+    assert run_cli("--json", "init", "--db", str(database)).returncode == 0
+    assert run_cli("--json", "import-analysis", "--db", str(database), "--input", str(FIXTURE)).returncode == 0
+    with MusicKBRepository(database) as repository:
+        with repository.connection:
+            repository.connection.execute(
+                "UPDATE source_track SET source_name = 'kugou', source_track_id = 'kugou-999'"
+            )
+
+    queue = tmp_path / "operational" / "lyrics-backfill.jsonl"
+    result = run_cli(
+        "--json",
+        "prepare-lyrics-backfill",
+        "--db",
+        str(database),
+        "--output",
+        str(queue),
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)["result"]
+    assert payload["queue_count"] == 1
+    assert payload["queue"] == str(queue)
+    assert json.loads(queue.read_text(encoding="utf-8"))["source_track_id"] == "kugou-999"
+
+
 def test_doctor_reports_missing_default_database(tmp_path: Path, monkeypatch) -> None:
     missing = tmp_path / "missing.sqlite"
     monkeypatch.setenv("MUSIC_KB_DB", str(missing))
@@ -177,10 +205,12 @@ def test_doctor_reports_missing_default_database(tmp_path: Path, monkeypatch) ->
     assert parsed["result"]["ready"] is False
 
 
-def test_cli_publish_push_dry_run_has_a_machine_readable_plan(tmp_path: Path) -> None:
+def test_cli_publish_push_dry_run_has_a_machine_readable_plan(tmp_path: Path, lyric_seed) -> None:
     database = tmp_path / "master.sqlite"
     assert run_cli("--json", "init", "--db", str(database)).returncode == 0
     assert run_cli("--json", "import-analysis", "--db", str(database), "--input", str(FIXTURE)).returncode == 0
+    with MusicKBRepository(database) as repository:
+        lyric_seed(repository)
     created = run_cli(
         "--json",
         "snapshot",

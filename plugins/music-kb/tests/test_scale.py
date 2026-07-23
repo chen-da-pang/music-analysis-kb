@@ -219,7 +219,7 @@ def test_init_migrates_v4_scale_indexes_and_projection_state(tmp_path: Path) -> 
         connection.execute("DELETE FROM meta WHERE key = 'search_projection_state'")
         connection.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
 
-    with pytest.raises(DatabaseNotInitializedError, match="expected 6"):
+    with pytest.raises(DatabaseNotInitializedError, match="expected 7"):
         MusicKBRepository(database)
     initialize_database(database)
     with MusicKBRepository(database) as repository:

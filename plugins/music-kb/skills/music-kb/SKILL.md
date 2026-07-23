@@ -51,6 +51,26 @@ For an ordinary successful retrieval:
 - The workflow ends at retrieval. Never turn model output into a generation
   prompt or use a lifecycle flag to hide a searchable tag.
 
+## Selected-song lyrics contract
+
+- First-turn search, title/artist resolution, and tag facets stay compact: do
+  not fetch or show full lyrics while presenting candidates.
+- Only after the user has selected a recording, use
+  `music_kb_get_lyrics(recording_id=...)` for “歌词”, “完整歌词”, or an equivalent
+  request. Return the complete stored text when status is `available`; do not
+  replace it with a summary, tag, translation, generated text, or `.lrc`
+  timestamps.
+- For “完整内容”, call both `music_kb_get_canonical_analysis(recording_id=...)`
+  and `music_kb_get_lyrics(recording_id=...)`, then present the complete music
+  analysis and the complete lyrics as separate sections for that exact
+  recording.
+- `instrumental` and `platform_unavailable` are honest terminal outcomes. Say
+  which applies and do not invent lyrics. A `pending` response means the
+  published snapshot is incomplete or older; report that boundary rather than
+  guessing from a title or another version.
+- Never use the lyric tool as a corpus-wide text search. It is a selected,
+  recording-ID detail read only.
+
 ## Conversation UX contract
 
 ### Work first, then clarify when it matters
@@ -124,8 +144,8 @@ guard into a taxonomy for unrelated requests.
 
 Read [follow-up retrieval and description rules](references/followups.md) only
 for insufficient results, “再来一些” / “换一批”, a selected direction, a
-complete-description request, or a correction. Do not load it for an ordinary
-first-turn candidate request.
+complete-description or lyrics request, or a correction. Do not load it for an
+ordinary first-turn candidate request.
 
 ### Make the first answer learnable
 
@@ -137,7 +157,7 @@ For a representative or expandable result, include immediately:
 
 After any non-empty candidate list, ask:
 
-> 想看哪些歌的完整 Music Flamingo 原文？可以回复序号、歌名、“前几首”或“全部”；也可以在后面加“中文翻译”或“摘要”。
+> 想看哪些歌的完整 Music Flamingo 原文、歌词或完整内容？可以回复序号、歌名、“前几首”或“全部”；也可以在后面加“中文翻译”或“摘要”。
 
 The description dimension and output mode are optional. Without either, return
 the complete Music Flamingo source text rather than asking for an internal

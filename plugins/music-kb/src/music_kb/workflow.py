@@ -7,6 +7,7 @@ from typing import Any, Sequence
 
 from .campaign_delivery import load_campaign_delivery_file
 from .distribution import CommandRunner, publish_snapshot
+from .lyrics import load_lyric_receipts
 from .publish_state import record_publish_result
 from .repository import MusicKBRepository, iter_import_file
 from .snapshot import create_snapshot, current_snapshot_target, install_snapshot, verify_snapshot
@@ -26,6 +27,7 @@ def run_weekly_update(
     batch_size: int,
     output_dir: str | Path,
     release_name: str | None,
+    lyric_receipt_paths: Sequence[str | Path] = (),
     local_snapshot_dir: str | Path | None = None,
     install_local: bool | None = None,
     peers_file: str | Path,
@@ -69,7 +71,19 @@ def run_weekly_update(
     else:
         tag_result = {"skipped": True, "reason": "generic input must carry its own retrieval tags"}
 
-    validation = _with_repository(db, lambda repo: repo.validate())
+    receipt_files = [Path(path).expanduser().resolve() for path in lyric_receipt_paths]
+    receipts = [receipt for path in receipt_files for receipt in load_lyric_receipts(path)]
+    if receipts:
+        lyric_import = _with_repository(db, lambda repo: repo.import_lyric_receipts(receipts))
+        lyric_import["receipt_files"] = [str(path) for path in receipt_files]
+    else:
+        lyric_import = {
+            "status": "skipped",
+            "reason": "no lyric receipts supplied; strict lyric coverage will block release",
+            "receipt_files": [],
+        }
+
+    validation = _with_repository(db, lambda repo: repo.validate(require_lyrics=True))
     if not validation["valid"]:
         raise ValueError("Master database failed validation")
 
@@ -132,6 +146,7 @@ def run_weekly_update(
         "input_kind": input_kind,
         "import": import_result,
         "tags": tag_result,
+        "lyrics": lyric_import,
         "validation": validation,
         "source_link_status": source_link_status,
         "release": release,

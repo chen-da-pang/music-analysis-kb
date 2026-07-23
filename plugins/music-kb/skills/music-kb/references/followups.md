@@ -65,6 +65,23 @@ parent Skill.
   does not set the size of the first candidate page or change the progressive
   result-volume policy.
 
+## Deliver selected-song lyrics faithfully
+
+- A request for “歌词” or “完整歌词” for a selected recording calls only
+  `music_kb_get_lyrics`; do not fetch canonical analysis just to answer that
+  narrower request.
+- A request for “完整内容” calls both `music_kb_get_canonical_analysis` and
+  `music_kb_get_lyrics` for the same selected recording, then labels the
+  canonical analysis and complete lyrics as separate sections.
+- When lyric status is `available`, return the complete stored lyric text as
+  supplied. Never substitute a summary, translation, generated text, metadata,
+  or LRC timestamps.
+- `instrumental`, `platform_unavailable`, and `pending` are honest outcomes:
+  state the returned status and never infer lyrics from another recording,
+  title, or artist.
+- Do not prefetch lyrics for candidates, use lyrics as a corpus-wide search
+  index, or turn them into a generation prompt.
+
 ## Preserve canonical output modes and source fidelity
 
 - A selected “完整描述”“完整结果”“完整 Music Flamingo 输出” or “原文” defaults

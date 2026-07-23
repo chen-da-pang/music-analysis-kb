@@ -109,24 +109,31 @@ be purged, so inventory—not file presence alone—is the dedupe record.
 11. **`cnb_analysis`** — validate the canonical delivery and expected count.
 12. **`knowledge_import`** — import idempotently, backfill song links, enrich
     retrieval tags, and verify the source-link completeness gate.
-13. **`snapshot`** — create and verify an immutable SQLite release, manifest, and
+13. **`lyrics_import`** — import the automatic CC lyric receipt (and any
+    supplied historical receipt) only through exact `source_name +
+    source_track_id` identity binding. Title/artist is never a database binding
+    key.
+14. **`lyrics_coverage`** — recompute available, instrumental,
+    platform-unavailable, pending, and missing lyric states. Any unresolved
+    recording blocks every following release/cleanup atom.
+15. **`snapshot`** — create and verify an immutable SQLite release, manifest, and
     SHA-256.
-14. **`local_snapshot_install`** — on a real `--publish`, atomically switch the
+16. **`local_snapshot_install`** — on a real `--publish`, atomically switch the
     publisher's `~/.music-kb/current.sqlite` (or `--local-snapshot-dir`) after
     verification. `--no-install-local` is incompatible with real publish.
-15. **`peer_publish`** — dry-run or SSH/rsync the same immutable release using
+17. **`peer_publish`** — dry-run or SSH/rsync the same immutable release using
     the private `peers.toml`; a real run may explicitly use `--skip-peers`.
-16. **`cnb_campaign_cleanup`** — only after local release verification and either
+18. **`cnb_campaign_cleanup`** — only after local release verification and either
     successful enabled peers or explicit peer skip, delete the exact receipt-bound
     disposable repository when `--confirm-delete-cnb-repositories` is present.
     Verify no running workspace, repository 404, zero repository object volume,
     organization usage decrease when applicable, and protected runtime/main/tag
     survival. Gate blocks and dry-runs are written to the campaign receipt.
-17. **`audio_cleanup`** — only after the same release/peer gate and
+19. **`audio_cleanup`** — only after the same release/peer gate and
     `--confirm-delete-audio`; delete audio whose platform track ID is present in
     the verified KB and mark `purged_after_analysis`. Preserve unmatched or
     downloaded-but-not-analyzed audio.
-18. **`cnb_storage_cleanup`** — with `--confirm-delete-cnb-storage`, clean only
+20. **`cnb_storage_cleanup`** — with `--confirm-delete-cnb-storage`, clean only
     visible legacy refs/assets allowed by policy after the disposable repository
     has been handled. Never delete `main`, the protected runtime, the master DB,
     releases, or canonical local evidence. If protected-repository orphan LFS

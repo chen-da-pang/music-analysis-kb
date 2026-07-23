@@ -259,7 +259,7 @@ def test_retrieval_parser_tags_ignore_legacy_suno_safe_metadata(tmp_path: Path) 
         assert repository.search(tags=["trap"])[0]["recording_id"] == recording_id
 
 
-def test_backfill_cli_dry_run_and_snapshot_write_rejection(tmp_path: Path) -> None:
+def test_backfill_cli_dry_run_and_snapshot_write_rejection(tmp_path: Path, lyric_seed) -> None:
     record = fixture_record()
     record["output_text"] = SYNTHETIC_ANALYSIS
     record["output_text_sha256"] = hashlib.sha256(SYNTHETIC_ANALYSIS.encode("utf-8")).hexdigest()
@@ -268,6 +268,7 @@ def test_backfill_cli_dry_run_and_snapshot_write_rejection(tmp_path: Path) -> No
     initialize_database(database)
     with MusicKBRepository(database) as repository:
         repository.import_campaign_delivery(load_campaign_delivery_file(path))
+        lyric_seed(repository)
 
     args = build_parser().parse_args(
         ["enrich-campaign-tags", "--db", str(database), "--dry-run"]

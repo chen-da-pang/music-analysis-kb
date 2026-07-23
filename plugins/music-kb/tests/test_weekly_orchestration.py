@@ -21,6 +21,13 @@ FIXTURE = Path(__file__).parent / "fixtures" / "kugou_canonical_delivery.jsonl"
 OPERATIONS = Path(__file__).parents[1] / "references" / "validated-operations.json"
 
 
+def _delivery_lyrics(lyric_receipt_writer, name: str) -> Path:
+    return lyric_receipt_writer(
+        name,
+        [("kugou", "kg-fixture-0001"), ("kugou", "kg-fixture-0002")],
+    )
+
+
 def test_resolve_campaign_repository_root_from_nested_data_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -161,7 +168,7 @@ def test_weekly_run_rejects_publish_opt_out(tmp_path: Path) -> None:
         )
 
 
-def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path: Path) -> None:
+def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path: Path, lyric_receipt_writer) -> None:
     delivery = tmp_path / "canonical_delivery.jsonl"
     rows = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines() if line]
     for row in rows:
@@ -180,6 +187,7 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
     audio_root.mkdir()
     progress = tmp_path / "download_progress.json"
     progress.write_text("{}\n", encoding="utf-8")
+    lyrics = _delivery_lyrics(lyric_receipt_writer, "supplied-delivery")
 
     result = run_weekly_run(
         workspace=tmp_path,
@@ -199,6 +207,7 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
         peer_names=(),
         publish=False,
         delivery=delivery,
+        lyric_receipt_paths=[lyrics],
         cnb_command=None,
         chart_database=None,
         state_file=tmp_path / "publish-state.json",
@@ -227,7 +236,9 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
     assert not (tmp_path / "data" / "weekly_runs" / "supplied-delivery-resume" / "charts").exists()
 
 
-def test_supplied_delivery_can_install_publisher_snapshot_explicitly_in_dry_run(tmp_path: Path) -> None:
+def test_supplied_delivery_can_install_publisher_snapshot_explicitly_in_dry_run(
+    tmp_path: Path, lyric_receipt_writer
+) -> None:
     delivery = tmp_path / "canonical_delivery.jsonl"
     rows = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines() if line]
     for row in rows:
@@ -247,6 +258,7 @@ def test_supplied_delivery_can_install_publisher_snapshot_explicitly_in_dry_run(
     progress = tmp_path / "download_progress.json"
     progress.write_text("{}\n", encoding="utf-8")
     local_target = tmp_path / "publisher-client"
+    lyrics = _delivery_lyrics(lyric_receipt_writer, "supplied-local-install")
 
     result = run_weekly_run(
         workspace=tmp_path,
@@ -268,6 +280,7 @@ def test_supplied_delivery_can_install_publisher_snapshot_explicitly_in_dry_run(
         peer_names=(),
         publish=False,
         delivery=delivery,
+        lyric_receipt_paths=[lyrics],
         cnb_command=None,
         chart_database=None,
         state_file=tmp_path / "publish-state.json",
@@ -287,7 +300,7 @@ def test_supplied_delivery_can_install_publisher_snapshot_explicitly_in_dry_run(
 
 
 def test_real_publish_defaults_to_local_snapshot_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lyric_receipt_writer
 ) -> None:
     delivery = tmp_path / "canonical_delivery.jsonl"
     rows = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines() if line]
@@ -307,6 +320,7 @@ def test_real_publish_defaults_to_local_snapshot_install(
     audio_root.mkdir()
     progress = tmp_path / "download_progress.json"
     progress.write_text("{}\n", encoding="utf-8")
+    lyrics = _delivery_lyrics(lyric_receipt_writer, "supplied-real-publish")
 
     def fake_json_command(command, *, cwd, timeout_seconds, env=None):
         return {"status": "succeeded"}, subprocess.CompletedProcess(command, 0, "", "")
@@ -341,6 +355,7 @@ def test_real_publish_defaults_to_local_snapshot_install(
         peer_names=(),
         publish=True,
         delivery=delivery,
+        lyric_receipt_paths=[lyrics],
         cnb_command=None,
         chart_database=None,
         state_file=tmp_path / "publish-state.json",
@@ -502,7 +517,7 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
 
 @pytest.mark.parametrize("receipt_completed", [False, True])
 def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, receipt_completed: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, receipt_completed: bool, lyric_receipt_writer
 ) -> None:
     run_id = "resume-campaign"
     run_dir = tmp_path / "data" / "weekly_runs" / run_id
@@ -666,6 +681,7 @@ def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
     inventory.write_text('{"schema_version":1,"songs":[]}\n', encoding="utf-8")
     progress = tmp_path / "progress.json"
     progress.write_text("{}\n", encoding="utf-8")
+    lyrics = _delivery_lyrics(lyric_receipt_writer, "campaign-resume")
 
     result = run_weekly_run(
         workspace=tmp_path,
@@ -685,6 +701,7 @@ def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
         peer_names=(),
         publish=False,
         delivery=None,
+        lyric_receipt_paths=[lyrics],
         cnb_command=None,
         chart_database=None,
         state_file=tmp_path / "publish-state.json",

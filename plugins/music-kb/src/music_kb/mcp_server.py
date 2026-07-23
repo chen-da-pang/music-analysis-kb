@@ -94,6 +94,13 @@ class ReadOnlyMusicKB:
         assert isinstance(result, dict)
         return result
 
+    def get_lyrics(self, *, recording_id: str) -> dict[str, Any]:
+        """Return the selected recording's full stored lyric text unchanged."""
+
+        result = self._call(lambda repository: repository.get_lyrics(recording_id))
+        assert isinstance(result, dict)
+        return result
+
     def tag_facets(self, *, namespace: str = "", prefix: str = "", limit: int = 30) -> dict[str, Any]:
         result = self._call(
             lambda repository: repository.tag_facets(namespace=namespace, prefix=prefix, limit=limit)
@@ -175,6 +182,13 @@ def create_server(database: str | Path | None = None) -> Any:
     )
     def music_kb_get_canonical_analysis(recording_id: str, max_chars: int = 24_000) -> dict[str, Any]:
         return api.get_canonical_analysis(recording_id=recording_id, max_chars=max_chars)
+
+    @server.tool(
+        name="music_kb_get_lyrics",
+        description="Fetch the full stored lyrics for one selected canonical recording by recording ID. This does not search lyrics or modify the local snapshot.",
+    )
+    def music_kb_get_lyrics(recording_id: str) -> dict[str, Any]:
+        return api.get_lyrics(recording_id=recording_id)
 
     @server.tool(
         name="music_kb_tag_facets",

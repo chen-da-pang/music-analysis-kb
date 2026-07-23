@@ -137,10 +137,13 @@ cd plugins/music-kb
 uv run music-kb --json doctor
 uv run music-kb search --tag "granular vocal chop" --limit 10
 uv run music-kb get rec_example
+uv run music-kb get-lyrics rec_example
 ```
 
 The current MCP workflow uses read tools for status, search, title/artist
-resolution, canonical analysis retrieval, and tag facets.
+resolution, canonical analysis retrieval, selected-recording full lyrics, and
+tag facets. Candidate search stays compact; full lyrics are returned only for
+an explicitly selected recording ID.
 
 Campaign analyses receive deterministic, versioned tags for title, artist,
 section, genre, tempo/meter, rhythm, instrumentation, production/mix, harmony,

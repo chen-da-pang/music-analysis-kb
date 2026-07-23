@@ -24,6 +24,9 @@ def test_read_only_mcp_facade_searches_canonical_data(master_database) -> None:
     assert not hasattr(api, "compile_suno_style")
     canonical = api.get_canonical_analysis(recording_id="rec_neon_night_studio")
     assert all("suno_safe" not in tag for tag in canonical["tags"])
+    lyrics = api.get_lyrics(recording_id="rec_neon_night_studio")
+    assert lyrics["status"] == "available"
+    assert lyrics["lyric_text"] == "Synthetic fixture lyric for rec_neon_night_studio."
     facets = api.tag_facets(prefix="granular")
     assert all("suno_safe" not in tag for tag in facets["tags"])
     empty = api.search(tags=["definitely absent fixture tag"])
@@ -55,5 +58,6 @@ def test_mcp_server_exposes_only_retrieval_tools(master_database) -> None:
         "music_kb_recommend",
         "music_kb_resolve_title_artist",
         "music_kb_get_canonical_analysis",
+        "music_kb_get_lyrics",
         "music_kb_tag_facets",
     ]

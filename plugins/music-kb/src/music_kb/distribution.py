@@ -3,6 +3,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import tomllib
+import json
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
@@ -111,10 +112,18 @@ def _remote_executable_setting(value: str, *, field: str, context: str) -> str:
 
 
 def _current_plugin_version() -> str:
+    manifest_path = Path(__file__).resolve().parents[2] / ".codex-plugin" / "plugin.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        version = str(manifest.get("version") or "").strip()
+        if version:
+            return version
+    except (OSError, ValueError, TypeError):
+        pass
     try:
         return package_version("music-kb")
     except PackageNotFoundError:
-        return "0.7.0"
+        return "0.8.2"
 
 
 def _identity_file(value: str | None, *, context: str) -> Path | None:

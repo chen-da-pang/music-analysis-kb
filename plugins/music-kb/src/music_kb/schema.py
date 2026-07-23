@@ -6,7 +6,7 @@ from pathlib import Path
 from .errors import DatabaseNotInitializedError, MusicKBError, ReadOnlyError
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 SCHEMA_SQL = """
@@ -71,6 +71,34 @@ CREATE TABLE IF NOT EXISTS source_track (
     UNIQUE(source_name, source_track_id)
 );
 CREATE INDEX IF NOT EXISTS idx_source_track_source_track_id ON source_track(source_track_id);
+
+CREATE TABLE IF NOT EXISTS recording_lyric (
+    recording_id TEXT PRIMARY KEY REFERENCES recording(id) ON DELETE CASCADE,
+    source_track_row_id TEXT NOT NULL REFERENCES source_track(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'available', 'instrumental', 'platform_unavailable')),
+    lyric_text TEXT,
+    text_sha256 TEXT,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    normalizer_version TEXT NOT NULL DEFAULT 'lrc-v1',
+    acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK(
+        (status = 'available'
+         AND lyric_text IS NOT NULL
+         AND length(trim(lyric_text)) > 0
+         AND text_sha256 IS NOT NULL
+         AND length(trim(text_sha256)) = 64)
+        OR (status = 'pending' AND lyric_text IS NULL AND text_sha256 IS NULL)
+        OR (status IN ('instrumental', 'platform_unavailable')
+            AND lyric_text IS NULL
+            AND text_sha256 IS NULL
+            AND length(trim(evidence_json)) > 2)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_recording_lyric_source_track
+    ON recording_lyric(source_track_row_id);
+CREATE INDEX IF NOT EXISTS idx_recording_lyric_status
+    ON recording_lyric(status);
 
 CREATE TABLE IF NOT EXISTS analysis_revision (
     id TEXT PRIMARY KEY,
@@ -434,6 +462,21 @@ def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
+    """Add durable lyric records without fabricating historical coverage.
+
+    Existing databases deliberately receive no synthetic lyric rows. Their
+    canonical recordings remain unresolved until the identity-bound backfill
+    imports real lyrics or a documented terminal exception.
+    """
+
+    with connection:
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("7",),
+        )
+
+
 def initialize_database(path: str | Path) -> Path:
     database = _path(path)
     version: int | None = None
@@ -473,6 +516,9 @@ def initialize_database(path: str | Path) -> Path:
             if version == 5:
                 _migrate_v5_to_v6(connection)
                 version = 6
+            if version == 6:
+                _migrate_v6_to_v7(connection)
+                version = 7
             connection.executescript(SCHEMA_SQL)
         except sqlite3.OperationalError as exc:
             if "fts5" in str(exc).casefold():

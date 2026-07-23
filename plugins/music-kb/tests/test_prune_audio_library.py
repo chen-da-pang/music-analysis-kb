@@ -5,6 +5,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "prune_audio_library.py"
 SPEC = importlib.util.spec_from_file_location("prune_audio_library", SCRIPT)
@@ -21,13 +22,26 @@ def write_knowledge_db(path: Path) -> None:
             CREATE TABLE campaign_delivery_provenance (id INTEGER PRIMARY KEY);
             INSERT INTO campaign_delivery_provenance DEFAULT VALUES;
             CREATE TABLE source_track (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL,
                 source_name TEXT NOT NULL,
                 source_track_id TEXT NOT NULL,
                 source_url TEXT
             );
             INSERT INTO source_track VALUES (
-                'kugou', 'kugou-1', 'https://www.kugou.com/mixsong/1.html'
+                'source-1', 'recording-1', 'kugou', 'kugou-1', 'https://www.kugou.com/mixsong/1.html'
             );
+            CREATE TABLE recording (
+                id TEXT PRIMARY KEY,
+                canonical_analysis_id TEXT
+            );
+            INSERT INTO recording VALUES ('recording-1', 'analysis-1');
+            CREATE TABLE recording_lyric (
+                recording_id TEXT PRIMARY KEY,
+                source_track_row_id TEXT NOT NULL,
+                status TEXT NOT NULL
+            );
+            INSERT INTO recording_lyric VALUES ('recording-1', 'source-1', 'available');
             """
         )
         connection.commit()
@@ -115,3 +129,14 @@ def test_prune_deletes_only_analyzed_audio_and_preserves_pending_download(tmp_pa
     assert inventory["songs"][0]["download"]["file_present"] is False
     assert inventory["songs"][1]["download"]["file_present"] is True
     assert inventory["audio_retention"] == "partial_purge_after_analysis"
+
+
+def test_prune_refuses_when_any_canonical_lyric_is_missing_or_pending(tmp_path: Path) -> None:
+    database = tmp_path / "knowledge.sqlite"
+    write_knowledge_db(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM recording_lyric")
+        connection.commit()
+
+    with pytest.raises(RuntimeError, match="歌词覆盖不完整"):
+        MODULE.validate_release(database)

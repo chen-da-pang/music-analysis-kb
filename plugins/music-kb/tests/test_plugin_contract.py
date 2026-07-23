@@ -6,6 +6,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from music_kb.distribution import _current_plugin_version
+from music_kb.schema import SCHEMA_VERSION
 import pytest
 
 
@@ -14,6 +16,9 @@ def test_plugin_manifest_and_mcp_config_are_present() -> None:
     manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
     mcp = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
     assert manifest["name"] == "music-kb"
+    assert manifest["version"] == "0.8.2"
+    assert _current_plugin_version() == manifest["version"]
+    assert SCHEMA_VERSION == 7
     assert "suno" not in json.dumps(manifest, ensure_ascii=False).casefold()
     assert manifest["mcpServers"] == "./.mcp.json"
     assert mcp["mcpServers"]["music-kb"]["command"] == "uv"
@@ -33,6 +38,7 @@ def test_conversation_ux_onboarding_and_contract_are_present() -> None:
     assert any("R&B" in prompt and "温暖" in prompt for prompt in prompts)
     assert any("氛围感" in prompt and "方向" in prompt for prompt in prompts)
     assert any("试听链接" in prompt for prompt in prompts)
+    assert any("完整歌词" in prompt for prompt in prompts)
 
     for phrase in (
         "## Runtime routing — do this first",
@@ -44,6 +50,10 @@ def test_conversation_ux_onboarding_and_contract_are_present() -> None:
         "Do not inspect `--help` unless",
         "Do not reread this Skill",
         "Do not repeat a successful discovery or recommendation with identical",
+        "## Selected-song lyrics contract",
+        "music_kb_get_lyrics(recording_id=...)",
+        "For “完整内容”, call both",
+        "Never use the lyric tool as a corpus-wide text search",
         "Run each branch recommendation as its own call",
         "A complete first read",
         "do not use sed, cat, or another file",
@@ -116,6 +126,9 @@ def test_conversation_ux_onboarding_and_contract_are_present() -> None:
         "Markdown listening link",
         "也符合：",
         "cross-group duplicate",
+        "## Deliver selected-song lyrics faithfully",
+        "A request for “歌词” or “完整歌词”",
+        "LRC timestamps",
     ):
         assert phrase in contract
 
@@ -634,6 +647,6 @@ def test_plugin_version_is_kept_in_sync() -> None:
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     lockfile = (root / "uv.lock").read_text(encoding="utf-8")
     version = manifest["version"]
-    assert version == "0.8.1"
+    assert version == "0.8.2"
     assert f'version = "{version}"' in pyproject
     assert f'name = "music-kb"\nversion = "{version}"' in lockfile

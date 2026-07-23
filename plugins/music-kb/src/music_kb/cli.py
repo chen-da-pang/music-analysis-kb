@@ -10,6 +10,7 @@ from typing import Any, Callable
 from .campaign_delivery import load_campaign_delivery_file
 from .distribution import publish_snapshot
 from .errors import DatabaseNotInitializedError, MusicKBError
+from .lyrics_backfill import materialize_lyric_backfill_queue
 from .repository import MusicKBRepository, iter_import_file
 from .schema import SCHEMA_VERSION, initialize_database
 from .snapshot import create_snapshot, install_snapshot, verify_snapshot
@@ -115,6 +116,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optionally require an exact entry count (use 927 for the full campaign)",
     )
 
+    lyric_importer = commands.add_parser(
+        "import-lyrics",
+        help="Import identity-bound CC lyric receipt JSONL into the writable publisher database",
+    )
+    _add_database_argument(lyric_importer, required=True)
+    lyric_importer.add_argument(
+        "--input", type=Path, required=True, help="CC lyric receipt JSONL file"
+    )
+
+    lyric_backfill = commands.add_parser(
+        "prepare-lyrics-backfill",
+        help="Materialize the exact-identity, no-audio CC lyric queue for unresolved canonical recordings",
+    )
+    _add_database_argument(lyric_backfill, required=True)
+    lyric_backfill.add_argument(
+        "--output", type=Path, required=True, help="Operational JSONL queue path outside the plugin repository"
+    )
+    lyric_backfill.add_argument(
+        "--chart-db",
+        type=Path,
+        help=(
+            "Authoritative Kugou chart SQLite used only to resolve legacy source URLs "
+            "to exact MixSongIDs"
+        ),
+    )
+
     enricher = commands.add_parser(
         "enrich-campaign-tags",
         help="Derive fine-grained deterministic tags for current campaign canonical analyses",
@@ -177,6 +204,10 @@ def build_parser() -> argparse.ArgumentParser:
     getter.add_argument("recording_id")
     getter.add_argument("--max-chars", type=int, default=24_000)
 
+    lyric_getter = commands.add_parser("get-lyrics", help="Fetch one selected recording's full stored lyrics")
+    _add_database_argument(lyric_getter)
+    lyric_getter.add_argument("recording_id")
+
     snapshot = commands.add_parser("snapshot", help="Create, verify, or install immutable local snapshots")
     snapshot_commands = snapshot.add_subparsers(dest="snapshot_command", required=True)
     create = snapshot_commands.add_parser("create", help="Build canonical-only release snapshot")
@@ -227,6 +258,12 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--batch-size", type=int, default=500)
     weekly.add_argument("--output-dir", type=Path, required=True)
     weekly.add_argument("--release-name", default=None)
+    weekly.add_argument(
+        "--lyrics-receipt",
+        action="append",
+        default=[],
+        help="Identity-bound CC lyric receipt JSONL; repeat for multiple completed batches",
+    )
     _add_local_snapshot_arguments(weekly)
     weekly.add_argument("--peers-file", type=Path, default=default_peer_inventory())
     weekly.add_argument("--peer", action="append", default=[])
@@ -278,6 +315,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicitly skip peer sync; with --publish, cleanup still requires both confirmation flags",
     )
     weekly_run.add_argument("--delivery", type=Path, help="Existing CNB canonical delivery JSONL")
+    weekly_run.add_argument(
+        "--lyrics-receipt",
+        action="append",
+        default=[],
+        help="Additional identity-bound CC lyric receipt JSONL for a supplied/resumed delivery",
+    )
     weekly_run.add_argument("--cnb-command", help="Command that writes $MUSIC_KB_CNB_OUTPUT canonical JSONL")
     weekly_run.add_argument("--chart-database", type=Path, help="Authoritative chart SQLite used to backfill source links")
     weekly_run.add_argument("--state-file", type=Path, default=Path("~/.music-kb/state/publish-state.json").expanduser())
@@ -387,6 +430,18 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             read_only=False,
             operation=lambda repo: repo.import_campaign_delivery(entries),
         )
+    if args.command == "import-lyrics":
+        return 0, _with_repository(
+            args.db,
+            read_only=False,
+            operation=lambda repo: repo.import_lyric_receipt_file(args.input),
+        )
+    if args.command == "prepare-lyrics-backfill":
+        return 0, materialize_lyric_backfill_queue(
+            args.db,
+            args.output,
+            chart_database=args.chart_db,
+        )
     if args.command == "enrich-campaign-tags":
         return 0, _with_repository(
             args.db,
@@ -447,6 +502,12 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             read_only=True,
             operation=lambda repo: repo.get_canonical_analysis(args.recording_id, max_chars=args.max_chars),
         )
+    if args.command == "get-lyrics":
+        return 0, _with_repository(
+            args.db,
+            read_only=True,
+            operation=lambda repo: repo.get_lyrics(args.recording_id),
+        )
     if args.command == "snapshot":
         if args.snapshot_command == "create":
             return 0, create_snapshot(args.db, args.output_dir, release_name=args.name)
@@ -472,6 +533,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             batch_size=args.batch_size,
             output_dir=args.output_dir,
             release_name=args.release_name,
+            lyric_receipt_paths=args.lyrics_receipt,
             local_snapshot_dir=args.local_snapshot_dir,
             install_local=args.install_local,
             peers_file=args.peers_file,
@@ -501,6 +563,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             peer_names=args.peer,
             publish=args.publish,
             delivery=args.delivery,
+            lyric_receipt_paths=args.lyrics_receipt,
             cnb_command=args.cnb_command,
             chart_database=args.chart_database,
             state_file=args.state_file,

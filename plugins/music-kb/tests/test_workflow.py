@@ -45,7 +45,7 @@ class SuccessfulTransport:
         return subprocess.CompletedProcess(list(command), 0, stdout="ok", stderr="")
 
 
-def test_weekly_update_prepares_release_and_only_dry_runs_publish(tmp_path: Path) -> None:
+def test_weekly_update_prepares_release_and_only_dry_runs_publish(tmp_path: Path, lyric_receipt_writer) -> None:
     database = tmp_path / "master.sqlite"
     initialize_database(database)
     key = tmp_path / "id_ed25519"
@@ -53,6 +53,7 @@ def test_weekly_update_prepares_release_and_only_dry_runs_publish(tmp_path: Path
     peers = tmp_path / "peers.toml"
     _peers(peers, key)
     state = tmp_path / "publish-state.json"
+    lyrics = lyric_receipt_writer("generic", [("fixture", "fixture-001")])
 
     result = run_weekly_update(
         database=database,
@@ -62,6 +63,7 @@ def test_weekly_update_prepares_release_and_only_dry_runs_publish(tmp_path: Path
         batch_size=1,
         output_dir=tmp_path / "releases",
         release_name="music-kb-atom3",
+        lyric_receipt_paths=[lyrics],
         peers_file=peers,
         publish=False,
         state_file=state,
@@ -79,7 +81,7 @@ def test_weekly_update_prepares_release_and_only_dry_runs_publish(tmp_path: Path
     assert not state.exists()
 
 
-def test_weekly_update_publish_records_state_after_verified_fanout(tmp_path: Path) -> None:
+def test_weekly_update_publish_records_state_after_verified_fanout(tmp_path: Path, lyric_receipt_writer) -> None:
     database = tmp_path / "master.sqlite"
     initialize_database(database)
     key = tmp_path / "id_ed25519"
@@ -88,6 +90,7 @@ def test_weekly_update_publish_records_state_after_verified_fanout(tmp_path: Pat
     _peers(peers, key)
     state = tmp_path / "publish-state.json"
     runner = SuccessfulTransport()
+    lyrics = lyric_receipt_writer("generic-publish", [("fixture", "fixture-001")])
 
     result = run_weekly_update(
         database=database,
@@ -97,6 +100,7 @@ def test_weekly_update_publish_records_state_after_verified_fanout(tmp_path: Pat
         batch_size=1,
         output_dir=tmp_path / "releases",
         release_name="music-kb-atom3-publish",
+        lyric_receipt_paths=[lyrics],
         peers_file=peers,
         publish=True,
         state_file=state,
@@ -143,13 +147,17 @@ def test_weekly_update_rejects_publish_opt_out(tmp_path: Path) -> None:
         )
 
 
-def test_campaign_weekly_update_rejects_missing_source_links(tmp_path: Path) -> None:
+def test_campaign_weekly_update_rejects_missing_source_links(tmp_path: Path, lyric_receipt_writer) -> None:
     database = tmp_path / "master.sqlite"
     initialize_database(database)
     key = tmp_path / "id_ed25519"
     key.write_text("fixture", encoding="utf-8")
     peers = tmp_path / "peers.toml"
     _peers(peers, key)
+    lyrics = lyric_receipt_writer(
+        "campaign-links",
+        [("kugou", "kg-fixture-0001"), ("kugou", "kg-fixture-0002")],
+    )
 
     with pytest.raises(ValueError, match="Source-link completeness gate failed"):
         run_weekly_update(
@@ -160,6 +168,7 @@ def test_campaign_weekly_update_rejects_missing_source_links(tmp_path: Path) -> 
             batch_size=1,
             output_dir=tmp_path / "releases",
             release_name="campaign-link-gate",
+            lyric_receipt_paths=[lyrics],
             peers_file=peers,
             publish=False,
             state_file=tmp_path / "publish-state.json",

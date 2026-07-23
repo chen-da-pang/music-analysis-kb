@@ -16,7 +16,8 @@ from a completed CNB canonical delivery. The atom has four bounded stages:
 3. Write a JSONL queue containing only songs that are not already downloaded.
 4. Call Claude Code in print mode. Claude Code runs the deterministic
    `scripts/download_music_queue.py` worker, which uses `musicdl` with
-   `KugouMusicClient` and updates the inventory after every attempt.
+   `KugouMusicClient`, updates the inventory after every attempt, and writes an
+   identity-bound lyric receipt from the exact result's `SongInfo.lyric`.
 
 If the primary worker leaves songs as `no_results`, run the separate fallback
 atom with Claude Code. It consumes only an explicit no-results queue and runs
@@ -37,7 +38,8 @@ capture atom; this atom consumes its processed songs JSON/JSONL/CSV export.
 - Do not use the historical `batch_download.py` for weekly updates. It scans
   the whole SQLite database and predates the queue-level inventory contract.
 - Do not commit `song_inventory.json`, queue runs, audio, progress, logs, or
-  credentials to the plugin repository.
+  credentials to the plugin repository. Lyrics receipts are operational data
+  too; only their validated normal text enters the private SQLite snapshot.
 
 ## Canonical invocation
 
@@ -100,6 +102,36 @@ The prompt explicitly tells Claude Code not to call `kugou-cli`, not to run
 the old full-database script, and not to invent a new downloader. The child
 inherits `http_proxy` and `https_proxy` when `--proxy` is provided.
 
+## Lyrics receipt and historical backfill
+
+The audio worker accepts a search result only when its raw Kugou
+`MixSongID`/`ID` exactly equals the queue `platform_track_key`. After a
+successful exact result, it normalizes `SongInfo.lyric` and appends a receipt
+with `source_name`, `source_track_id`, status, evidence, and a text hash. It
+must not scan a generated `.lrc` file. Empty/network/parse/identity errors are
+`pending`; only exact platform evidence can produce `instrumental` or
+`platform_unavailable`.
+
+For the historical library, do **not** re-download audio. Run the dedicated
+wrapper against the publisher master:
+
+```bash
+python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_lyrics_backfill.py \
+  --workspace "$MUSIC_WORKSPACE" \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --chart-db "$MUSIC_WORKSPACE/data/music_trends.sqlite" \
+  --run-id kugou-lyrics-backfill-2026w30 \
+  --dry-run
+```
+
+It materializes one exact platform identity for each unresolved canonical
+source: current rows use `kugou-<MixSongID>` directly, while historical rows
+resolve only by an exact `source_url` to chart `play_link` lookup in the
+authoritative `--chart-db`. The worker must not receive an inventory argument,
+write audio, or inspect existing LRC files. After review, rerun without
+`--dry-run`; its identity-validated receipt is imported into the master
+automatically.
+
 ### Fallback invocation
 
 The fallback queue must contain only records whose current inventory status is
@@ -140,8 +172,9 @@ files are queued for repair; failed/no-result records are retried.
 
 ## Purge audio after analysis
 
-Once the canonical release has been imported, validated, and its source links
-are present, the local audio tree can be removed without breaking deduplication:
+Once the canonical release has been imported, validated, its source links are
+present, and lyric coverage is terminal for every canonical recording, the
+local audio tree can be removed without breaking deduplication:
 
 ```bash
 python3 music-analysis-kb/plugins/music-kb/scripts/prune_audio_library.py \
@@ -152,8 +185,8 @@ python3 music-analysis-kb/plugins/music-kb/scripts/prune_audio_library.py \
 ```
 
 That is a dry-run. The command checks the inventory count, canonical delivery
-count, source-track count, and non-empty source-link count before deleting
-anything. Execute the deletion only with the explicit flag:
+count, source-track count, non-empty source-link count, and full lyric coverage
+before deleting anything. Execute the deletion only with the explicit flag:
 
 ```bash
 .../prune_audio_library.py \

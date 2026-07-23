@@ -146,9 +146,10 @@ def render_prompt(worker_command: str, *, chunk_index: int, chunk_total: int) ->
     prompt_lines = [
         "你是本周音乐库下载原子的 Claude Code 执行器。",
         f"这是串行小批次 {chunk_index}/{chunk_total}；只执行当前队列，不要自行改写下载器，不要调用 kugou-cli，也不要重新抓榜单。",
-        "历史有效方法是 musicdl 的 MusicClient + KugouMusicClient：按标题和歌手搜索，只有固定 worker 的严格匹配才可下载。",
+        "历史有效方法是 musicdl 的 MusicClient + KugouMusicClient：标题和歌手只能定位候选；只有固定 worker 验证 Kugou MixSongID 与队列平台 ID 一致才可下载或采集歌词。",
         "严格运行下面这一条命令；只允许读写这些绝对路径。队列为空时不要初始化 musicdl，直接报告没有新增下载。",
-        "绝不能手工修改 inventory、progress、queue 或音频状态；只能让固定 worker 写入。不得把未产生文件的歌曲标记为 downloaded、purged_after_analysis 或 skipped。",
+        "绝不能手工修改 inventory、progress、queue、歌词 receipt 或音频状态；只能让固定 worker 写入。不得把未产生文件的歌曲标记为 downloaded、purged_after_analysis 或 skipped。",
+        "worker 会写结构化歌词 receipt；不得扫描、移动或手工补写 .lrc，网络/解析/identity 失败必须保留 pending，不能伪造成平台无歌词。",
         "单曲超时或 musicdl 返回失败时保留真实 failed/no_results 记录并继续队列；不要重写命令、不要手工跳过、不要伪造成功。",
         "必须等待 worker 命令真正退出，并确认 progress.json 有本批次的终端结果；不得在命令仍运行时提前返回。若 Bash 将长进程转为后台，只使用一次 Monitor 等待它结束（timeout 至少 600000ms）；禁止用 Bash while/kill/sleep 轮询，也不要重复启动 worker。",
         worker_command,
@@ -205,6 +206,7 @@ def main() -> int:
     manifest = run_dir / "queue_manifest.json"
     progress = run_dir / "progress.json"
     log = run_dir / "download.log"
+    lyrics_receipt = run_dir / "lyrics-receipts.jsonl"
     db = workspace / "data" / "music_trends.sqlite"
     legacy_progress = workspace / "download_progress.json"
     audio_root = workspace / "music_downloads" / "KugouMusicClient"
@@ -277,6 +279,7 @@ def main() -> int:
                     "chunk_size": args.chunk_size,
                     "chunks": len(chunks),
                     "reuse_queue": args.reuse_queue,
+                    "lyrics_receipt": str(lyrics_receipt),
                     "dry_run": True,
                 },
                 ensure_ascii=False,
@@ -331,6 +334,8 @@ def main() -> int:
             str(log),
             "--run-id",
             run_id,
+            "--lyrics-receipt",
+            str(lyrics_receipt),
             "--item-timeout-seconds",
             str(args.item_timeout_seconds),
         ]
@@ -393,6 +398,8 @@ def main() -> int:
         "operations_sha256": sha256_file(operations_file),
         "worker_progress": aggregate,
         "worker_progress_incomplete": bool(aggregate["unresolved"]),
+        "lyrics_receipt": str(lyrics_receipt),
+        "lyrics_receipt_exists": lyrics_receipt.is_file(),
         "claude_exit_code": exit_code,
     }
     print(json.dumps(summary, ensure_ascii=False))

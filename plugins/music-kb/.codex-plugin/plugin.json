@@ -1,7 +1,7 @@
 {
   "name": "music-kb",
-  "version": "0.8.1",
-  "description": "Local SQLite music-analysis search for agents, with natural-language conversation UX and read-only MCP tools.",
+  "version": "0.8.2",
+  "description": "Local SQLite music-analysis search with natural-language discovery, selected-song lyrics, and read-only MCP tools.",
   "author": {
     "name": "Wuyou Music",
     "url": "https://github.com/chen-da-pang"
@@ -14,14 +14,15 @@
   "interface": {
     "displayName": "Music Knowledge Base",
     "shortDescription": "Find songs by ordinary language in a local, read-only Music Flamingo library.",
-    "longDescription": "A local-first SQLite knowledge base: publishers create verified snapshots; users can ask for songs naturally, compare bounded result directions, and refine a chosen direction while agents query a read-only local copy through MCP.",
+    "longDescription": "A local-first SQLite knowledge base: publishers create verified snapshots; users can ask for songs naturally, compare bounded result directions, and retrieve the complete lyrics of a selected recording while agents query a read-only local copy through MCP.",
     "developerName": "Wuyou Music",
     "category": "Productivity",
     "capabilities": ["Interactive"],
     "defaultPrompt": [
       "我需要一些 R&B、温暖的、关于爱情的歌",
       "找一些有氛围感的歌，先按几个可能方向给我看看",
-      "找带“人声切片”标签的歌，并给我试听链接"
+      "找带“人声切片”标签的歌，并给我试听链接",
+      "选中一首歌后，给我它的完整歌词"
     ],
     "brandColor": "#5B4BDB"
   },

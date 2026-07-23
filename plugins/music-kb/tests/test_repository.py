@@ -153,6 +153,7 @@ def test_init_migrates_v5_source_tracks_to_v6(master_database) -> None:
     with sqlite3.connect(master_database) as connection:
         connection.executescript(
             """
+            DROP TABLE recording_lyric;
             ALTER TABLE source_track RENAME TO source_track_v6;
             CREATE TABLE source_track (
                 id TEXT PRIMARY KEY,
@@ -178,7 +179,7 @@ def test_init_migrates_v5_source_tracks_to_v6(master_database) -> None:
     with MusicKBRepository(master_database) as repository:
         columns = {row["name"] for row in repository.connection.execute("PRAGMA table_info(source_track)")}
         assert "source_url" in columns
-        assert repository.status()["schema_version"] == 6
+        assert repository.status()["schema_version"] == 7
 
 
 def test_importer_rejects_feigua_workflow_tags(master_database, fixture_payload) -> None:
