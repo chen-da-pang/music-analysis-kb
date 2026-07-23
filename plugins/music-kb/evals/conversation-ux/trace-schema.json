@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Music KB normalized multi-direction runtime trace",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scenario_id",
+    "runtime",
+    "base_discovery",
+    "supported_directions",
+    "selected_direction_ids",
+    "branch_recommendations",
+    "final_response"
+  ],
+  "properties": {
+    "schema_version": {"const": 3},
+    "scenario_id": {"type": "string", "minLength": 1},
+    "runtime": {
+      "type": "object",
+      "required": ["capture_complete", "events"],
+      "properties": {
+        "capture_complete": {"const": true},
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["event_id", "kind", "target"],
+                "properties": {
+                  "event_id": {"type": "string", "minLength": 1},
+                  "kind": {"const": "skill_read"},
+                  "target": {"type": "string", "minLength": 1}
+                }
+              },
+              {
+                "type": "object",
+                "required": ["event_id", "kind", "target"],
+                "properties": {
+                  "event_id": {"type": "string", "minLength": 1},
+                  "kind": {
+                    "enum": [
+                      "mcp_resource_probe",
+                      "implementation_inspection",
+                      "help_probe",
+                      "binary_resolution_probe"
+                    ]
+                  },
+                  "target": {"type": "string", "minLength": 1}
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "event_id",
+                  "kind",
+                  "call_id",
+                  "operation",
+                  "transport",
+                  "entrypoint",
+                  "arguments",
+                  "succeeded"
+                ],
+                "properties": {
+                  "event_id": {"type": "string", "minLength": 1},
+                  "kind": {"const": "retrieval_call"},
+                  "call_id": {"type": "string", "minLength": 1},
+                  "operation": {
+                    "enum": [
+                      "status",
+                      "discover",
+                      "recommend",
+                      "resolve_title_artist",
+                      "get_canonical_analysis",
+                      "tag_facets"
+                    ]
+                  },
+                  "transport": {"enum": ["mcp", "cli"]},
+                  "entrypoint": {"type": "string", "minLength": 1},
+                  "arguments": {"type": "object"},
+                  "succeeded": {"type": "boolean"}
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "base_discovery": {
+      "type": "object",
+      "required": ["call_id", "tool", "arguments", "result"],
+      "properties": {
+        "call_id": {"type": "string", "minLength": 1},
+        "tool": {"const": "music_kb_discover"},
+        "arguments": {"type": "object"},
+        "result": {
+          "type": "object",
+          "required": ["match_count", "facet_counts", "facet_scope"],
+          "not": {"required": ["results"]}
+        }
+      }
+    },
+    "supported_directions": {"type": "array", "minItems": 2},
+    "selected_direction_ids": {"type": "array", "minItems": 0, "maxItems": 3},
+    "branch_recommendations": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "required": [
+          "call_id",
+          "direction_id",
+          "tool",
+          "arguments",
+          "result_count",
+          "match_count",
+          "payload_bytes",
+          "result_fields",
+          "result_recording_ids",
+          "selection_scope"
+        ],
+        "properties": {
+          "tool": {"const": "music_kb_recommend"},
+          "payload_bytes": {"type": "integer", "minimum": 0, "maximum": 12000},
+          "result_fields": {"type": "array", "minItems": 1},
+          "result_recording_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "selection_scope": {
+            "type": "object",
+            "required": ["kind"],
+            "properties": {
+              "kind": {"const": "ranked_representative_results"}
+            }
+          }
+        }
+      }
+    },
+    "final_response": {
+      "type": "object",
+      "required": [
+        "layout",
+        "grouped_direction_ids",
+        "reported_separately_direction_ids",
+        "grouped_recording_ids",
+        "exposed_internal_fields",
+        "followup_actions",
+        "complete_description_offer",
+        "overlap_labels_disclosed",
+        "listening_links_markdown"
+      ],
+      "properties": {
+        "layout": {"enum": ["grouped", "flat"]},
+        "grouped_direction_ids": {"type": "array"},
+        "reported_separately_direction_ids": {"type": "array"},
+        "grouped_recording_ids": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          }
+        },
+        "exposed_internal_fields": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "followup_actions": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "complete_description_offer": {"type": "boolean"},
+        "overlap_labels_disclosed": {"type": "boolean"},
+        "listening_links_markdown": {"type": "boolean"},
+        "ungrouped_recording_ids": {"type": "array"}
+      }
+    }
+  }
+}

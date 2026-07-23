@@ -1,0 +1,160 @@
+{
+  "schema_version": 3,
+  "scenario_id": "warm-rnb-love-v080-live-routing-failed-2026-07-22",
+  "normalization_note": "Normalized from the isolated empty-workdir Codex PTY event stream plus an immediate deterministic replay against the same read-only snapshot. The final answer passed direction completeness, page fidelity, grouping, overlap preservation, and handoff checks. The same run reread the Skill, probed MCP resources, inspected the installation, located and called a private .venv binary instead of PATH music-kb, and repeated a successful melancholic recommendation, so runtime routing failed.",
+  "runtime": {
+    "capture_complete": true,
+    "events": [
+      {"event_id": "route-skill-read-1", "kind": "skill_read", "target": "cached skills/music-kb/SKILL.md"},
+      {"event_id": "route-skill-read-2", "kind": "skill_read", "target": "cached skills/music-kb/SKILL.md via sed"},
+      {"event_id": "route-mcp-resource-probe", "kind": "mcp_resource_probe", "target": "list_mcp_resources"},
+      {"event_id": "route-installation-scan", "kind": "implementation_inspection", "target": "cached plugin directory scan"},
+      {"event_id": "route-skill-read-3", "kind": "skill_read", "target": "cached skills/music-kb/SKILL.md retrieval section"},
+      {"event_id": "route-binary-resolution", "kind": "binary_resolution_probe", "target": "cached plugin .venv/bin/music-kb"},
+      {"event_id": "route-status", "kind": "retrieval_call", "call_id": "route-status-private", "operation": "status", "transport": "cli", "entrypoint": "/tmp/music-kb-codex.TIuBdw/plugins/cache/music-analysis-kb/music-kb/0.8.0/.venv/bin/music-kb", "arguments": {}, "succeeded": true},
+      {"event_id": "route-discover", "kind": "retrieval_call", "call_id": "route-discover", "operation": "discover", "transport": "cli", "entrypoint": "/tmp/music-kb-codex.TIuBdw/plugins/cache/music-analysis-kb/music-kb/0.8.0/.venv/bin/music-kb", "arguments": {"tags": ["r&b", "warm", "love"]}, "succeeded": true},
+      {"event_id": "route-hopeful", "kind": "retrieval_call", "call_id": "route-hopeful", "operation": "recommend", "transport": "cli", "entrypoint": "/tmp/music-kb-codex.TIuBdw/plugins/cache/music-analysis-kb/music-kb/0.8.0/.venv/bin/music-kb", "arguments": {"tags": ["r&b", "warm", "love", "hopeful"]}, "succeeded": true},
+      {"event_id": "route-melancholic", "kind": "retrieval_call", "call_id": "route-melancholic", "operation": "recommend", "transport": "cli", "entrypoint": "/tmp/music-kb-codex.TIuBdw/plugins/cache/music-analysis-kb/music-kb/0.8.0/.venv/bin/music-kb", "arguments": {"tags": ["r&b", "warm", "love", "melancholic"]}, "succeeded": true},
+      {"event_id": "route-soul", "kind": "retrieval_call", "call_id": "route-soul", "operation": "recommend", "transport": "cli", "entrypoint": "/tmp/music-kb-codex.TIuBdw/plugins/cache/music-analysis-kb/music-kb/0.8.0/.venv/bin/music-kb", "arguments": {"tags": ["soul", "warm", "love"]}, "succeeded": true},
+      {"event_id": "route-melancholic-duplicate", "kind": "retrieval_call", "call_id": "route-melancholic-duplicate", "operation": "recommend", "transport": "cli", "entrypoint": "/tmp/music-kb-codex.TIuBdw/plugins/cache/music-analysis-kb/music-kb/0.8.0/.venv/bin/music-kb", "arguments": {"tags": ["r&b", "warm", "love", "melancholic"]}, "succeeded": true}
+    ]
+  },
+  "base_discovery": {
+    "call_id": "route-discover",
+    "tool": "music_kb_discover",
+    "arguments": {"tags": ["r&b", "warm", "love"]},
+    "result": {
+      "match_count": 53,
+      "facet_counts": [
+        {"namespace": "genre", "name": "r&b", "count": 53},
+        {"namespace": "genre", "name": "soul", "count": 7},
+        {"namespace": "lyric_theme", "name": "love", "count": 53},
+        {"namespace": "mood", "name": "warm", "count": 53},
+        {"namespace": "mood", "name": "melancholic", "count": 47},
+        {"namespace": "mood", "name": "romantic", "count": 33},
+        {"namespace": "mood", "name": "hopeful", "count": 22}
+      ],
+      "facet_scope": {
+        "kind": "all_matches",
+        "recording_count": 53,
+        "facet_count": 71,
+        "namespaces": ["genre", "mood", "lyric_theme", "vocal", "production", "tempo", "instrument", "rhythm", "drum"],
+        "per_namespace_target": 20,
+        "cutoff_ties_included": true,
+        "truncated_namespaces": []
+      }
+    }
+  },
+  "supported_directions": [
+    {"id": "emotional-warmth", "important": true},
+    {"id": "warm-melancholic", "important": true},
+    {"id": "soul-direction", "important": true}
+  ],
+  "selected_direction_ids": ["emotional-warmth", "warm-melancholic", "soul-direction"],
+  "branch_recommendations": [
+    {
+      "call_id": "route-hopeful",
+      "direction_id": "emotional-warmth",
+      "tool": "music_kb_recommend",
+      "arguments": {"tags": ["r&b", "warm", "love", "hopeful"]},
+      "result_count": 5,
+      "match_count": 22,
+      "payload_bytes": 3777,
+      "result_fields": ["recording_id", "title", "version_label", "artists", "matched_tags", "representative_tags", "selection_basis", "listen_url"],
+      "result_recording_ids": [
+        "rec_kugou_babbdb1cfd31c336cd917dd3379a109014118ea6f98ed663d6f1a905877f4931",
+        "rec_kugou_5c0a844336078614cc3747a79da00cafe28c43de47a01fd4398f0ab3dc8351ea",
+        "rec_kugou_3ecbaa4b321465676f7b00d33d346748fbfd12c76791d718ba893cdc68f766fd",
+        "rec_kugou_a8a59bb48fbd81ed1a68a8b8630d96d8ca6f5b4addbefdbe9652563ee33d01ab",
+        "rec_kugou_ac9df3aa966349a536694f3cf2b533a8eb8fe404de51d8948b92401639aa8c00"
+      ],
+      "selection_scope": {"kind": "ranked_representative_results"},
+      "credible_results": true
+    },
+    {
+      "call_id": "route-melancholic",
+      "direction_id": "warm-melancholic",
+      "tool": "music_kb_recommend",
+      "arguments": {"tags": ["r&b", "warm", "love", "melancholic"]},
+      "result_count": 5,
+      "match_count": 47,
+      "payload_bytes": 3607,
+      "result_fields": ["recording_id", "title", "version_label", "artists", "matched_tags", "representative_tags", "selection_basis", "listen_url"],
+      "result_recording_ids": [
+        "rec_kugou_5334c0d7da2d6d83db6793dfee7473d642782cdb568eb3a0db2c494cf8dccbf3",
+        "rec_kugou_a8a59bb48fbd81ed1a68a8b8630d96d8ca6f5b4addbefdbe9652563ee33d01ab",
+        "rec_kugou_4e33d035e131d05f01d8c223529245bc3c97413283cc078267417a478fa04f3c",
+        "rec_kugou_ff634ca9cc668d377522c63e6c61e70f7b6c5f7c0473c705685ff8a2b765e35b",
+        "rec_kugou_6ac4c803b3d00104b6dda8cb516513768ea55b5bbd19a6e03aeb7897ac4fab9f"
+      ],
+      "selection_scope": {"kind": "ranked_representative_results"},
+      "credible_results": true
+    },
+    {
+      "call_id": "route-soul",
+      "direction_id": "soul-direction",
+      "tool": "music_kb_recommend",
+      "arguments": {"tags": ["soul", "warm", "love"]},
+      "result_count": 5,
+      "match_count": 7,
+      "payload_bytes": 3460,
+      "result_fields": ["recording_id", "title", "version_label", "artists", "matched_tags", "representative_tags", "selection_basis", "listen_url"],
+      "result_recording_ids": [
+        "rec_kugou_f629b2b76eef8b5a6244ddb952e7f3754e8297cccc39048e2f6fdd102fceebae",
+        "rec_kugou_3ecbaa4b321465676f7b00d33d346748fbfd12c76791d718ba893cdc68f766fd",
+        "rec_kugou_0e5b2f5a7abb91ef709ae3759cf895972a3ea1e8ea95a98f886062bd67a64a33",
+        "rec_kugou_92db6473a617bb8eb9edf8f1d170ea698533275590876b4cdffbd4f4b0856110",
+        "rec_kugou_b60233bab2ab58616f70d5dab9e8b897bb54ba339f719049ae8051371fb4fec7"
+      ],
+      "selection_scope": {"kind": "ranked_representative_results"},
+      "credible_results": true
+    }
+  ],
+  "final_response": {
+    "layout": "grouped",
+    "grouped_direction_ids": ["emotional-warmth", "warm-melancholic", "soul-direction"],
+    "reported_separately_direction_ids": [],
+    "ungrouped_recording_ids": [],
+    "grouped_recording_ids": {
+      "emotional-warmth": [
+        "rec_kugou_babbdb1cfd31c336cd917dd3379a109014118ea6f98ed663d6f1a905877f4931",
+        "rec_kugou_5c0a844336078614cc3747a79da00cafe28c43de47a01fd4398f0ab3dc8351ea",
+        "rec_kugou_3ecbaa4b321465676f7b00d33d346748fbfd12c76791d718ba893cdc68f766fd",
+        "rec_kugou_a8a59bb48fbd81ed1a68a8b8630d96d8ca6f5b4addbefdbe9652563ee33d01ab",
+        "rec_kugou_ac9df3aa966349a536694f3cf2b533a8eb8fe404de51d8948b92401639aa8c00"
+      ],
+      "warm-melancholic": [
+        "rec_kugou_5334c0d7da2d6d83db6793dfee7473d642782cdb568eb3a0db2c494cf8dccbf3",
+        "rec_kugou_a8a59bb48fbd81ed1a68a8b8630d96d8ca6f5b4addbefdbe9652563ee33d01ab",
+        "rec_kugou_4e33d035e131d05f01d8c223529245bc3c97413283cc078267417a478fa04f3c",
+        "rec_kugou_ff634ca9cc668d377522c63e6c61e70f7b6c5f7c0473c705685ff8a2b765e35b",
+        "rec_kugou_6ac4c803b3d00104b6dda8cb516513768ea55b5bbd19a6e03aeb7897ac4fab9f"
+      ],
+      "soul-direction": [
+        "rec_kugou_f629b2b76eef8b5a6244ddb952e7f3754e8297cccc39048e2f6fdd102fceebae",
+        "rec_kugou_3ecbaa4b321465676f7b00d33d346748fbfd12c76791d718ba893cdc68f766fd",
+        "rec_kugou_0e5b2f5a7abb91ef709ae3759cf895972a3ea1e8ea95a98f886062bd67a64a33",
+        "rec_kugou_92db6473a617bb8eb9edf8f1d170ea698533275590876b4cdffbd4f4b0856110",
+        "rec_kugou_b60233bab2ab58616f70d5dab9e8b897bb54ba339f719049ae8051371fb4fec7"
+      ]
+    },
+    "exposed_internal_fields": [],
+    "followup_actions": ["再来一些", "换一批"],
+    "complete_description_offer": true,
+    "overlap_labels_disclosed": true,
+    "listening_links_markdown": true
+  },
+  "normalization_evidence": {
+    "capture_kind": "isolated-empty-workdir-pty-event-stream-plus-deterministic-cli-replay",
+    "raw_jsonl_persisted": false,
+    "empty_workdir": true,
+    "repository_source_visible_to_model": false,
+    "deferred_followup_loaded": false,
+    "answer_groups_match_replayed_pages": true,
+    "payload_bytes_exclude_trailing_newline": true,
+    "elapsed_seconds": null,
+    "timing_capture_error": "The wrapper assigned zsh's read-only status variable after turn completion.",
+    "functional_behavior_passed": true,
+    "runtime_routing_passed": false
+  }
+}

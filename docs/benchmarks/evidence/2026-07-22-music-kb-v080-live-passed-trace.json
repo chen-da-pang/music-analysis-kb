@@ -1,0 +1,276 @@
+{
+  "schema_version": 3,
+  "scenario_id": "warm-rnb-love-v080-live-passed-final4-2026-07-23",
+  "normalization_note": "Normalized directly from the complete isolated Codex JSONL event stream. The run used the PATH music-kb route against the read-only music-kb-2026w29-kugou-431-final snapshot, performed one discovery and three independent recommendations, and rendered every returned row in backend order with overlap labels and Markdown listening links.",
+  "runtime": {
+    "capture_complete": true,
+    "events": [
+      {"event_id": "final4-skill-read", "kind": "skill_read", "target": "cached skills/music-kb/SKILL.md"},
+      {"event_id": "final4-status-event", "kind": "retrieval_call", "call_id": "final4-status", "operation": "status", "transport": "cli", "entrypoint": "music-kb", "arguments": {}, "succeeded": true},
+      {"event_id": "final4-discover-event", "kind": "retrieval_call", "call_id": "final4-discover", "operation": "discover", "transport": "cli", "entrypoint": "music-kb", "arguments": {"tags": ["r&b", "warm", "love"]}, "succeeded": true},
+      {"event_id": "final4-hopeful-event", "kind": "retrieval_call", "call_id": "final4-hopeful", "operation": "recommend", "transport": "cli", "entrypoint": "music-kb", "arguments": {"tags": ["r&b", "warm", "love", "hopeful"]}, "succeeded": true},
+      {"event_id": "final4-melancholic-event", "kind": "retrieval_call", "call_id": "final4-melancholic", "operation": "recommend", "transport": "cli", "entrypoint": "music-kb", "arguments": {"tags": ["r&b", "warm", "love", "melancholic"]}, "succeeded": true},
+      {"event_id": "final4-soul-event", "kind": "retrieval_call", "call_id": "final4-soul", "operation": "recommend", "transport": "cli", "entrypoint": "music-kb", "arguments": {"tags": ["r&b", "warm", "love", "soul"]}, "succeeded": true}
+    ]
+  },
+  "base_discovery": {
+    "call_id": "final4-discover",
+    "tool": "music_kb_discover",
+    "arguments": {
+      "tags": [
+        "r&b",
+        "warm",
+        "love"
+      ]
+    },
+    "result": {
+      "match_count": 53,
+      "facet_counts": [
+        {
+          "namespace": "genre",
+          "name": "r&b",
+          "count": 53
+        },
+        {
+          "namespace": "genre",
+          "name": "soul",
+          "count": 7
+        },
+        {
+          "namespace": "lyric_theme",
+          "name": "love",
+          "count": 53
+        },
+        {
+          "namespace": "mood",
+          "name": "warm",
+          "count": 53
+        },
+        {
+          "namespace": "mood",
+          "name": "melancholic",
+          "count": 47
+        },
+        {
+          "namespace": "mood",
+          "name": "romantic",
+          "count": 33
+        },
+        {
+          "namespace": "mood",
+          "name": "hopeful",
+          "count": 22
+        }
+      ],
+      "facet_scope": {
+        "kind": "all_matches",
+        "recording_count": 53,
+        "facet_count": 71,
+        "namespaces": [
+          "genre",
+          "mood",
+          "lyric_theme",
+          "vocal",
+          "production",
+          "tempo",
+          "instrument",
+          "rhythm",
+          "drum"
+        ],
+        "per_namespace_target": 20,
+        "cutoff_ties_included": true,
+        "truncated_namespaces": []
+      }
+    }
+  },
+  "supported_directions": [
+    {
+      "id": "emotional-warmth",
+      "important": true
+    },
+    {
+      "id": "warm-melancholic",
+      "important": true
+    },
+    {
+      "id": "soul-direction",
+      "important": true
+    }
+  ],
+  "selected_direction_ids": [
+    "emotional-warmth",
+    "warm-melancholic",
+    "soul-direction"
+  ],
+  "branch_recommendations": [
+    {
+      "call_id": "final4-hopeful",
+      "direction_id": "emotional-warmth",
+      "tool": "music_kb_recommend",
+      "arguments": {
+        "tags": [
+          "r&b",
+          "warm",
+          "love",
+          "hopeful"
+        ]
+      },
+      "result_count": 5,
+      "match_count": 22,
+      "payload_bytes": 3777,
+      "result_fields": [
+        "recording_id",
+        "title",
+        "version_label",
+        "artists",
+        "matched_tags",
+        "representative_tags",
+        "selection_basis",
+        "listen_url"
+      ],
+      "result_recording_ids": [
+        "rec_kugou_babbdb1cfd31c336cd917dd3379a109014118ea6f98ed663d6f1a905877f4931",
+        "rec_kugou_5c0a844336078614cc3747a79da00cafe28c43de47a01fd4398f0ab3dc8351ea",
+        "rec_kugou_3ecbaa4b321465676f7b00d33d346748fbfd12c76791d718ba893cdc68f766fd",
+        "rec_kugou_a8a59bb48fbd81ed1a68a8b8630d96d8ca6f5b4addbefdbe9652563ee33d01ab",
+        "rec_kugou_ac9df3aa966349a536694f3cf2b533a8eb8fe404de51d8948b92401639aa8c00"
+      ],
+      "selection_scope": {
+        "kind": "ranked_representative_results"
+      },
+      "credible_results": true
+    },
+    {
+      "call_id": "final4-melancholic",
+      "direction_id": "warm-melancholic",
+      "tool": "music_kb_recommend",
+      "arguments": {
+        "tags": [
+          "r&b",
+          "warm",
+          "love",
+          "melancholic"
+        ]
+      },
+      "result_count": 5,
+      "match_count": 47,
+      "payload_bytes": 3607,
+      "result_fields": [
+        "recording_id",
+        "title",
+        "version_label",
+        "artists",
+        "matched_tags",
+        "representative_tags",
+        "selection_basis",
+        "listen_url"
+      ],
+      "result_recording_ids": [
+        "rec_kugou_5334c0d7da2d6d83db6793dfee7473d642782cdb568eb3a0db2c494cf8dccbf3",
+        "rec_kugou_a8a59bb48fbd81ed1a68a8b8630d96d8ca6f5b4addbefdbe9652563ee33d01ab",
+        "rec_kugou_4e33d035e131d05f01d8c223529245bc3c97413283cc078267417a478fa04f3c",
+        "rec_kugou_ff634ca9cc668d377522c63e6c61e70f7b6c5f7c0473c705685ff8a2b765e35b",
+        "rec_kugou_6ac4c803b3d00104b6dda8cb516513768ea55b5bbd19a6e03aeb7897ac4fab9f"
+      ],
+      "selection_scope": {
+        "kind": "ranked_representative_results"
+      },
+      "credible_results": true
+    },
+    {
+      "call_id": "final4-soul",
+      "direction_id": "soul-direction",
+      "tool": "music_kb_recommend",
+      "arguments": {
+        "tags": [
+          "r&b",
+          "warm",
+          "love",
+          "soul"
+        ]
+      },
+      "result_count": 5,
+      "match_count": 7,
+      "payload_bytes": 3667,
+      "result_fields": [
+        "recording_id",
+        "title",
+        "version_label",
+        "artists",
+        "matched_tags",
+        "representative_tags",
+        "selection_basis",
+        "listen_url"
+      ],
+      "result_recording_ids": [
+        "rec_kugou_f629b2b76eef8b5a6244ddb952e7f3754e8297cccc39048e2f6fdd102fceebae",
+        "rec_kugou_3ecbaa4b321465676f7b00d33d346748fbfd12c76791d718ba893cdc68f766fd",
+        "rec_kugou_0e5b2f5a7abb91ef709ae3759cf895972a3ea1e8ea95a98f886062bd67a64a33",
+        "rec_kugou_92db6473a617bb8eb9edf8f1d170ea698533275590876b4cdffbd4f4b0856110",
+        "rec_kugou_b60233bab2ab58616f70d5dab9e8b897bb54ba339f719049ae8051371fb4fec7"
+      ],
+      "selection_scope": {
+        "kind": "ranked_representative_results"
+      },
+      "credible_results": true
+    }
+  ],
+  "final_response": {
+    "layout": "grouped",
+    "grouped_direction_ids": [
+      "emotional-warmth",
+      "warm-melancholic",
+      "soul-direction"
+    ],
+    "reported_separately_direction_ids": [],
+    "ungrouped_recording_ids": [],
+    "grouped_recording_ids": {
+      "emotional-warmth": [
+        "rec_kugou_babbdb1cfd31c336cd917dd3379a109014118ea6f98ed663d6f1a905877f4931",
+        "rec_kugou_5c0a844336078614cc3747a79da00cafe28c43de47a01fd4398f0ab3dc8351ea",
+        "rec_kugou_3ecbaa4b321465676f7b00d33d346748fbfd12c76791d718ba893cdc68f766fd",
+        "rec_kugou_a8a59bb48fbd81ed1a68a8b8630d96d8ca6f5b4addbefdbe9652563ee33d01ab",
+        "rec_kugou_ac9df3aa966349a536694f3cf2b533a8eb8fe404de51d8948b92401639aa8c00"
+      ],
+      "warm-melancholic": [
+        "rec_kugou_5334c0d7da2d6d83db6793dfee7473d642782cdb568eb3a0db2c494cf8dccbf3",
+        "rec_kugou_a8a59bb48fbd81ed1a68a8b8630d96d8ca6f5b4addbefdbe9652563ee33d01ab",
+        "rec_kugou_4e33d035e131d05f01d8c223529245bc3c97413283cc078267417a478fa04f3c",
+        "rec_kugou_ff634ca9cc668d377522c63e6c61e70f7b6c5f7c0473c705685ff8a2b765e35b",
+        "rec_kugou_6ac4c803b3d00104b6dda8cb516513768ea55b5bbd19a6e03aeb7897ac4fab9f"
+      ],
+      "soul-direction": [
+        "rec_kugou_f629b2b76eef8b5a6244ddb952e7f3754e8297cccc39048e2f6fdd102fceebae",
+        "rec_kugou_3ecbaa4b321465676f7b00d33d346748fbfd12c76791d718ba893cdc68f766fd",
+        "rec_kugou_0e5b2f5a7abb91ef709ae3759cf895972a3ea1e8ea95a98f886062bd67a64a33",
+        "rec_kugou_92db6473a617bb8eb9edf8f1d170ea698533275590876b4cdffbd4f4b0856110",
+        "rec_kugou_b60233bab2ab58616f70d5dab9e8b897bb54ba339f719049ae8051371fb4fec7"
+      ]
+    },
+    "exposed_internal_fields": [],
+    "followup_actions": [
+      "再来一些",
+      "换一批"
+    ],
+    "complete_description_offer": true,
+    "overlap_labels_disclosed": true,
+    "listening_links_markdown": true
+  },
+  "normalization_evidence": {
+    "source": "/tmp/music-kb-codex.TIuBdw/live-final4.jsonl",
+    "capture_kind": "complete-codex-jsonl-event-stream",
+    "raw_jsonl_persisted": true,
+    "empty_workdir": true,
+    "repository_source_visible_to_model": false,
+    "deferred_followup_loaded": false,
+    "discovery_total_facets": 71,
+    "discovery_facets_preserved_here": 7,
+    "payload_bytes_exclude_trailing_newline": true,
+    "branch_rows_match_final_answer": true,
+    "cross_group_overlap_occurrences": 4,
+    "markdown_listening_links": 15,
+    "final_answer_preserved_in_raw_capture": true,
+    "elapsed_seconds": 63,
+    "run_exit_code": 0
+  }
+}

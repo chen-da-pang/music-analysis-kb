@@ -1,0 +1,105 @@
+{
+  "schema_version": 3,
+  "scenario_id": "warm-rnb-love-expected-grouped",
+  "runtime": {
+    "capture_complete": true,
+    "events": [
+      {"event_id": "event-skill-read", "kind": "skill_read", "target": "skills/music-kb/SKILL.md"},
+      {"event_id": "event-status", "kind": "retrieval_call", "call_id": "status-1", "operation": "status", "transport": "cli", "entrypoint": "music-kb", "arguments": {}, "succeeded": true},
+      {"event_id": "event-discover", "kind": "retrieval_call", "call_id": "discover-1", "operation": "discover", "transport": "cli", "entrypoint": "music-kb", "arguments": {"tags": ["r&b", "warm", "love"]}, "succeeded": true},
+      {"event_id": "event-branch-1", "kind": "retrieval_call", "call_id": "branch-1", "operation": "recommend", "transport": "cli", "entrypoint": "music-kb", "arguments": {"tags": ["r&b", "warm", "love", "hopeful", "romantic"], "offset": 0}, "succeeded": true},
+      {"event_id": "event-branch-2", "kind": "retrieval_call", "call_id": "branch-2", "operation": "recommend", "transport": "cli", "entrypoint": "music-kb", "arguments": {"tags": ["r&b", "warm", "love", "romantic", "melancholic"], "offset": 0}, "succeeded": true},
+      {"event_id": "event-branch-3", "kind": "retrieval_call", "call_id": "branch-3", "operation": "recommend", "transport": "cli", "entrypoint": "music-kb", "arguments": {"tags": ["r&b", "warm", "love", "soul"], "offset": 0}, "succeeded": true}
+    ]
+  },
+  "base_discovery": {
+    "call_id": "discover-1",
+    "tool": "music_kb_discover",
+    "arguments": {"tags": ["r&b", "warm", "love"]},
+    "result": {
+      "match_count": 53,
+      "facet_counts": [
+        {"namespace": "genre", "name": "r&b", "count": 53},
+        {"namespace": "genre", "name": "soul", "count": 7},
+        {"namespace": "lyric_theme", "name": "love", "count": 53},
+        {"namespace": "mood", "name": "warm", "count": 53},
+        {"namespace": "mood", "name": "romantic", "count": 33},
+        {"namespace": "mood", "name": "hopeful", "count": 22},
+        {"namespace": "mood", "name": "melancholic", "count": 47},
+        {"namespace": "production", "name": "reverb", "count": 53}
+      ],
+      "facet_scope": {
+        "kind": "all_matches",
+        "recording_count": 53,
+        "facet_count": 8,
+        "namespaces": ["genre", "mood", "lyric_theme", "vocal", "production", "tempo", "instrument", "rhythm", "drum"],
+        "per_namespace_target": 20,
+        "cutoff_ties_included": true,
+        "truncated_namespaces": []
+      }
+    }
+  },
+  "supported_directions": [
+    {"id": "emotional-warmth", "important": true},
+    {"id": "warm-timbre", "important": true},
+    {"id": "soul-direction", "important": true}
+  ],
+  "selected_direction_ids": ["emotional-warmth", "warm-timbre", "soul-direction"],
+  "branch_recommendations": [
+    {
+      "call_id": "branch-1",
+      "direction_id": "emotional-warmth",
+      "tool": "music_kb_recommend",
+      "arguments": {"tags": ["r&b", "warm", "love", "hopeful", "romantic"], "offset": 0},
+      "result_count": 5,
+      "match_count": 12,
+      "payload_bytes": 3607,
+      "result_fields": ["recording_id", "title", "version_label", "artists", "matched_tags", "representative_tags", "selection_basis", "listen_url"],
+      "result_recording_ids": ["emotional-1", "emotional-2", "emotional-3", "emotional-4", "emotional-5"],
+      "selection_scope": {"kind": "ranked_representative_results"},
+      "credible_results": true
+    },
+    {
+      "call_id": "branch-2",
+      "direction_id": "warm-timbre",
+      "tool": "music_kb_recommend",
+      "arguments": {"tags": ["r&b", "warm", "love", "romantic", "melancholic"], "offset": 0},
+      "result_count": 5,
+      "match_count": 27,
+      "payload_bytes": 3517,
+      "result_fields": ["recording_id", "title", "version_label", "artists", "matched_tags", "representative_tags", "selection_basis", "listen_url"],
+      "result_recording_ids": ["timbre-1", "timbre-2", "timbre-3", "timbre-4", "timbre-5"],
+      "selection_scope": {"kind": "ranked_representative_results"},
+      "credible_results": true
+    },
+    {
+      "call_id": "branch-3",
+      "direction_id": "soul-direction",
+      "tool": "music_kb_recommend",
+      "arguments": {"tags": ["r&b", "warm", "love", "soul"], "offset": 0},
+      "result_count": 5,
+      "match_count": 7,
+      "payload_bytes": 3514,
+      "result_fields": ["recording_id", "title", "version_label", "artists", "matched_tags", "representative_tags", "selection_basis", "listen_url"],
+      "result_recording_ids": ["soul-1", "soul-2", "soul-3", "soul-4", "soul-5"],
+      "selection_scope": {"kind": "ranked_representative_results"},
+      "credible_results": true
+    }
+  ],
+  "final_response": {
+    "layout": "grouped",
+    "grouped_direction_ids": ["emotional-warmth", "warm-timbre", "soul-direction"],
+    "reported_separately_direction_ids": [],
+    "grouped_recording_ids": {
+      "emotional-warmth": ["emotional-1", "emotional-2", "emotional-3", "emotional-4", "emotional-5"],
+      "warm-timbre": ["timbre-1", "timbre-2", "timbre-3", "timbre-4", "timbre-5"],
+      "soul-direction": ["soul-1", "soul-2", "soul-3", "soul-4", "soul-5"]
+    },
+    "exposed_internal_fields": [],
+    "followup_actions": ["再来一些", "换一批"],
+    "complete_description_offer": true,
+    "overlap_labels_disclosed": true,
+    "listening_links_markdown": true,
+    "ungrouped_recording_ids": []
+  }
+}
