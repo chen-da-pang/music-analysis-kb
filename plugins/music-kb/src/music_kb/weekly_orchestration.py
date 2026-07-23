@@ -569,7 +569,10 @@ def run_weekly_run(
             and (download_run_dir / "queue_manifest.json").is_file()
         )
         if not delivery_supplied and not campaign_resume:
-            required_commands = ("kugou-cli", "claude")
+            # The default primary and fallback download executors run their
+            # deterministic workers directly. Claude remains an explicit
+            # compatibility fallback, not a weekly preflight dependency.
+            required_commands = ("kugou-cli",)
         if publish and not skip_peers:
             required_commands += ("rsync",)
         with atom(context, "preflight", inputs={"workspace": str(root), "publish": publish} ) as outputs:
@@ -807,7 +810,12 @@ def run_weekly_run(
         with atom(
             context,
             "claude_download",
-            inputs={"queue": str(queue_path), "dry_run": download_dry_run, "reuse_queue": download_resume},
+            inputs={
+                "queue": str(queue_path),
+                "dry_run": download_dry_run,
+                "reuse_queue": download_resume,
+                "executor": "direct",
+            },
         ) as outputs:
             if delivery_supplied or campaign_resume:
                 outputs.update({"status": "skipped", "reason": resume_reason})
@@ -825,6 +833,8 @@ def run_weekly_run(
                     str(operations_path),
                     "--timeout-seconds",
                     str(timeout_seconds),
+                    "--executor",
+                    "direct",
                 ]
                 if proxy:
                     command.extend(["--proxy", proxy])
@@ -841,7 +851,7 @@ def run_weekly_run(
         with atom(
             context,
             "fallback_download",
-            inputs={"run_id": fallback_run_id, "dry_run": download_dry_run},
+            inputs={"run_id": fallback_run_id, "dry_run": download_dry_run, "executor": "direct"},
         ) as outputs:
             if delivery_supplied or campaign_resume:
                 outputs.update({"status": "skipped", "reason": resume_reason})
@@ -857,6 +867,8 @@ def run_weekly_run(
                     str(operations_path),
                     "--timeout-seconds",
                     str(timeout_seconds),
+                    "--executor",
+                    "direct",
                 ]
                 if proxy:
                     fallback_command.extend(["--proxy", proxy])

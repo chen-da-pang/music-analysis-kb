@@ -1,6 +1,6 @@
 ---
 name: music-kb-weekly-orchestrator
-description: Orchestrate a complete weekly Music KB update from the configured Kugou charts through Claude Code download, a disposable CNB Music Flamingo campaign, local import, publisher snapshot installation, optional colleague SSH fan-out, and guarded audio/CNB cleanup. Use when the publisher needs to run, dry-run, or resume the recurring weekly music-library update.
+description: Orchestrate a complete weekly Music KB update from the configured Kugou charts through a fixed direct download worker, a disposable CNB Music Flamingo campaign, local import, publisher snapshot installation, optional colleague SSH fan-out, and guarded audio/CNB cleanup. Use when the publisher needs to run, dry-run, or resume the recurring weekly music-library update.
 ---
 
 # Music KB Weekly Orchestrator
@@ -81,13 +81,16 @@ be purged, so inventory—not file presence alone—is the dedupe record.
 5. **`historical_dedupe`** — rebuild the inventory and queue only missing,
    failed, or `no_results` items. Do not interpret a new download as an
    analysis result.
-6. **`claude_download`** — call the fixed Claude Code worker. It must use
-   `musicdl`'s `MusicClient` plus `KugouMusicClient`; it must not call
-   `kugou-cli` or the legacy full-database downloader. Keep one song-level
-   inventory row per platform identity.
-7. **`fallback_download`** — ask Claude Code to process only the primary
-   worker's recorded `no_results`, in the configured fallback order, with the
-   duration/size checks. Preserve failed/no-result states for retry.
+6. **`claude_download`** — retain this historical atom name but default to one
+   fixed direct worker. It must use `musicdl`'s `MusicClient` plus
+   `KugouMusicClient`; it must not call `kugou-cli` or the legacy full-database
+   downloader. Keep one song-level inventory row per platform identity and do
+   not run concurrent workers against shared state. `--executor claude` is only
+   a bounded compatibility retry.
+7. **`fallback_download`** — directly process only the primary worker's
+   recorded `no_results`, in the configured fallback order, with the
+   duration/size checks. Preserve failed/no-result states for retry; the legacy
+   Claude executor is explicit rather than a preflight dependency.
 8. **`cnb_input_materialization`** — consume only newly downloaded queue rows;
    verify file existence, identity, SHA-256, byte count, and `source_url`; use
    hardlinks into an isolated staging directory and write the LF JSONL manifest.

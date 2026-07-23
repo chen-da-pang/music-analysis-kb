@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "recorded_at": "2026-07-17",
+  "recorded_at": "2026-07-23",
   "sources": [
     {
       "kind": "codex-thread",
@@ -16,11 +16,16 @@
       "kind": "cnb-openapi-and-live-run",
       "url": "https://api.cnb.cool/swagger.json",
       "role": "CNB 用量、LFS API 能力和 431 首 Dev GPU 实际推理验证"
+    },
+    {
+      "kind": "github-issue",
+      "url": "https://github.com/chen-da-pang/music-analysis-kb/issues/57",
+      "role": "下载阶段计时与单 worker 直接执行的性能决策"
     }
   ],
   "rules": [
     "榜单输入必须先保存原始 JSON，再进行规范化和去重。",
-    "下载必须由 Claude Code 调用固定 worker；worker 使用 musicdl 的 MusicClient + KugouMusicClient。",
+    "下载默认由 wrapper 直接运行一个固定 worker；worker 使用 musicdl 的 MusicClient + KugouMusicClient。--executor claude 仅保留为受限兼容回退，多个 worker 不得共享 inventory、progress 或歌词 receipt。",
     "历史去重依赖 song_inventory.json，不依赖音频文件继续存在。",
     "入库前必须保留歌曲级 source_url；source_links 数量必须等于 source_tracks 数量。",
     "只同步 immutable snapshot，不同步 writable master database。",
@@ -55,10 +60,10 @@
       "effective_method": "先重建 song_inventory.json；downloaded 且文件存在或 retention=purged_after_analysis 时跳过，missing/failed/no_results 才进入队列。"
     },
     "claude_download": {
-      "effective_method": "由 run_claude_download.py 调用 claude -p；Claude 严格执行 download_music_queue.py，不调用 kugou-cli，不运行旧 batch_download.py。worker 以 Kugou MixSongID 精确校验搜索结果，并从 SongInfo.lyric 写结构化 receipt；不得扫描 LRC，网络/解析/identity 失败写 pending。"
+      "effective_method": "run_claude_download.py 默认直接启动一次 download_music_queue.py，保持单进程拥有 inventory、progress 和歌词 receipt；--executor claude 只用于显式兼容重试。worker 不调用 kugou-cli 或旧 batch_download.py，以 Kugou MixSongID 精确校验搜索结果，并从 SongInfo.lyric 或精确页面/hash 回退写结构化 receipt；不得扫描 LRC，网络/解析/identity 失败写 pending。"
     },
     "fallback_download": {
-      "effective_method": "只处理主 Kugou worker 已记录为 no_results 的队列；由 Claude Code 串行运行 download_music_fallback.py，按 fallback-download-profile.json 的 QQ、咪咕、酷我顺序逐来源搜索，严格匹配规范化标题和歌手（含显式艺名别名），下载后必须验证文件大于 1 MB 且 ffprobe 时长至少 60 秒，成功后才更新 song_inventory.json；每来源 90 秒硬超时，失败和 no_results 保留可审计状态。"
+      "effective_method": "只处理主 Kugou worker 已记录为 no_results 的队列；run_claude_fallback.py 默认直接串行运行 download_music_fallback.py，--executor claude 仅保留为显式兼容回退。按 fallback-download-profile.json 的 QQ、咪咕、酷我顺序逐来源搜索，严格匹配规范化标题和歌手（含显式艺名别名），下载后必须验证文件大于 1 MB 且 ffprobe 时长至少 60 秒，成功后才更新 song_inventory.json；每来源 90 秒硬超时，失败和 no_results 保留可审计状态。"
     },
     "cnb_input_materialization": {
       "effective_method": "只消费本周已去重下载队列和 song_inventory.json；逐首确认 downloaded 状态、实际文件存在、唯一 identity、文件 SHA-256 和有效 play_link，使用硬链接优先将音频放入独立 campaign staging，并生成带 source_bytes、sha256、title、artist、source_url 的 LF JSONL manifest；fresh 路径在父 weekly-run atom 内直接调用 materialize，避免子进程重复获取 publisher lock；写入 weekly atom receipt，不触发 CNB。"
@@ -70,10 +75,10 @@
       "effective_method": "只导入质量通过的 canonical delivery；幂等导入、重建标签和搜索投影，然后验证 source_links 完整。"
     },
     "lyrics_import": {
-      "effective_method": "只导入 CC 固定 worker 产生的结构化歌词 receipt；按 source_name + source_track_id 精确绑定 canonical source_track，标题和歌手只可用于 worker 候选定位。available、instrumental、platform_unavailable 需有可审计证据；空结果、网络/解析失败和 identity 不一致一律保留 pending，不得伪造平台无歌词。"
+      "effective_method": "只导入固定 worker 产生的结构化歌词 receipt；按 source_name + source_track_id 精确绑定 canonical source_track，标题和歌手只可用于 worker 候选定位。available、instrumental、platform_unavailable 需有可审计证据；空结果、网络/解析失败和 identity 不一致一律保留 pending，不得伪造平台无歌词。"
     },
     "lyrics_backfill": {
-      "effective_method": "历史回填从 writable master 的 unresolved canonical source_track 生成队列，固定 CC worker 以 Kugou exact mix-song identity 读取 SongInfo.lyric，不下载或扫描音频/LRC；回执再由 lyrics_import 幂等写入。"
+      "effective_method": "历史回填从 writable master 的 unresolved canonical source_track 生成队列，固定 worker 以 Kugou exact mix-song identity 读取 SongInfo.lyric，不下载或扫描音频/LRC；回执再由 lyrics_import 幂等写入。"
     },
     "lyrics_coverage": {
       "effective_method": "在 snapshot 前复算 canonical recordings 的 available、instrumental、platform_unavailable、pending 和缺失歌词记录；只有 unresolved=0 才允许 snapshot、发布和音频清理。"

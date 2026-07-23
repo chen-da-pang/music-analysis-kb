@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Download only the songs in a prepared queue with musicdl.
 
-This script is intentionally deterministic and is normally *run by Claude
-Code*, not called directly by the publisher skill.  It updates the inventory
-after every attempt so an interrupted run can be resumed without downloading
-an already-present song again.
+This script is intentionally deterministic and normally runs directly from the
+publisher wrapper.  ``--executor claude`` remains a bounded compatibility path,
+but neither executor may share one inventory/progress/lyric-receipt set across
+multiple workers. It updates the inventory after every attempt so an interrupted
+run can be resumed without downloading an already-present song again.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -30,6 +32,7 @@ from urllib.request import Request, urlopen
 
 MATCH_POLICY = "exact_kugou_mix_song_id_title_compatible_artist_v2"
 LYRIC_RECEIPT_SCHEMA_VERSION = 1
+DOWNLOAD_TIMING_SCHEMA_VERSION = 1
 LYRIC_QUERY_METHOD = "musicdl_kugou_exact_mix_song_id_v1"
 DIRECT_LYRIC_QUERY_METHOD = "kugou_mixsong_page_exact_lyrics_v1"
 DIRECT_HASH_LYRIC_QUERY_METHOD = "kugou_verified_audio_hash_exact_lyrics_v1"
@@ -1060,6 +1063,44 @@ def record_attempt(item: dict[str, Any], status: str, **extra: Any) -> None:
     }
 
 
+def elapsed_ms(start: float) -> float:
+    return round((time.monotonic() - start) * 1000, 3)
+
+
+def percentile_ms(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * percentile) - 1))
+    return round(ordered[index], 3)
+
+
+def summarize_download_timing(item_timings: list[Mapping[str, Any]], worker_started: float) -> dict[str, Any]:
+    """Return compact, comparable timings without changing download behavior."""
+
+    stage_names = ("search_ms", "download_ms", "lyrics_ms", "lyric_receipt_write_ms", "commit_ms")
+    stage_totals = {
+        name: round(sum(float(item.get(name) or 0.0) for item in item_timings), 3)
+        for name in stage_names
+    }
+    total_ms = elapsed_ms(worker_started)
+    downloaded_bytes = sum(int(item.get("downloaded_bytes") or 0) for item in item_timings)
+    item_totals = [float(item.get("total_ms") or 0.0) for item in item_timings]
+    completed = len(item_timings)
+    return {
+        "schema_version": DOWNLOAD_TIMING_SCHEMA_VERSION,
+        "items": completed,
+        "worker_wall_ms": total_ms,
+        "items_per_hour": round(completed * 3_600_000 / total_ms, 3) if total_ms else None,
+        "downloaded_bytes": downloaded_bytes,
+        "downloaded_bytes_per_second": round(downloaded_bytes * 1000 / total_ms, 3) if total_ms else None,
+        "search_attempts": sum(int(item.get("search_attempts") or 0) for item in item_timings),
+        "stage_totals_ms": stage_totals,
+        "p50_item_ms": percentile_ms(item_totals, 0.5),
+        "p95_item_ms": percentile_ms(item_totals, 0.95),
+    }
+
+
 def run_download(
     queue_path: Path,
     inventory_path: Path,
@@ -1108,6 +1149,46 @@ def run_download(
     progress.pop("finished_at", None)
     progress.pop("summary", None)
     progress.setdefault("lyrics", {})
+    if not isinstance(progress.get("item_timings"), dict):
+        progress["item_timings"] = {}
+
+    def record_item_timing(
+        identity: str,
+        *,
+        item_started: float,
+        status: str,
+        search_attempts: int = 0,
+        search_ms: float = 0.0,
+        download_ms: float = 0.0,
+        lyrics_ms: float = 0.0,
+        lyric_receipt_write_ms: float = 0.0,
+        downloaded_bytes: int = 0,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        timing = {
+            "status": status,
+            "search_attempts": search_attempts,
+            "search_ms": round(search_ms, 3),
+            "download_ms": round(download_ms, 3),
+            "lyrics_ms": round(lyrics_ms, 3),
+            "lyric_receipt_write_ms": round(lyric_receipt_write_ms, 3),
+            "commit_ms": 0.0,
+            "total_ms": elapsed_ms(item_started),
+            "downloaded_bytes": downloaded_bytes,
+        }
+        if error:
+            timing["error"] = error
+        progress["item_timings"][identity] = timing
+        return timing
+
+    def commit_state(timing: dict[str, Any], *, item_started: float) -> None:
+        commit_started = time.monotonic()
+        atomic_write_json(progress_path, progress)
+        inventory["generated_at"] = now_iso()
+        inventory["counts"] = recompute_counts(inventory)
+        atomic_write_json(inventory_path, inventory)
+        timing["commit_ms"] = elapsed_ms(commit_started)
+        timing["total_ms"] = elapsed_ms(item_started)
 
     summary = {
         "run_id": run_id,
@@ -1127,9 +1208,16 @@ def run_download(
     if dry_run:
         summary["would_process"] = len(selected)
         summary["remaining_after_limit"] = max(0, len(queue) - len(selected))
+        summary["timing"] = {
+            "schema_version": DOWNLOAD_TIMING_SCHEMA_VERSION,
+            "items": 0,
+            "worker_wall_ms": 0.0,
+            "dry_run": True,
+        }
         print(json.dumps(summary, ensure_ascii=False))
         return summary
 
+    worker_started = time.monotonic()
     try:
         from musicdl.musicdl import MusicClient
     except Exception as exc:  # pragma: no cover - environment-dependent
@@ -1153,11 +1241,13 @@ def run_download(
     by_identity = {song.get("identity_key"): song for song in inventory.get("songs", [])}
     by_title = {song.get("title_artist_key"): song for song in inventory.get("songs", [])}
     for index, candidate in enumerate(selected, start=1):
-        identity = candidate.get("identity_key") or candidate.get("title_artist_key")
+        item_started = time.monotonic()
+        identity = str(candidate.get("identity_key") or candidate.get("title_artist_key") or "")
         item = by_identity.get(candidate.get("identity_key")) or by_title.get(candidate.get("title_artist_key"))
         if item and present(item, audio_root):
             summary["skipped_existing"] += 1
             progress["results"][identity] = {"status": "skipped_existing", "at": now_iso()}
+            record_item_timing(identity, item_started=item_started, status="skipped_existing")
             continue
 
         title, artist = candidate["title"], candidate["artist"]
@@ -1173,14 +1263,15 @@ def run_download(
             }
             record_attempt(item, "no_results", **audit)
             progress["results"][identity] = {"status": "no_results", "at": now_iso(), **audit}
-            atomic_write_json(progress_path, progress)
-            inventory["generated_at"] = now_iso()
-            inventory["counts"] = recompute_counts(inventory)
-            atomic_write_json(inventory_path, inventory)
+            timing = record_item_timing(identity, item_started=item_started, status="no_results")
+            commit_state(timing, item_started=item_started)
             continue
         found: list[Any] | None = None
         last_error = None
+        search_attempts = 0
+        search_started = time.monotonic()
         for attempt in range(retries + 1):
+            search_attempts += 1
             try:
                 with item_timeout(item_timeout_seconds):
                     found = client.search(f"{title} {artist}").get("KugouMusicClient", [])
@@ -1194,21 +1285,35 @@ def run_download(
                 last_error = str(exc)
                 if attempt < retries:
                     time.sleep(3)
+        search_ms = elapsed_ms(search_started)
         if found is None:
             summary["failed"] += 1
             progress.setdefault("downloaded", {}).pop(identity, None)
             record_attempt(item, "failed", error=last_error or "search failed")
             progress["results"][identity] = {"status": "failed", "error": last_error, "at": now_iso()}
-            atomic_write_json(progress_path, progress)
-            atomic_write_json(inventory_path, inventory)
+            timing = record_item_timing(
+                identity,
+                item_started=item_started,
+                status="failed",
+                search_attempts=search_attempts,
+                search_ms=search_ms,
+                error=last_error or "search failed",
+            )
+            commit_state(timing, item_started=item_started)
             continue
         if not found:
             summary["no_results"] += 1
             progress.setdefault("downloaded", {}).pop(identity, None)
             record_attempt(item, "no_results")
             progress["results"][identity] = {"status": "no_results", "at": now_iso()}
-            atomic_write_json(progress_path, progress)
-            atomic_write_json(inventory_path, inventory)
+            timing = record_item_timing(
+                identity,
+                item_started=item_started,
+                status="no_results",
+                search_attempts=search_attempts,
+                search_ms=search_ms,
+            )
+            commit_state(timing, item_started=item_started)
             continue
 
         best = choose_match(found, title, artist, platform_track_key=expected_track_key)
@@ -1224,13 +1329,24 @@ def run_download(
             }
             record_attempt(item, "no_results", **audit)
             progress["results"][identity] = {"status": "no_results", "at": now_iso(), **audit}
-            atomic_write_json(progress_path, progress)
-            inventory["generated_at"] = now_iso()
-            inventory["counts"] = recompute_counts(inventory)
-            atomic_write_json(inventory_path, inventory)
+            timing = record_item_timing(
+                identity,
+                item_started=item_started,
+                status="no_results",
+                search_attempts=search_attempts,
+                search_ms=search_ms,
+            )
+            commit_state(timing, item_started=item_started)
             continue
 
         matched = result_metadata(best)
+        download_started = time.monotonic()
+        download_ms = 0.0
+        lyrics_ms = 0.0
+        lyric_receipt_write_ms = 0.0
+        downloaded_bytes = 0
+        download_completed = False
+        item_error: str | None = None
         try:
             with item_timeout(item_timeout_seconds):
                 downloaded = client.download([best])
@@ -1242,7 +1358,10 @@ def run_download(
             path = path_for_download(raw_path, audio_root) if raw_path else None
             if not path or not path.is_file():
                 raise RuntimeError(f"musicdl 未返回已存在的文件路径: {raw_path!r}")
+            download_ms = elapsed_ms(download_started)
+            download_completed = True
             item["download"] = {**file_record(path, audio_root), **matched}
+            downloaded_bytes = int(item["download"]["size_bytes"])
             progress.setdefault("downloaded", {})[identity] = {
                 "title": title,
                 "artist": artist,
@@ -1263,6 +1382,7 @@ def run_download(
                 "at": now_iso(),
                 **matched,
             }
+            lyrics_started = time.monotonic()
             lyric_source = result if result is not None and getattr(result, "raw_data", None) is not None else best
             receipt = lyric_receipt_for_match(candidate, lyric_source, run_id=run_id)
             # Audio downloads still use musicdl as their primary path.  When
@@ -1328,11 +1448,15 @@ def run_download(
                             )
                     if direct_hash_receipt is not None:
                         receipt = direct_hash_receipt
+            lyrics_ms = elapsed_ms(lyrics_started)
             try:
+                lyric_receipt_started = time.monotonic()
                 append_lyric_receipt(lyrics_receipt_path, receipt)
+                lyric_receipt_write_ms = elapsed_ms(lyric_receipt_started)
                 progress["lyrics"][identity] = lyric_progress_metadata(receipt)
                 summary[f"lyrics_{receipt['status']}"] += 1
             except OSError as lyric_error:
+                lyric_receipt_write_ms = elapsed_ms(lyric_receipt_started)
                 progress["lyrics"][identity] = {
                     "status": "pending",
                     "error": f"could not persist lyric receipt: {lyric_error}",
@@ -1341,17 +1465,36 @@ def run_download(
                 summary["lyrics_pending"] += 1
             log(f"OK {path}")
         except Exception as exc:  # pragma: no cover - network/filesystem-dependent
+            if not download_completed:
+                download_ms = elapsed_ms(download_started)
+            item_error = str(exc)
             summary["failed"] += 1
-            record_attempt(item, "failed", error=str(exc))
-            progress["results"][identity] = {"status": "failed", "error": str(exc), "at": now_iso()}
+            record_attempt(item, "failed", error=item_error)
+            progress["results"][identity] = {"status": "failed", "error": item_error, "at": now_iso()}
             log(f"FAILED {exc}")
-        atomic_write_json(progress_path, progress)
-        inventory["generated_at"] = now_iso()
-        inventory["counts"] = recompute_counts(inventory)
-        atomic_write_json(inventory_path, inventory)
+        status = str(progress["results"].get(identity, {}).get("status") or "failed")
+        timing = record_item_timing(
+            identity,
+            item_started=item_started,
+            status=status,
+            search_attempts=search_attempts,
+            search_ms=search_ms,
+            download_ms=download_ms,
+            lyrics_ms=lyrics_ms,
+            lyric_receipt_write_ms=lyric_receipt_write_ms,
+            downloaded_bytes=downloaded_bytes,
+            error=item_error,
+        )
+        commit_state(timing, item_started=item_started)
         if delay:
             time.sleep(delay)
 
+    timed_rows = [
+        progress["item_timings"][identity]
+        for identity in (str(row.get("identity_key") or row.get("title_artist_key") or "") for row in selected)
+        if isinstance(progress["item_timings"].get(identity), Mapping)
+    ]
+    summary["timing"] = summarize_download_timing(timed_rows, worker_started)
     progress["finished_at"] = now_iso()
     progress["summary"] = summary
     atomic_write_json(progress_path, progress)

@@ -408,10 +408,13 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
     chart_path = tmp_path / "chart.json"
     queue_path = tmp_path / "queue.jsonl"
 
-    monkeypatch.setattr(
-        "music_kb.weekly_orchestration.run_preflight",
-        lambda **kwargs: {"valid": True, "failed_required": [], "commands": {}},
-    )
+    preflight_commands: list[tuple[str, ...]] = []
+
+    def fake_preflight(**kwargs):
+        preflight_commands.append(tuple(kwargs["required_commands"]))
+        return {"valid": True, "failed_required": [], "commands": {}}
+
+    monkeypatch.setattr("music_kb.weekly_orchestration.run_preflight", fake_preflight)
     monkeypatch.setattr(
         "music_kb.weekly_orchestration._json_command_allow_failure",
         lambda *args, **kwargs: (
@@ -454,11 +457,13 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
                 "skipped_existing_download": 0,
             }, subprocess.CompletedProcess(command, 0, "", "")
         if name == "run_claude_download.py":
+            assert command[command.index("--executor") + 1] == "direct"
             return {
                 "queue_manifest": {"queue": str(queue_path), "queued": 1},
                 "worker_progress": {"downloaded": 1},
             }, subprocess.CompletedProcess(command, 0, "", "")
         if name == "run_claude_fallback.py":
+            assert command[command.index("--executor") + 1] == "direct"
             return {"queue_manifest": {"queued": 0}}, subprocess.CompletedProcess(command, 0, "", "")
         if name == "cnb_campaign_repository.py" and "prepare" in command:
             receipt = Path(command[command.index("--receipt") + 1])
@@ -512,6 +517,7 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
     assert state["atoms"]["cnb_campaign_repository"]["outputs"]["status"] == "planned"
     assert state["atoms"]["cnb_campaign_submit"]["outputs"]["status"] == "submit_planned"
     assert state["atoms"]["cnb_analysis"]["outputs"]["status"] == "skipped"
+    assert preflight_commands == [("kugou-cli",)]
     assert (tmp_path / "data" / "weekly_runs" / "fresh-campaign" / "cnb-input" / "manifest.jsonl").is_file()
 
 

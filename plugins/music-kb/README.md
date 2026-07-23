@@ -100,7 +100,7 @@ Schema v7 stores one identity-bound lyric outcome for every canonical
 recording. `available` retains normalized ordinary text; `instrumental` and
 `platform_unavailable` retain exact-source evidence. Missing/pending lyrics
 block snapshots, peer publication, and audio cleanup. New songs receive their
-receipt from the existing CC/Kugou download worker. The one-time historical
+receipt from the fixed direct Kugou download worker. The one-time historical
 backfill defaults to a local exact-source path: it verifies the public Kugou
 mix-song page's MixSongID, then uses that page's hash and duration to request
 lyrics without downloading audio or invoking a title/artist search. The older
@@ -138,7 +138,10 @@ operations-file hash. With no `--rank-id`, it uses the versioned
 `references/kugou-chart-profile.json` to capture all six configured charts and
 their pages; an explicit `--rank-id` is a bounded single-page override. A fresh
 run materializes one disposable CNB campaign repository per run id after the
-Claude Code download. Pass `--delivery <canonical.jsonl>` only to resume from
+fixed direct download worker. The worker writes comparable inventory/queue/
+search/download/lyrics/commit timings while preserving one serial owner of the
+inventory, progress, and lyric receipt. `--executor claude` is an explicit
+compatibility retry, not the normal weekly dependency. Pass `--delivery <canonical.jsonl>` only to resume from
 an already completed CNB delivery; when the same run has a campaign receipt,
 the delivery is bound to that receipt and its cleanup still runs after the
 release/peer gates. A delivery without a campaign receipt has no campaign

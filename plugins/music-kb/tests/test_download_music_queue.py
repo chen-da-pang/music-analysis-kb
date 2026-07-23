@@ -197,6 +197,24 @@ def test_exact_match_records_selected_result_metadata(monkeypatch, tmp_path: Pat
     assert receipt["status"] == "available"
     assert receipt["source_track_id"] == "kugou-1"
     assert receipt["lyric_text"] == "第一句\n第二句"
+    assert summary["timing"]["schema_version"] == module.DOWNLOAD_TIMING_SCHEMA_VERSION
+    assert summary["timing"]["items"] == 1
+    assert summary["timing"]["downloaded_bytes"] == len(b"exact")
+    assert set(summary["timing"]["stage_totals_ms"]) == {
+        "search_ms",
+        "download_ms",
+        "lyrics_ms",
+        "lyric_receipt_write_ms",
+        "commit_ms",
+    }
+    timing = json.loads(progress.read_text(encoding="utf-8"))["item_timings"]["kugou:1"]
+    assert timing["status"] == "downloaded"
+    assert timing["search_attempts"] == 1
+    assert timing["downloaded_bytes"] == len(b"exact")
+    assert all(
+        timing[stage] >= 0
+        for stage in ("search_ms", "download_ms", "lyrics_ms", "lyric_receipt_write_ms", "commit_ms", "total_ms")
+    )
 
 
 def test_download_worker_repairs_pending_musicdl_lyric_via_exact_page(monkeypatch, tmp_path: Path) -> None:

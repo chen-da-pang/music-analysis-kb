@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Prepare the no-results queue and execute the fixed fallback worker through Claude Code."""
+"""Prepare the no-results queue and execute the fixed fallback worker.
+
+The default direct path keeps one worker in charge of inventory and progress.
+``--executor claude`` remains available only for a bounded compatibility retry.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +35,17 @@ def main() -> int:
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--claude-bin", default="claude")
+    parser.add_argument(
+        "--executor",
+        choices=("direct", "claude"),
+        default="direct",
+        help="direct runs the fixed fallback worker (default); claude preserves the legacy executor",
+    )
+    parser.add_argument(
+        "--worker-python",
+        default=os.environ.get("MUSICDL_PYTHON", "python3"),
+        help="Python executable with musicdl for the fallback worker",
+    )
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--proxy")
     parser.add_argument("--dry-run", action="store_true")
@@ -50,26 +65,78 @@ def main() -> int:
     scripts = Path(__file__).resolve().parent
     manifest = run_checked([sys.executable, str(scripts / "prepare_fallback_queue.py"), "--inventory", str(inventory), "--output", str(queue), "--profile", str(profile)], workspace, args.timeout_seconds)
     (run_dir / "fallback-queue-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    values = ["python3", str(scripts / "download_music_fallback.py"), "--queue", str(queue), "--inventory", str(inventory), "--work-dir", str(workspace / "music_downloads" / "KugouMusicClient"), "--progress", str(progress), "--run-id", args.run_id, "--profile", str(profile)]
+    values = [args.worker_python, str(scripts / "download_music_fallback.py"), "--queue", str(queue), "--inventory", str(inventory), "--work-dir", str(workspace / "music_downloads" / "KugouMusicClient"), "--progress", str(progress), "--run-id", args.run_id, "--profile", str(profile)]
     if args.dry_run:
         values.append("--dry-run")
-    command = " ".join(shlex.quote(value) for value in values)
-    prompt = "\n".join([
-        "你是音乐库 fallback 下载原子的 Claude Code 执行器。",
-        "只运行下面固定命令；不得改脚本、队列、inventory，不得调用 kugou-cli 或旧 batch_download.py。",
-        "worker 会按 QQ、咪咕、酷我串行搜索；必须等待它退出。",
-        command,
-        "完成后只返回 worker 的 JSON summary。",
-    ]) + "\n"
-    (run_dir / "claude_prompt.txt").write_text(prompt, encoding="utf-8")
     env = os.environ.copy()
     if args.proxy:
         env["http_proxy"] = args.proxy
         env["https_proxy"] = args.proxy
-    result = subprocess.run([args.claude_bin, "-p", "--output-format", "json", "--permission-mode", "dontAsk", "--allowedTools", "Bash", "Read", "--add-dir", str(workspace)], cwd=workspace, env=env, input=prompt, capture_output=True, text=True, timeout=args.timeout_seconds, check=False)
-    (run_dir / "claude_stdout.json").write_text(result.stdout, encoding="utf-8")
-    (run_dir / "claude_stderr.log").write_text(result.stderr, encoding="utf-8")
-    summary = {"run_id": args.run_id, "queue_manifest": manifest, "claude_exit_code": result.returncode, "progress": str(progress), "operations_sha256": sha256_file(operations), "profile": str(profile)}
+
+    worker_exit_code = 0
+    claude_exit_code: int | None = None
+    stdout_path: Path | None = None
+    stderr_path: Path | None = None
+    if manifest["queued"] == 0 and not args.dry_run:
+        execution = "skipped_empty_queue"
+    elif args.executor == "direct":
+        execution = "direct"
+        stdout_path = run_dir / "worker_stdout.json"
+        stderr_path = run_dir / "worker_stderr.log"
+        result = subprocess.run(
+            values,
+            cwd=workspace,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout_seconds,
+            check=False,
+        )
+        worker_exit_code = result.returncode
+        stdout_path.write_text(result.stdout, encoding="utf-8")
+        stderr_path.write_text(result.stderr, encoding="utf-8")
+    else:
+        execution = "claude"
+        command = " ".join(shlex.quote(value) for value in values)
+        prompt = "\n".join([
+            "你是音乐库 fallback 下载原子的 Claude Code 执行器。",
+            "只运行下面固定命令；不得改脚本、队列、inventory，不得调用 kugou-cli 或旧 batch_download.py。",
+            "worker 会按 QQ、咪咕、酷我串行搜索；必须等待它退出。",
+            command,
+            "完成后只返回 worker 的 JSON summary。",
+        ]) + "\n"
+        (run_dir / "claude_prompt.txt").write_text(prompt, encoding="utf-8")
+        stdout_path = run_dir / "claude_stdout.json"
+        stderr_path = run_dir / "claude_stderr.log"
+        result = subprocess.run(
+            [args.claude_bin, "-p", "--output-format", "json", "--permission-mode", "dontAsk", "--allowedTools", "Bash", "Read", "--add-dir", str(workspace)],
+            cwd=workspace,
+            env=env,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout_seconds,
+            check=False,
+        )
+        worker_exit_code = result.returncode
+        claude_exit_code = result.returncode
+        stdout_path.write_text(result.stdout, encoding="utf-8")
+        stderr_path.write_text(result.stderr, encoding="utf-8")
+
+    summary = {
+        "run_id": args.run_id,
+        "queue_manifest": manifest,
+        "executor": args.executor,
+        "execution": execution,
+        "worker_python": args.worker_python,
+        "worker_exit_code": worker_exit_code,
+        "claude_exit_code": claude_exit_code,
+        "stdout": str(stdout_path) if stdout_path is not None else None,
+        "stderr": str(stderr_path) if stderr_path is not None else None,
+        "progress": str(progress),
+        "operations_sha256": sha256_file(operations),
+        "profile": str(profile),
+    }
     if progress.exists():
         progress_data = json.loads(progress.read_text(encoding="utf-8"))
         summary["worker_progress"] = progress_data
@@ -77,13 +144,15 @@ def main() -> int:
         processed = sum(int(worker_summary.get(key, 0)) for key in ("downloaded", "skipped_existing", "failed", "no_results"))
         if not args.dry_run and (not progress_data.get("finished_at") or processed != manifest["queued"]):
             summary["progress_incomplete"] = {"queued": manifest["queued"], "processed": processed}
-            result.returncode = 2
-    elif manifest["queued"] and not args.dry_run and result.returncode == 0:
+            worker_exit_code = 2
+    elif manifest["queued"] and not args.dry_run and worker_exit_code == 0:
         summary["progress_missing"] = True
-        result.returncode = 2
-    summary["claude_exit_code"] = result.returncode
+        worker_exit_code = 2
+    summary["worker_exit_code"] = worker_exit_code
+    if args.executor == "claude":
+        summary["claude_exit_code"] = worker_exit_code
     receipt = {
-        "status": "succeeded" if result.returncode == 0 else "failed",
+        "status": "succeeded" if worker_exit_code == 0 else "failed",
         "started_at": started_at,
         "finished_at": now_iso(),
         "run_id": args.run_id,
@@ -99,7 +168,7 @@ def main() -> int:
     receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     summary["receipt"] = str(receipt_path)
     print(json.dumps(summary, ensure_ascii=False))
-    return result.returncode
+    return worker_exit_code
 
 
 if __name__ == "__main__":

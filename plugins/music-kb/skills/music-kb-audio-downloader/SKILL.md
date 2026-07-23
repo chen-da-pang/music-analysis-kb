@@ -1,6 +1,6 @@
 ---
 name: music-kb-audio-downloader
-description: Prepare a deduplicated Kugou audio queue from a new chart export and execute that queue through Claude Code using the proven musicdl/KugouMusicClient workflow. Use when the publisher needs to download only newly observed Kugou tracks for a weekly Music KB update. Use only on the publisher machine.
+description: Prepare a deduplicated Kugou audio queue from a new chart export and execute it through one fixed musicdl/KugouMusicClient worker. Use when the publisher needs to download only newly observed Kugou tracks for a weekly Music KB update. Use only on the publisher machine.
 ---
 
 # Music KB Audio Downloader
@@ -14,13 +14,13 @@ from a completed CNB canonical delivery. The atom has four bounded stages:
 2. Compare a new `kugou-cli` chart export with that inventory. Deduplicate by
    `kugou:<mix_song_id>` first and by normalized title + artist as a fallback.
 3. Write a JSONL queue containing only songs that are not already downloaded.
-4. Call Claude Code in print mode. Claude Code runs the deterministic
-   `scripts/download_music_queue.py` worker, which uses `musicdl` with
+4. Run the deterministic `scripts/download_music_queue.py` worker directly in
+   one serial process. It uses `musicdl` with
    `KugouMusicClient`, updates the inventory after every attempt, and writes an
    identity-bound lyric receipt from the exact result's `SongInfo.lyric`.
 
 If the primary worker leaves songs as `no_results`, run the separate fallback
-atom with Claude Code. It consumes only an explicit no-results queue and runs
+atom through the same direct-executor boundary. It consumes only an explicit no-results queue and runs
 `scripts/download_music_fallback.py` serially through the versioned
 `references/fallback-download-profile.json` sources (QQ, Migu, then Kuwo).
 Fallback matching is exact on normalized title and artist, with only aliases
@@ -33,8 +33,9 @@ capture atom; this atom consumes its processed songs JSON/JSONL/CSV export.
 ## Required boundary
 
 - Run on the publisher Mac only.
-- The Claude Code child may read/write only the workspace, the inventory, the
-  queue run directory, and the configured `music_downloads` directory.
+- The one fixed worker may read/write only the workspace, the inventory, the
+  queue run directory, and the configured `music_downloads` directory. Do not
+  run concurrent workers against shared inventory, progress, or lyric receipts.
 - Do not use the historical `batch_download.py` for weekly updates. It scans
   the whole SQLite database and predates the queue-level inventory contract.
 - Do not commit `song_inventory.json`, queue runs, audio, progress, logs, or
@@ -56,13 +57,14 @@ python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_download.py \
 ```
 
 Before a real run, use the same command with `--dry-run`. To test a bounded
-prefix of a queue, add `--max-items 1` or another small number. A dry run still
-invokes Claude Code, but the worker does not import `musicdl` or touch audio.
+prefix of a queue, add `--max-items 1` or another small number. A dry run does
+not import `musicdl` or touch audio. The output records inventory, queue,
+worker, and per-song stage timings for a comparable baseline.
 The worker defaults to `--item-timeout-seconds 60` for each musicdl search or
 download operation. A timeout is recorded as `failed` and the queue continues;
-Claude Code must not hand-edit inventory, progress, queue, or retention state.
+the wrapper must not hand-edit inventory, progress, queue, or retention state.
 
-The wrapper performs these local commands before starting Claude Code:
+The wrapper performs these local commands before starting the fixed worker:
 
 ```bash
 python3 music-analysis-kb/plugins/music-kb/scripts/build_song_inventory.py \
@@ -78,29 +80,25 @@ python3 music-analysis-kb/plugins/music-kb/scripts/prepare_download_queue.py \
   --audio-root music_downloads/KugouMusicClient
 ```
 
-It then invokes Claude Code approximately as follows (the wrapper supplies
-absolute paths and captures the result):
+It then materializes one filtered execution queue and invokes the worker once
+(the wrapper supplies absolute paths and captures the result):
 
 ```bash
-claude -p \
-  --output-format json \
-  --permission-mode dontAsk \
-  --allowedTools Bash Read \
-  --add-dir "$MUSIC_WORKSPACE" \
-  '严格运行：
-   python3 .../download_music_queue.py
-     --queue .../download_queue.jsonl
-     --inventory .../song_inventory.json
-     --work-dir .../music_downloads
-     --progress .../progress.json
-     --log .../download.log
-     --run-id ...
-     --item-timeout-seconds 60'
+python3 .../download_music_queue.py \
+  --queue data/download_runs/<run-id>/download-queue-direct.jsonl \
+  --inventory data/song_inventory.json \
+  --work-dir music_downloads \
+  --progress data/download_runs/<run-id>/progress.json \
+  --log data/download_runs/<run-id>/download.log \
+  --run-id <run-id> \
+  --item-timeout-seconds 60
 ```
 
-The prompt explicitly tells Claude Code not to call `kugou-cli`, not to run
-the old full-database script, and not to invent a new downloader. The child
-inherits `http_proxy` and `https_proxy` when `--proxy` is provided.
+The direct path keeps exact MixSongID validation, inventory/progress atomic
+writes, and append-only lyric receipts in the same worker. `--executor claude`
+is available only for a bounded compatibility retry; it preserves the old
+serial chunk path and inherits `http_proxy`/`https_proxy` when `--proxy` is
+provided.
 
 ## Lyrics receipt and historical backfill
 
@@ -136,7 +134,8 @@ automatically.
 
 The fallback queue must contain only records whose current inventory status is
 `no_results`. Before a real run, use `--dry-run` and review the queue count.
-Claude Code must run this fixed command and wait for its progress receipt:
+The direct fallback wrapper runs this fixed command and waits for its progress
+receipt. `--executor claude` remains an explicit compatibility retry:
 
 ```bash
 python3 music-analysis-kb/plugins/music-kb/scripts/download_music_fallback.py \
