@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -39,6 +40,9 @@ class ManualQualityRouteTests(unittest.TestCase):
         execution_profile: str = "nvidia-l40/full_precision/bfloat16",
         minimum_free_mib: int = 40_000,
         source_count: int = 3,
+        max_selected_count: int = 5,
+        repetition_penalty: object = "1.08",
+        no_repeat_ngram_size: object = "4",
     ) -> dict[str, object]:
         from manual_kugou_quality_route import validate_manual_quality_request
 
@@ -65,8 +69,10 @@ class ManualQualityRouteTests(unittest.TestCase):
             expected_gpu=expected_gpu,
             execution_profile=execution_profile,
             minimum_free_mib=minimum_free_mib,
-            max_selected_count=5,
+            max_selected_count=max_selected_count,
             max_utilization_percent=0,
+            repetition_penalty=repetition_penalty,
+            no_repeat_ngram_size=no_repeat_ngram_size,
         )
 
     def test_accepts_only_explicit_subset_and_isolated_ledger(self) -> None:
@@ -80,6 +86,10 @@ class ManualQualityRouteTests(unittest.TestCase):
         self.assertEqual(result["selected_source_indices"], [1, 3])
         self.assertEqual(result["selected_item_ids"], ["track-001", "track-003"])
         self.assertEqual(result["primary_ledger_branch_rejected"], "campaign-results/campaign-a")
+        self.assertEqual(
+            result["generation_controls"],
+            {"repetition_penalty": 1.08, "no_repeat_ngram_size": 4},
+        )
 
     def test_rejects_primary_or_non_quality_ledger_branch(self) -> None:
         from manual_kugou_quality_route import ManualQualityRouteError
@@ -120,6 +130,8 @@ class ManualQualityRouteTests(unittest.TestCase):
                 "campaign_id": "campaign-a",
                 "max_selected_count": 5,
                 "max_utilization_percent": 0,
+                "repetition_penalty": "1.08",
+                "no_repeat_ngram_size": "4",
             }
             l40 = validate_manual_quality_request(
                 **common,
@@ -195,7 +207,96 @@ class ManualQualityRouteTests(unittest.TestCase):
                     minimum_free_mib=40_000,
                     max_selected_count=5,
                     max_utilization_percent=0,
+                    repetition_penalty="1.08",
+                    no_repeat_ngram_size="4",
                 )
+
+    def test_rejects_missing_or_wrong_quality_controls(self) -> None:
+        from manual_kugou_quality_route import ManualQualityRouteError
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ManualQualityRouteError, "REPETITION_PENALTY"):
+                self._request(
+                    Path(temp_dir),
+                    selection="1\n",
+                    ledger_branch="campaign-results/campaign-a-quality-rerun-l40-probe-1",
+                    repetition_penalty="",
+                )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ManualQualityRouteError, "NO_REPEAT_NGRAM_SIZE"):
+                self._request(
+                    Path(temp_dir),
+                    selection="1\n",
+                    ledger_branch="campaign-results/campaign-a-quality-rerun-l40-probe-1",
+                    no_repeat_ngram_size="5",
+                )
+
+    def test_refuses_attempt_to_raise_manual_batch_cap(self) -> None:
+        from manual_kugou_quality_route import ManualQualityRouteError
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ManualQualityRouteError, "must not exceed"):
+                self._request(
+                    Path(temp_dir),
+                    selection="1\n",
+                    ledger_branch="campaign-results/campaign-a-quality-rerun-l40-probe-1",
+                    max_selected_count=6,
+                )
+
+    def test_cli_receipt_records_required_quality_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "input"
+            (input_root / "audio").mkdir(parents=True)
+            manifest = input_root / "manifest.jsonl"
+            manifest.write_text(json.dumps(source_row(1)) + "\n", encoding="utf-8")
+            selection = root / "selection.txt"
+            selection.write_text("1\n", encoding="utf-8")
+            receipt = root / "receipt.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "manual_kugou_quality_route.py"),
+                    "--repo-root",
+                    str(root),
+                    "--source-manifest",
+                    str(manifest),
+                    "--input-root",
+                    str(input_root),
+                    "--selection-file",
+                    str(selection),
+                    "--source-manifest-sha256",
+                    hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                    "--source-expected-count",
+                    "1",
+                    "--expected-count",
+                    "1",
+                    "--campaign-id",
+                    "campaign-a",
+                    "--ledger-branch",
+                    "campaign-results/campaign-a-quality-rerun-l40-probe-1",
+                    "--expected-gpu",
+                    "L40",
+                    "--execution-profile",
+                    "nvidia-l40/full_precision/bfloat16",
+                    "--minimum-free-mib",
+                    "40000",
+                    "--repetition-penalty",
+                    "1.08",
+                    "--no-repeat-ngram-size",
+                    "4",
+                    "--receipt",
+                    str(receipt),
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(
+                json.loads(receipt.read_text(encoding="utf-8"))["generation_controls"],
+                {"repetition_penalty": 1.08, "no_repeat_ngram_size": 4},
+            )
 
 
 if __name__ == "__main__":
