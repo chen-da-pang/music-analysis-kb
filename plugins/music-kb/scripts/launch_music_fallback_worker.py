@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch the fixed fallback worker outside the lifetime of a Claude Code Bash call."""
+"""Launch state-isolated fallback workers outside a Claude Code Bash lifetime."""
 
 from __future__ import annotations
 
@@ -11,7 +11,15 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import fallback_parallel
 
 
 def now_iso() -> str:
@@ -33,10 +41,19 @@ def atomic_write_json(path: Path, value: Any) -> None:
             os.unlink(temporary)
 
 
+def worker_env(args: argparse.Namespace) -> dict[str, str]:
+    env = os.environ.copy()
+    if args.proxy:
+        env["http_proxy"] = args.proxy
+        env["https_proxy"] = args.proxy
+    return env
+
+
 def worker_command(args: argparse.Namespace) -> list[str]:
+    """The one-item worker command used only for a non-mutating dry-run."""
     command = [
         args.worker_python,
-        str(Path(__file__).resolve().with_name("download_music_fallback.py")),
+        str(SCRIPTS_DIR / "download_music_fallback.py"),
         "--queue",
         str(args.queue),
         "--inventory",
@@ -60,6 +77,10 @@ def supervisor_command(args: argparse.Namespace) -> list[str]:
         sys.executable,
         str(Path(__file__).resolve()),
         "--supervise",
+        "--workspace",
+        str(args.workspace),
+        "--run-dir",
+        str(args.run_dir),
         "--queue",
         str(args.queue),
         "--inventory",
@@ -80,31 +101,74 @@ def supervisor_command(args: argparse.Namespace) -> list[str]:
         str(args.worker_log),
         "--worker-python",
         args.worker_python,
+        "--parallelism",
+        str(args.parallelism),
+        "--timeout-seconds",
+        str(args.timeout_seconds),
     ]
+    if args.proxy:
+        command.extend(["--proxy", args.proxy])
     if args.dry_run:
         command.append("--dry-run")
     return command
 
 
 def supervise(args: argparse.Namespace) -> int:
+    """Run the real worker(s), then write one durable completion receipt."""
     started_at = now_iso()
-    command = worker_command(args)
     log_path = args.worker_log
+    command: list[str] | list[list[str]] = []
+    parallel_state: dict[str, Any] | None = None
     exit_code = 127
     error: str | None = None
     try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w", encoding="utf-8") as log_handle:
-            result = subprocess.run(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                check=False,
+        if args.dry_run:
+            command = worker_command(args)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("w", encoding="utf-8") as log_handle:
+                result = subprocess.run(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    env=worker_env(args),
+                    check=False,
+                )
+            exit_code = result.returncode
+        else:
+            controller_args = SimpleNamespace(
+                parallelism=args.parallelism,
+                worker_python=args.worker_python,
+                timeout_seconds=args.timeout_seconds,
+                run_id=args.run_id,
             )
-        exit_code = result.returncode
+            exit_code, parallel_state = fallback_parallel.execute_isolated_parallel(
+                args=controller_args,
+                scripts=SCRIPTS_DIR,
+                workspace=args.workspace,
+                run_dir=args.run_dir,
+                queue=args.queue,
+                inventory=args.inventory,
+                work_dir=args.work_dir,
+                progress=args.progress,
+                profile=args.profile,
+                env=worker_env(args),
+                started_at=started_at,
+            )
+            command = parallel_state.get("commands", [])
+            atomic_write_json(
+                log_path,
+                {
+                    "schema_version": 1,
+                    "run_id": args.run_id,
+                    "parallelism": args.parallelism,
+                    "exit_code": exit_code,
+                    "parallel": parallel_state,
+                },
+            )
     except Exception as exc:  # pragma: no cover - defensive process boundary
-        error = str(exc)
+        error = f"{type(exc).__name__}: {exc}"
+        atomic_write_json(log_path, {"schema_version": 1, "run_id": args.run_id, "error": error})
     completion = {
         "schema_version": 1,
         "status": "succeeded" if exit_code == 0 else "failed",
@@ -112,12 +176,15 @@ def supervise(args: argparse.Namespace) -> int:
         "finished_at": now_iso(),
         "run_id": args.run_id,
         "supervisor_pid": os.getpid(),
+        "parallelism": args.parallelism,
         "worker_command": command,
         "worker_log": str(log_path.resolve()),
         "worker_python": args.worker_python,
         "exit_code": exit_code,
         "error": error,
     }
+    if parallel_state is not None:
+        completion["parallel"] = parallel_state
     atomic_write_json(args.completion_receipt, completion)
     return exit_code
 
@@ -132,6 +199,7 @@ def launch(args: argparse.Namespace) -> int:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=worker_env(args),
         start_new_session=True,
     )
     receipt = {
@@ -144,6 +212,7 @@ def launch(args: argparse.Namespace) -> int:
         "completion_receipt": str(args.completion_receipt.resolve()),
         "worker_log": str(args.worker_log.resolve()),
         "worker_python": args.worker_python,
+        "parallelism": args.parallelism,
     }
     atomic_write_json(launch_path, receipt)
     print(json.dumps(receipt, ensure_ascii=False))
@@ -152,6 +221,8 @@ def launch(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--workspace", type=Path, help="Worker cwd; defaults from the inventory location for legacy launcher calls")
+    parser.add_argument("--run-dir", type=Path, help="Run-local shard directory; defaults to the launch receipt directory")
     parser.add_argument("--queue", type=Path, required=True)
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
@@ -162,11 +233,28 @@ def main() -> int:
     parser.add_argument("--completion-receipt", type=Path, required=True)
     parser.add_argument("--worker-log", type=Path, required=True)
     parser.add_argument("--worker-python", required=True, help="Python interpreter already verified to import musicdl")
+    parser.add_argument("--parallelism", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--timeout-seconds", type=int, default=1800)
+    parser.add_argument("--proxy")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--supervise", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    for attribute in ("queue", "inventory", "work_dir", "progress", "profile", "launch_receipt", "completion_receipt", "worker_log"):
+    for attribute in (
+        "queue",
+        "inventory",
+        "work_dir",
+        "progress",
+        "profile",
+        "launch_receipt",
+        "completion_receipt",
+        "worker_log",
+    ):
         setattr(args, attribute, getattr(args, attribute).expanduser().resolve())
+    if args.workspace is None:
+        args.workspace = (args.inventory.parent.parent if args.inventory.parent.name == "data" else args.inventory.parent).resolve()
+    else:
+        args.workspace = args.workspace.expanduser().resolve()
+    args.run_dir = (args.run_dir or args.launch_receipt.parent).expanduser().resolve()
     return supervise(args) if args.supervise else launch(args)
 
 

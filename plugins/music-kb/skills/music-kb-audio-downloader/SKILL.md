@@ -1,6 +1,6 @@
 ---
 name: music-kb-audio-downloader
-description: Prepare a deduplicated Kugou audio queue from a new chart export and execute it through Claude Code using the proven musicdl/KugouMusicClient workflow. Retry the primary Kugou worker's no-results or failed records serially through QQ, Migu, then Kuwo with identity, size, duration, and receipt gates. Use when the publisher needs a weekly Music KB download or cross-platform recovery on the publisher machine.
+description: Prepare a deduplicated Kugou audio queue from a new chart export and execute the verified direct download path. The primary Kugou worker is serial; its QQ/Migu/Kuwo fallback uses two isolated workers with one safe merger. Use only on the publisher machine.
 ---
 
 # Music KB Audio Downloader
@@ -14,15 +14,22 @@ from a completed CNB canonical delivery. The atom has four bounded stages:
 2. Compare a new `kugou-cli` chart export with that inventory. Deduplicate by
    `kugou:<mix_song_id>` first and by normalized title + artist as a fallback.
 3. Write a JSONL queue containing only songs that are not already downloaded.
-4. Call Claude Code in print mode. Claude Code runs the deterministic
-   `scripts/download_music_queue.py` worker, which uses `musicdl` with
-   `KugouMusicClient`, updates the inventory after every attempt, and writes an
+4. Run the deterministic `scripts/download_music_queue.py` worker directly in
+   one serial process. It uses `musicdl` with `KugouMusicClient`, first resolves
+   the queue's exact Kugou mix-song page to one verified audio hash, and falls
+   back to title/artist search only when that direct parser cannot produce an
+   audio URL. It updates the inventory after every attempt and writes an
    identity-bound lyric receipt from the exact result's `SongInfo.lyric`.
 
-If the primary worker leaves songs as `no_results` or `failed`, run the separate fallback
-atom with Claude Code. It consumes only an explicit retryable queue and runs
-`scripts/download_music_fallback.py` serially through the versioned
-`references/fallback-download-profile.json` sources (QQ, Migu, then Kuwo).
+If the primary worker leaves songs as `no_results` or `failed`, run the separate
+fallback atom through `scripts/run_claude_fallback.py`. Its direct mode defaults
+to two isolated workers through the versioned
+`references/fallback-download-profile.json` sources (QQ, Migu, then Kuwo). Each
+worker receives its own queue shard, inventory copy, progress file, log, and
+staging audio directory. Only after every shard reaches terminal results and the
+real inventory hash is unchanged does one serial merger move verified media and
+sidecars into the real audio directory and update the real inventory/progress.
+`--parallelism 1` is the diagnostic rollback; do not use more than two workers.
 Fallback matching is exact on normalized title and artist, with only aliases
 listed in the queue/profile accepted. A fallback file is accepted only when it
 exists, exceeds 1 MB, and has an `ffprobe` duration of at least 60 seconds.
@@ -33,8 +40,11 @@ capture atom; this atom consumes its processed songs JSON/JSONL/CSV export.
 ## Required boundary
 
 - Run on the publisher Mac only.
-- The Claude Code child may read/write only the workspace, the inventory, the
-  queue run directory, and the configured `music_downloads` directory.
+- The primary Kugou worker remains the one serial owner of inventory, progress,
+  and lyric receipts. It must not be parallelized.
+- The fallback wrapper may run two workers only through isolated staging and a
+  serial merger. Never start two `download_music_fallback.py` processes against
+  the real inventory, progress, or audio directory directly.
 - Do not use the historical `batch_download.py` for weekly updates. It scans
   the whole SQLite database and predates the queue-level inventory contract.
 - Do not commit `song_inventory.json`, queue runs, audio, progress, logs, or
@@ -56,13 +66,14 @@ python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_download.py \
 ```
 
 Before a real run, use the same command with `--dry-run`. To test a bounded
-prefix of a queue, add `--max-items 1` or another small number. A dry run still
-invokes Claude Code, but the worker does not import `musicdl` or touch audio.
+prefix of a queue, add `--max-items 1` or another small number. A dry run does
+not import `musicdl` or touch audio. The output records inventory, queue,
+worker, and per-song stage timings for a comparable baseline.
 The worker defaults to `--item-timeout-seconds 60` for each musicdl search or
 download operation. A timeout is recorded as `failed` and the queue continues;
-Claude Code must not hand-edit inventory, progress, queue, or retention state.
+the wrapper must not hand-edit inventory, progress, queue, or retention state.
 
-The wrapper performs these local commands before starting Claude Code:
+The wrapper performs these local commands before starting the fixed worker:
 
 ```bash
 python3 music-analysis-kb/plugins/music-kb/scripts/build_song_inventory.py \
@@ -78,29 +89,44 @@ python3 music-analysis-kb/plugins/music-kb/scripts/prepare_download_queue.py \
   --audio-root music_downloads/KugouMusicClient
 ```
 
-It then invokes Claude Code approximately as follows (the wrapper supplies
-absolute paths and captures the result):
+It then materializes one filtered execution queue and invokes the worker once
+(the wrapper supplies absolute paths and captures the result):
 
 ```bash
-claude -p \
-  --output-format json \
-  --permission-mode dontAsk \
-  --allowedTools Bash Read \
-  --add-dir "$MUSIC_WORKSPACE" \
-  '严格运行：
-   python3 .../download_music_queue.py
-     --queue .../download_queue.jsonl
-     --inventory .../song_inventory.json
-     --work-dir .../music_downloads
-     --progress .../progress.json
-     --log .../download.log
-     --run-id ...
-     --item-timeout-seconds 60'
+python3 .../download_music_queue.py \
+  --queue data/download_runs/<run-id>/download-queue-direct.jsonl \
+  --inventory data/song_inventory.json \
+  --work-dir music_downloads \
+  --progress data/download_runs/<run-id>/progress.json \
+  --log data/download_runs/<run-id>/download.log \
+  --run-id <run-id> \
+  --item-timeout-seconds 60
 ```
 
-The prompt explicitly tells Claude Code not to call `kugou-cli`, not to run
-the old full-database script, and not to invent a new downloader. The child
-inherits `http_proxy` and `https_proxy` when `--proxy` is provided.
+The direct path keeps exact MixSongID validation, inventory/progress atomic
+writes, and append-only lyric receipts in the same worker. Its default
+`--lookup-mode exact-page-first` prevents `musicdl` from expanding several
+title/artist candidates when the queue already has an exact Kugou source URL;
+`--lookup-mode search-only` is the measured rollback path. `--executor claude`
+is available only for a bounded compatibility retry; it preserves the old
+serial chunk path and inherits `http_proxy`/`https_proxy` when `--proxy` is
+provided.
+
+### Measured publisher profile
+
+On the publisher Mac, the apparent default route is the system TUN proxy, not
+a bare public direct connection. The currently fastest validated fallback
+profile is the direct wrapper with `--parallelism 2` and an explicit healthy
+`http://127.0.0.1:7890` proxy. The direct two-song end-to-end sample completed
+2/2 identity- and `ffprobe`-validated downloads in 15.869 seconds, compared
+with 24.994 seconds for the same serial wrapper shape. Audio CDN transfer also
+benefited from two streams; four streams did not add a repeatable gain.
+
+These are publisher-Mac measurements, not a universal seconds-per-song
+promise: provider parsing and the audio format returned by `musicdl` vary per
+song. Before a real run, verify that the local proxy listener is healthy. If
+it is unavailable, omit `--proxy` and use the system TUN path; do not route
+through an invented endpoint or bypass a platform login/paywall.
 
 ## Lyrics receipt and historical backfill
 
@@ -134,9 +160,11 @@ automatically.
 
 ### Fallback invocation
 
-Invoke fallback only after the primary worker has recorded `no_results` or
-`failed`. The wrapper builds the explicit queue from those statuses, preserves
-each row's `retry_from_status`, and is the only operator entry point:
+The fallback queue contains only records whose current inventory status is
+`no_results` or `failed`. Before a real run, use `--dry-run` and review the
+queue count and status breakdown. The direct fallback wrapper owns queue
+preparation, safe two-way sharding, and the final merger. `--executor claude`
+remains an explicit compatibility way to start the same short launcher:
 
 ```bash
 export MUSICDL_PYTHON=/absolute/path/to/python-that-imports-musicdl
@@ -147,18 +175,18 @@ python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_fallback.py \
   --proxy http://127.0.0.1:7890
 ```
 
-First add `--dry-run` and review the queue count and `no_results`/`failed`
-breakdown. For a real run, the wrapper must validate the `fallback_download`
-operation record, prove `--worker-python` can import `musicdl`, then ask Claude
-Code exactly once to start the short launcher. The detached supervisor runs the
-actual worker serially in the configured QQ → Migu → Kuwo order; the wrapper
-waits for its independent completion receipt. Claude Code must not wait, kill,
-wrap, restart, or directly run `download_music_fallback.py`.
+For a real run, the wrapper validates the `fallback_download` operation record,
+proves `--worker-python` can import `musicdl`, then starts the short detached
+launcher. The supervisor runs the actual P=2 isolated shards and its serial
+merger is the only code allowed to touch real inventory/progress and the
+configured music directory. `--executor claude` may start that launcher for
+compatibility, but Claude must not wait, kill, wrap, restart, or directly run
+`download_music_fallback.py`.
 
 Accept a fallback file only after it exists, exceeds 1 MB, and has an ffprobe
-duration of at least 60 seconds. The child may write only the queue run
-directory, inventory, and configured music download directory. It must not call
-`kugou-cli`, the old full-database downloader, or edit inventory by hand.
+duration of at least 60 seconds. Each child may write only its run-local shard
+directory; it must not call `kugou-cli`, the old full-database downloader, or
+edit real inventory by hand.
 
 ## Inventory contract
 
