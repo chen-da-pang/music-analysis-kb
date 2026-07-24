@@ -926,7 +926,7 @@ def generate_campaign_devgpu_config(
         "    - name: Run receipt-bound Dev GPU full resume",
         "      timeout: 4h",
         "      script: |",
-        "        set -euo pipefail",
+        "        set -eu",
         "        gate_root=\"/workspace/cache/output/music_flamingo_pipeline/devgpu-recovery-${CNB_BUILD_ID}\"",
         "        mkdir -p \"$gate_root\"",
         "        python scripts/check_manual_gpu_gate.py --phase before_hydrate --expected-gpu L40 --minimum-free-mib 40000 --max-utilization-percent 0 --receipt \"$gate_root/gpu-before-hydrate.json\"",
@@ -1710,21 +1710,59 @@ def _prepare_devgpu_overlay(
             shutil.rmtree(overlay)
         _run(["git", "-C", str(checkout), "worktree", "prune"])
         if remote_overlay:
-            overlay_commit = remote_overlay[0]
+            previous_overlay_commit = remote_overlay[0]
             _authenticated_git_output(
                 ["git", "fetch", "origin", f"refs/heads/{branch}"], cwd=checkout, env=env
             )
-            _run(["git", "-C", str(checkout), "worktree", "add", "--force", "--detach", str(overlay), overlay_commit])
-            parent = _run(["git", "rev-parse", "HEAD^"], cwd=overlay).stdout.strip()
-            if parent != campaign_commit or sha256_file(overlay / ".cnb.yml") != expected_config_sha256:
-                raise CampaignRepositoryError("existing Dev GPU overlay is not the exact receipt-bound config")
+            _run(
+                ["git", "-C", str(checkout), "worktree", "add", "--force", "--detach", str(overlay), previous_overlay_commit]
+            )
+            _run(["git", "merge-base", "--is-ancestor", campaign_commit, "HEAD"], cwd=overlay)
+            changed = {
+                line.strip()
+                for line in _run(
+                    ["git", "diff", "--name-only", f"{campaign_commit}..HEAD"], cwd=overlay
+                ).stdout.splitlines()
+                if line.strip()
+            }
+            if changed != {".cnb.yml"}:
+                raise CampaignRepositoryError(
+                    "existing Dev GPU overlay history is not a config-only descendant of campaign main"
+                )
+            if sha256_file(overlay / ".cnb.yml") == expected_config_sha256:
+                return {
+                    "branch": branch,
+                    "commit": previous_overlay_commit,
+                    "parent_campaign_commit": campaign_commit,
+                    "config_sha256": expected_config_sha256,
+                    "path": str(overlay),
+                    "reused": True,
+                }
+            _run(["git", "checkout", "-B", branch], cwd=overlay)
+            (overlay / ".cnb.yml").write_text(config, encoding="utf-8")
+            _run(["git", "config", "user.name", "Music KB Dev GPU Recovery"], cwd=overlay)
+            _run(["git", "config", "user.email", "music-kb-devgpu@wuyoumusic.invalid"], cwd=overlay)
+            _run(["git", "config", "commit.gpgSign", "false"], cwd=overlay)
+            _run(["git", "add", ".cnb.yml"], cwd=overlay)
+            _run(["git", "commit", "-qm", f"Repair Dev GPU recovery {source_receipt['run_id']}"], cwd=overlay)
+            overlay_commit = _run(["git", "rev-parse", "HEAD"], cwd=overlay).stdout.strip()
+            _run_git_authenticated(
+                ["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=overlay, env=env
+            )
+            remote_overlay = _authenticated_git_output(
+                ["git", "ls-remote", remote, f"refs/heads/{branch}"], cwd=overlay, env=env
+            ).split()
+            if not remote_overlay or remote_overlay[0] != overlay_commit:
+                raise CampaignRepositoryError("repaired Dev GPU overlay branch did not verify after push")
             return {
                 "branch": branch,
                 "commit": overlay_commit,
+                "previous_commit": previous_overlay_commit,
                 "parent_campaign_commit": campaign_commit,
                 "config_sha256": expected_config_sha256,
                 "path": str(overlay),
-                "reused": True,
+                "reused": False,
+                "updated": True,
             }
         _run(["git", "-C", str(checkout), "worktree", "add", "--force", "--detach", str(overlay), campaign_commit])
         _run(["git", "checkout", "-B", branch], cwd=overlay)
@@ -1902,6 +1940,17 @@ def recover_campaign_with_devgpu(
     existing = _read_json(recovery_file) if recovery_file.is_file() else {}
     if existing.get("status") == "completed":
         return {**existing, "receipt": str(recovery_file)}
+    attempts = list(existing.get("attempts", [])) if isinstance(existing.get("attempts"), list) else []
+    if existing.get("status") == "failed" and isinstance(existing.get("workspace"), Mapping):
+        attempts.append(
+            {
+                "status": "failed",
+                "updated_at": existing.get("updated_at"),
+                "overlay": copy.deepcopy(existing.get("overlay")),
+                "workspace": copy.deepcopy(existing.get("workspace")),
+                "failure": copy.deepcopy(existing.get("failure")),
+            }
+        )
     receipt: dict[str, Any] = {
         "schema_version": 1,
         "atom": "cnb_campaign_devgpu_recovery",
@@ -1915,6 +1964,7 @@ def recover_campaign_with_devgpu(
         "runtime_image": source["runtime_image"],
         "campaign_commit": source["campaign_commit"],
         "build_gpu_platform_gate": platform_gate,
+        "attempts": attempts,
         "created_at": existing.get("created_at") or now_iso(),
         "updated_at": now_iso(),
         "failure": None,

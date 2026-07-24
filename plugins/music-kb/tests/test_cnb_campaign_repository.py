@@ -866,7 +866,7 @@ def test_devgpu_recovery_config_runs_all_shards_with_clean_gpu_gates() -> None:
     assert "run_music_flamingo_campaign.sh" in config
 
 
-def test_devgpu_recovery_stage_script_is_valid_bash(tmp_path: Path) -> None:
+def test_devgpu_recovery_stage_script_is_valid_posix_sh(tmp_path: Path) -> None:
     config = MODULE.generate_campaign_devgpu_config(
         policy(),
         campaign_id="run-1",
@@ -879,7 +879,9 @@ def test_devgpu_recovery_stage_script_is_valid_bash(tmp_path: Path) -> None:
     script = "\n".join(line[8:] for line in stage.splitlines()) + "\n"
     script_path = tmp_path / "devgpu-stage.sh"
     script_path.write_text(script, encoding="utf-8")
-    completed = subprocess.run(["bash", "-n", str(script_path)], text=True, capture_output=True, check=False)
+    assert "pipefail" not in script
+    assert script.startswith("set -eu\n")
+    completed = subprocess.run(["sh", "-n", str(script_path)], text=True, capture_output=True, check=False)
     assert completed.returncode == 0, completed.stderr
 
 
@@ -933,17 +935,26 @@ def test_prepare_devgpu_overlay_reuses_exact_remote_branch(
     subprocess.run(["git", "checkout", "--detach", campaign_commit], cwd=checkout, check=True)
     monkeypatch.setenv("CNB_TOKEN", "existing-admin-token")
 
+    remote_overlay_commit = {"value": overlay_commit}
+
     def fake_authenticated(command, *, cwd, env):
         joined = " ".join(command)
         if "refs/heads/main" in joined:
             return f"{campaign_commit}\trefs/heads/main"
         if f"refs/heads/{branch}" in joined and "ls-remote" in joined:
-            return f"{overlay_commit}\trefs/heads/{branch}"
+            return f"{remote_overlay_commit['value']}\trefs/heads/{branch}"
         if " fetch " in f" {joined} ":
             return ""
         raise AssertionError(command)
 
     monkeypatch.setattr(MODULE, "_authenticated_git_output", fake_authenticated)
+
+    def fake_push(_command, *, cwd, env):
+        remote_overlay_commit["value"] = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, text=True, capture_output=True, check=True
+        ).stdout.strip()
+
+    monkeypatch.setattr(MODULE, "_run_git_authenticated", fake_push)
     source = {
         "checkout": str(checkout),
         "campaign_commit": campaign_commit,
@@ -960,6 +971,27 @@ def test_prepare_devgpu_overlay_reuses_exact_remote_branch(
     assert result["commit"] == overlay_commit
     assert result["parent_campaign_commit"] == campaign_commit
     assert MODULE.sha256_file(Path(result["path"]) / ".cnb.yml") == result["config_sha256"]
+
+    repaired_policy = json.loads(json.dumps(value))
+    repaired_policy["campaign_repository"]["audio_clip_seconds"] = 239
+    repaired = MODULE._prepare_devgpu_overlay(
+        policy=repaired_policy,
+        source_receipt=source,
+        recovery_dir=tmp_path / "recovery",
+    )
+    assert repaired["updated"] is True
+    assert repaired["reused"] is False
+    assert repaired["previous_commit"] == overlay_commit
+    assert repaired["commit"] == remote_overlay_commit["value"]
+    assert repaired["commit"] != overlay_commit
+
+    reused_repair = MODULE._prepare_devgpu_overlay(
+        policy=repaired_policy,
+        source_receipt=source,
+        recovery_dir=tmp_path / "recovery",
+    )
+    assert reused_repair["reused"] is True
+    assert reused_repair["commit"] == repaired["commit"]
 
 
 def test_devgpu_recovery_dry_run_creates_no_overlay_or_workspace(
@@ -983,17 +1015,40 @@ def test_devgpu_recovery_dry_run_creates_no_overlay_or_workspace(
         "_prepare_devgpu_overlay",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("dry-run must not prepare an overlay")),
     )
+    recovery_path = tmp_path / "recovery" / "receipt.json"
+    recovery_path.parent.mkdir(parents=True)
+    recovery_path.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "updated_at": "2026-07-24T00:00:00Z",
+                "overlay": {"commit": "d" * 40},
+                "workspace": {"sn": "cnb-old", "status": "error"},
+                "failure": {"phase": "devgpu_recovery", "message": "old failure"},
+            }
+        ),
+        encoding="utf-8",
+    )
     result = MODULE.recover_campaign_with_devgpu(
         policy_path=policy_path,
         operations_path=OPERATIONS,
         source_receipt_path=source_path,
-        recovery_receipt_path=tmp_path / "recovery" / "receipt.json",
+        recovery_receipt_path=recovery_path,
         run_dir=tmp_path,
         execute=False,
         runner=runner,
         transport="git-objects",
     )
     assert result["status"] == "planned"
+    assert result["attempts"] == [
+        {
+            "status": "failed",
+            "updated_at": "2026-07-24T00:00:00Z",
+            "overlay": {"commit": "d" * 40},
+            "workspace": {"sn": "cnb-old", "status": "error"},
+            "failure": {"phase": "devgpu_recovery", "message": "old failure"},
+        }
+    ]
     assert not any("start-workspace" in " ".join(command) for command in commands)
 
 
