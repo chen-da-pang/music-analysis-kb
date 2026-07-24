@@ -161,10 +161,14 @@ automatically.
 ### Fallback invocation
 
 The fallback queue contains only records whose current inventory status is
-`no_results` or `failed`. Before a real run, use `--dry-run` and review the
-queue count and status breakdown. The direct fallback wrapper owns queue
-preparation, safe two-way sharding, and the final merger. `--executor claude`
-remains an explicit compatibility way to start the same short launcher:
+`no_results` or `failed`. Each record receives at most two fallback rounds
+across runs. A second unsuccessful round becomes the durable, auditable
+`abandoned` state and is omitted from both automatic queues; use
+`run_claude_download.py --retry-abandoned` only for an explicit recovery.
+Before a real run, use `--dry-run` and review the queue count and status
+breakdown. The direct fallback wrapper owns queue preparation, safe two-way
+sharding, and the final merger. `--executor claude` remains an explicit
+compatibility way to start the same short launcher:
 
 ```bash
 export MUSICDL_PYTHON=/absolute/path/to/python-that-imports-musicdl
@@ -196,15 +200,17 @@ library. Each song records:
 - `identity_key`: strong platform identity, normally `kugou:<mix_song_id>`;
 - `title_artist_key`: normalized fallback identity;
 - title, artist, play link, source chart run, and chart appearances;
-- `download.status`: `downloaded`, `missing`, `failed`, `no_results`, or
-  `not_attempted`;
+- `download.status`: `downloaded`, `missing`, `failed`, `no_results`,
+  `abandoned`, or `not_attempted`;
+- fallback attempts retain their count, per-round history, and terminal reason;
 - relative audio path, extension, size, mtime, and optional SHA-256.
 
 The inventory is rebuilt before each queue preparation but historical songs are
 retained even when they leave the newest chart. A song is skipped only when
 its inventory record says `downloaded` and either the recorded file still
 exists or the record is explicitly marked `purged_after_analysis`. Missing
-files are queued for repair; failed/no-result records are retried.
+files are queued for repair; failed/no-result records are retried up to the
+fallback limit, while `abandoned` records require an explicit retry flag.
 
 ## Purge audio after analysis
 

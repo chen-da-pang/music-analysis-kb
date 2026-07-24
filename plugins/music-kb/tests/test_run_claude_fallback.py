@@ -265,6 +265,24 @@ def test_parallel_merge_refuses_changed_inventory(tmp_path: Path) -> None:
     assert not (tmp_path / "progress.json").exists()
 
 
+def test_parallel_progress_accepts_abandoned_as_a_terminal_result() -> None:
+    module = _module(CONTROLLER, "fallback_parallel_abandoned")
+    rows = [{"identity_key": "kugou:1"}]
+    progress = {
+        "finished_at": "2026-07-24T00:00:00Z",
+        "results": {"kugou:1": {"status": "abandoned"}},
+        "summary": {
+            "downloaded": 0,
+            "skipped_existing": 0,
+            "failed": 0,
+            "no_results": 0,
+            "abandoned": 1,
+        },
+    }
+
+    assert module.progress_error(progress, expected=1, rows=rows) is None
+
+
 def test_incomplete_shard_never_merges_real_state(monkeypatch, tmp_path: Path) -> None:
     module = _module(CONTROLLER, "fallback_parallel_incomplete")
     workspace = tmp_path / "workspace"

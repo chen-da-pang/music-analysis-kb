@@ -50,10 +50,15 @@ def prepare(inventory_path: Path, output: Path, profile_path: Path, statuses: li
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     status_counts = {status: 0 for status in statuses}
+    abandoned_excluded = 0
     for song in inventory.get("songs", []):
         if not isinstance(song, dict):
             continue
-        status = song.get("download", {}).get("status")
+        download = song.get("download") if isinstance(song.get("download"), dict) else {}
+        status = download.get("status")
+        if status == "abandoned":
+            abandoned_excluded += 1
+            continue
         if status not in statuses:
             continue
         identity = song.get("identity_key") or song.get("title_artist_key")
@@ -73,6 +78,7 @@ def prepare(inventory_path: Path, output: Path, profile_path: Path, statuses: li
         "profile": str(profile_path.resolve()),
         "retry_statuses": statuses,
         "status_counts": status_counts,
+        "abandoned_excluded": abandoned_excluded,
         "queued": len(rows),
         "unique_identity_keys": len(seen),
         "queue": str(output.resolve()),

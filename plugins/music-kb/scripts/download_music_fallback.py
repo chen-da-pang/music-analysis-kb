@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_MAX_FALLBACK_ATTEMPTS = 2
+
+
 class ItemTimeoutError(RuntimeError):
     pass
 
@@ -120,6 +123,70 @@ def downloaded_present(item: dict[str, Any]) -> bool:
     return bool(path and Path(path).expanduser().is_file())
 
 
+def fallback_attempt_limit(profile: dict[str, Any]) -> int:
+    value = profile.get("max_fallback_attempts", DEFAULT_MAX_FALLBACK_ATTEMPTS)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("profile.max_fallback_attempts must be a positive integer")
+    return value
+
+
+def fallback_attempt_result(
+    previous_download: dict[str, Any] | None,
+    *,
+    attempt_status: str,
+    retry_from_status: object,
+    max_attempts: int,
+    error: str | None = None,
+    source: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Record one fallback round and return its durable terminal state.
+
+    The count belongs to the inventory row, rather than a single run receipt,
+    so a new weekly invocation cannot restart an automatic retry loop.
+    """
+
+    if attempt_status not in {"downloaded", "failed", "no_results"}:
+        raise ValueError(f"unsupported fallback attempt status: {attempt_status}")
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
+    prior = previous_download if isinstance(previous_download, dict) else {}
+    raw_history = prior.get("fallback_history")
+    history = [dict(entry) for entry in raw_history if isinstance(entry, dict)] if isinstance(raw_history, list) else []
+    raw_attempts = prior.get("fallback_attempts")
+    previous_attempts = raw_attempts if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool) and raw_attempts >= 0 else 0
+    attempt = max(previous_attempts, len(history)) + 1
+    recorded_at = now_iso()
+    retry_status = str(retry_from_status or "").strip()
+    entry: dict[str, Any] = {"attempt": attempt, "status": attempt_status, "at": recorded_at}
+    if retry_status:
+        entry["retry_from_status"] = retry_status
+    if source:
+        entry["source"] = source
+    if error:
+        entry["error"] = error
+    history.append(entry)
+
+    final_status = attempt_status
+    metadata: dict[str, Any] = {
+        "fallback": True,
+        "fallback_attempts": attempt,
+        "fallback_attempt_limit": max_attempts,
+        "fallback_history": history,
+        "last_fallback_status": attempt_status,
+    }
+    if retry_status:
+        metadata["retry_from_status"] = retry_status
+    if final_status != "downloaded" and attempt >= max_attempts:
+        final_status = "abandoned"
+        metadata.update(
+            {
+                "terminal_reason": "fallback_retry_limit_exhausted",
+                "abandoned_at": recorded_at,
+            }
+        )
+    return final_status, metadata
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--queue", type=Path, required=True)
@@ -131,9 +198,20 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     profile = json.loads(args.profile.read_text(encoding="utf-8"))
+    max_fallback_attempts = fallback_attempt_limit(profile)
     queue = queue_rows(args.queue)
     inventory = json.loads(args.inventory.read_text(encoding="utf-8"))
-    summary = {"run_id": args.run_id, "queue": len(queue), "downloaded": 0, "skipped_existing": 0, "failed": 0, "no_results": 0, "dry_run": args.dry_run}
+    summary = {
+        "run_id": args.run_id,
+        "queue": len(queue),
+        "downloaded": 0,
+        "skipped_existing": 0,
+        "failed": 0,
+        "no_results": 0,
+        "abandoned": 0,
+        "max_fallback_attempts": max_fallback_attempts,
+        "dry_run": args.dry_run,
+    }
     progress = {"schema_version": 1, "run_id": args.run_id, "started_at": now_iso(), "results": {}}
     if args.dry_run:
         summary["would_process"] = len(queue)
@@ -151,6 +229,7 @@ def main() -> int:
             summary["skipped_existing"] += 1
             progress["results"][identity] = {"status": "skipped_existing", "at": now_iso()}
             continue
+        previous_download = item.get("download") if isinstance(item.get("download"), dict) else None
         aliases = candidate.get("artist_aliases") or profile.get("artist_aliases", {}).get(f"{candidate.get('title')}\u0000{candidate.get('artist')}", [])
         retry_from_status = candidate.get("retry_from_status")
         result: dict[str, Any] = {
@@ -178,9 +257,30 @@ def main() -> int:
             except Exception as exc:
                 result["error"] = f"{source}: {exc}"
         if matched is None:
-            summary["no_results"] += 1
-            result["status"] = "no_results"
-            item["download"] = {"status": "no_results", "retention": "retained", "path": None, "recorded_at": now_iso(), "fallback": True, "retry_from_status": retry_from_status}
+            final_status, retry_metadata = fallback_attempt_result(
+                previous_download,
+                attempt_status="no_results",
+                retry_from_status=retry_from_status,
+                max_attempts=max_fallback_attempts,
+                error=result.get("error"),
+            )
+            summary[final_status] += 1
+            result.update(
+                {
+                    "status": final_status,
+                    "attempt_status": "no_results",
+                    "fallback_attempts": retry_metadata["fallback_attempts"],
+                }
+            )
+            if retry_metadata.get("terminal_reason"):
+                result["terminal_reason"] = retry_metadata["terminal_reason"]
+            item["download"] = {
+                "status": final_status,
+                "retention": "retained",
+                "path": None,
+                "recorded_at": now_iso(),
+                **retry_metadata,
+            }
         else:
             source, song = matched
             try:
@@ -193,13 +293,66 @@ def main() -> int:
                 if path is None:
                     raise RuntimeError("musicdl returned no file path")
                 verified = verify_file(path, int(profile["minimum_size_bytes"]), float(profile["minimum_duration_seconds"]))
-                item["download"] = {"status": "downloaded", "retention": "retained", "path": str(path.resolve()), "file_present": True, "exists": True, "source": source, "matched_title": getattr(song, "song_name", None), "matched_artist": getattr(song, "singers", None), "recorded_at": now_iso(), "retry_from_status": retry_from_status, **verified}
-                summary["downloaded"] += 1
-                result.update({"status": "downloaded", "source": source, "path": str(path.resolve()), **verified})
+                final_status, retry_metadata = fallback_attempt_result(
+                    previous_download,
+                    attempt_status="downloaded",
+                    retry_from_status=retry_from_status,
+                    max_attempts=max_fallback_attempts,
+                    source=source,
+                )
+                item["download"] = {
+                    "status": final_status,
+                    "retention": "retained",
+                    "path": str(path.resolve()),
+                    "file_present": True,
+                    "exists": True,
+                    "source": source,
+                    "matched_title": getattr(song, "song_name", None),
+                    "matched_artist": getattr(song, "singers", None),
+                    "recorded_at": now_iso(),
+                    **retry_metadata,
+                    **verified,
+                }
+                summary[final_status] += 1
+                result.update(
+                    {
+                        "status": final_status,
+                        "attempt_status": "downloaded",
+                        "source": source,
+                        "path": str(path.resolve()),
+                        "fallback_attempts": retry_metadata["fallback_attempts"],
+                        **verified,
+                    }
+                )
             except Exception as exc:
-                summary["failed"] += 1
-                result["error"] = str(exc)
-                item["download"] = {"status": "failed", "retention": "retained", "path": None, "recorded_at": now_iso(), "error": str(exc), "fallback": True, "retry_from_status": retry_from_status}
+                error = str(exc)
+                final_status, retry_metadata = fallback_attempt_result(
+                    previous_download,
+                    attempt_status="failed",
+                    retry_from_status=retry_from_status,
+                    max_attempts=max_fallback_attempts,
+                    error=error,
+                    source=source,
+                )
+                summary[final_status] += 1
+                result.update(
+                    {
+                        "status": final_status,
+                        "attempt_status": "failed",
+                        "error": error,
+                        "fallback_attempts": retry_metadata["fallback_attempts"],
+                    }
+                )
+                if retry_metadata.get("terminal_reason"):
+                    result["terminal_reason"] = retry_metadata["terminal_reason"]
+                item["download"] = {
+                    "status": final_status,
+                    "retention": "retained",
+                    "path": None,
+                    "recorded_at": now_iso(),
+                    "error": error,
+                    **retry_metadata,
+                }
         progress["results"][identity] = result
         inventory["generated_at"] = now_iso()
         inventory["counts"] = {"total": len(inventory.get("songs", []))}

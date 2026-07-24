@@ -237,6 +237,11 @@ def main() -> int:
         help="Reuse the existing run queue/manifest during a same-run download resume",
     )
     parser.add_argument(
+        "--retry-abandoned",
+        action="store_true",
+        help="Explicitly requeue records that previously reached the fallback retry limit.",
+    )
+    parser.add_argument(
         "--item-timeout-seconds",
         type=float,
         default=60.0,
@@ -303,22 +308,21 @@ def main() -> int:
         queue_manifest = json.loads(manifest.read_text(encoding="utf-8"))
     else:
         queue_started = time.monotonic()
-        queue_output = run_checked(
-            [
-                sys.executable,
-                str(queue_script),
-                "--source",
-                str(source),
-                "--inventory",
-                str(inventory),
-                "--output",
-                str(queue),
-                "--audio-root",
-                str(audio_root),
-            ],
-            workspace,
-            timeout_seconds=args.timeout_seconds,
-        )
+        queue_command = [
+            sys.executable,
+            str(queue_script),
+            "--source",
+            str(source),
+            "--inventory",
+            str(inventory),
+            "--output",
+            str(queue),
+            "--audio-root",
+            str(audio_root),
+        ]
+        if args.retry_abandoned:
+            queue_command.append("--retry-abandoned")
+        queue_output = run_checked(queue_command, workspace, timeout_seconds=args.timeout_seconds)
         queue_prepare_ms = elapsed_ms(queue_started)
         queue_manifest = json.loads(queue_output)
         manifest.write_text(json.dumps(queue_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -355,6 +359,7 @@ def main() -> int:
             "worker_python": args.worker_python,
             "lookup_mode": args.lookup_mode,
             "reuse_queue": args.reuse_queue,
+            "retry_abandoned": args.retry_abandoned,
             "lyrics_receipt": str(lyrics_receipt),
             "timing": {**timing, "total_ms": elapsed_ms(run_started)},
             "dry_run": True,
@@ -538,6 +543,7 @@ def main() -> int:
         "worker_python": args.worker_python,
         "lookup_mode": args.lookup_mode,
         "reuse_queue": args.reuse_queue,
+        "retry_abandoned": args.retry_abandoned,
         "run_dir": str(run_dir),
         "worker_stdout": str(worker_stdout) if worker_stdout is not None else None,
         "worker_stderr": str(worker_stderr) if worker_stderr is not None else None,

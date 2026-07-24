@@ -27,7 +27,7 @@ from typing import Any
 from music_kb.operation_context import sha256_file
 
 
-SUMMARY_KEYS = ("downloaded", "skipped_existing", "failed", "no_results")
+SUMMARY_KEYS = ("downloaded", "skipped_existing", "failed", "no_results", "abandoned")
 
 
 def now_iso() -> str:
