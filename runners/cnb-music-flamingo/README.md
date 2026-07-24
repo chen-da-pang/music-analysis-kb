@@ -117,7 +117,7 @@ The terminal command must declare all of the following explicitly:
 - a source manifest and a strictly increasing selection file;
 - the exact source-manifest SHA-256 from the receipt-bound campaign;
 - `MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT`, matching the selection exactly
-  (the route caps a manual run at five tracks);
+  (the route defaults to five tracks and caps a manual run at six);
 - a ledger branch named
   `campaign-results/<campaign-id>-quality-rerun-<attempt>`; the primary
   `campaign-results/<campaign-id>` branch is refused;

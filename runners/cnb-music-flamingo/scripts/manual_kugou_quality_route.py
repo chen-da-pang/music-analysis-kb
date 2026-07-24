@@ -41,7 +41,12 @@ _MIN_FREE_MIB = {
     "H20": 87_000,
 }
 _SAFE_BRANCH_SUFFIX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_MAX_MANUAL_SELECTED_COUNT = 5
+# The manual runner processes the selected manifest serially, so this limit is
+# an execution-duration boundary rather than a GPU-memory multiplier.  Keep
+# the normal five-track default in the CNB event, while allowing a single
+# six-track, audit-bound final recovery to supersede all known token-capped
+# primary records without splitting the canonical delivery across ledgers.
+_MAX_MANUAL_SELECTED_COUNT = 6
 _REQUIRED_REPETITION_PENALTY = "1.08"
 _REQUIRED_NO_REPEAT_NGRAM_SIZE = "4"
 
