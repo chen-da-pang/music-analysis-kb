@@ -229,6 +229,41 @@ def _resolve_workspace_path(value: str | Path, workspace: Path) -> Path:
     return (workspace / path).resolve() if not path.is_absolute() else path.resolve()
 
 
+def _delivery_bound_staging_paths(workspace: Path, delivery: Path | None) -> tuple[Path, ...]:
+    """Return only known local staging locations for a canonical delivery.
+
+    The cleanup worker revalidates every candidate manifest against the
+    delivery before it deletes audio. This helper merely prevents an external
+    delivery file from becoming an arbitrary local-path deletion request.
+    """
+
+    if delivery is None:
+        return ()
+    weekly_root = (workspace / "data" / "weekly_runs").resolve()
+    try:
+        relative = delivery.resolve().relative_to(weekly_root)
+    except ValueError:
+        return ()
+    if len(relative.parts) != 4 or relative.parts[1:3] != ("cnb", "canonical"):
+        return ()
+    source_run_id = relative.parts[0]
+    run_dir = (weekly_root / source_run_id).resolve()
+    candidates = (
+        run_dir / "cnb-input",
+        run_dir / "cnb" / "campaign-repository" / "repo" / "data" / "input" / source_run_id,
+    )
+    paths: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(run_dir)
+        except ValueError:
+            continue
+        if resolved.is_dir():
+            paths.append(resolved)
+    return tuple(paths)
+
+
 def _load_chart_profile(path: str | Path) -> dict[str, Any]:
     profile_path = Path(path).expanduser().resolve()
     try:
@@ -1293,6 +1328,7 @@ def run_weekly_run(
             skip_peers=skip_peers,
             publish_result=publish_result,
         )
+        delivery_staging_paths = _delivery_bound_staging_paths(root, delivery_path)
         with atom(
             context,
             "cnb_campaign_cleanup",
@@ -1338,7 +1374,12 @@ def run_weekly_run(
         with atom(
             context,
             "audio_cleanup",
-            inputs={"confirm": confirm_delete_audio, "cleanup_gate": cleanup_gate},
+            inputs={
+                "confirm": confirm_delete_audio,
+                "cleanup_gate": cleanup_gate,
+                "delivery": str(delivery_path) if delivery_path else None,
+                "delivery_staging_paths": [str(path) for path in delivery_staging_paths],
+            },
         ) as outputs:
             if not confirm_delete_audio:
                 outputs.update({"status": "skipped", "reason": "confirmation flag not supplied"})
@@ -1361,6 +1402,10 @@ def run_weekly_run(
                     str(expected_inventory_count),
                     "--confirm-delete-audio",
                 ]
+                if delivery_path is not None:
+                    cleanup_command.extend(["--delivery", str(delivery_path)])
+                for staging_path in delivery_staging_paths:
+                    cleanup_command.extend(["--campaign-staging", str(staging_path)])
                 cleanup_result, _ = _json_command(cleanup_command, cwd=root, timeout_seconds=min(timeout_seconds, 600))
                 outputs.update(cleanup_result)
 
