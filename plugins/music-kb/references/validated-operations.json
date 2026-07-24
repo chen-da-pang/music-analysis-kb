@@ -58,7 +58,7 @@
       "effective_method": "由 run_claude_download.py 调用 claude -p；Claude 严格执行 download_music_queue.py，不调用 kugou-cli，不运行旧 batch_download.py。worker 以 Kugou MixSongID 精确校验搜索结果，并从 SongInfo.lyric 写结构化 receipt；不得扫描 LRC，网络/解析/identity 失败写 pending。"
     },
     "fallback_download": {
-      "effective_method": "只处理主 Kugou worker 已记录为 no_results 的队列；由 Claude Code 串行运行 download_music_fallback.py，按 fallback-download-profile.json 的 QQ、咪咕、酷我顺序逐来源搜索，严格匹配规范化标题和歌手（含显式艺名别名），下载后必须验证文件大于 1 MB 且 ffprobe 时长至少 60 秒，成功后才更新 song_inventory.json；每来源 90 秒硬超时，失败和 no_results 保留可审计状态。"
+      "effective_method": "只处理主 Kugou worker 已记录为 no_results 或 failed 的显式可重试队列；外层先验证 worker_python 可 import musicdl，Claude Code 只能一次运行固定短 launcher，launcher 以 detached supervisor 串行运行 download_music_fallback.py，外层 wrapper 只接受独立 completion receipt，不允许 Claude Bash 等待、kill、包装或重启 worker。worker 按 fallback-download-profile.json 的 QQ、咪咕、酷我顺序逐来源搜索，严格匹配规范化标题和歌手（含显式艺名别名），队列及进度记录 retry_from_status，下载后必须验证文件大于 1 MB 且 ffprobe 时长至少 60 秒，成功后才更新 song_inventory.json；每来源 90 秒硬超时，失败和 no_results 保留可审计状态。"
     },
     "cnb_input_materialization": {
       "effective_method": "只消费本周已去重下载队列和 song_inventory.json；逐首确认 downloaded 状态、实际文件存在、唯一 identity、文件 SHA-256 和有效 play_link，使用硬链接优先将音频放入独立 campaign staging，并生成带 source_bytes、sha256、title、artist、source_url 的 LF JSONL manifest；fresh 路径在父 weekly-run atom 内直接调用 materialize，避免子进程重复获取 publisher lock；写入 weekly atom receipt，不触发 CNB。"
