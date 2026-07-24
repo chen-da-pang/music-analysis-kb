@@ -102,7 +102,15 @@ def download_present(song: dict[str, Any], audio_root: Path) -> bool:
     return candidate.is_file()
 
 
-def prepare_queue(source: Path, inventory_path: Path, output: Path, audio_root: Path, platform: str) -> dict[str, Any]:
+def prepare_queue(
+    source: Path,
+    inventory_path: Path,
+    output: Path,
+    audio_root: Path,
+    platform: str,
+    *,
+    retry_abandoned: bool = False,
+) -> dict[str, Any]:
     rows, metadata = read_source(source)
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     existing = [song for song in inventory.get("songs", []) if isinstance(song, dict)]
@@ -128,6 +136,7 @@ def prepare_queue(source: Path, inventory_path: Path, output: Path, audio_root: 
 
     queue: list[dict[str, Any]] = []
     skipped_existing = 0
+    skipped_abandoned = 0
     redownload_missing = 0
     for candidate in unique.values():
         old = by_identity.get(candidate["identity_key"]) if candidate.get("identity_key") else None
@@ -135,8 +144,13 @@ def prepare_queue(source: Path, inventory_path: Path, output: Path, audio_root: 
         if old and download_present(old, audio_root):
             skipped_existing += 1
             continue
-        if old and isinstance(old.get("download"), dict) and old["download"].get("status") == "missing":
-            redownload_missing += 1
+        if old and isinstance(old.get("download"), dict):
+            old_status = old["download"].get("status")
+            if old_status == "abandoned" and not retry_abandoned:
+                skipped_abandoned += 1
+                continue
+            if old_status == "missing":
+                redownload_missing += 1
         queue.append(candidate)
 
     payload = "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in queue)
@@ -155,7 +169,9 @@ def prepare_queue(source: Path, inventory_path: Path, output: Path, audio_root: 
         "duplicate_source_records": duplicate_source,
         "invalid_source_records": invalid,
         "skipped_existing_download": skipped_existing,
+        "skipped_abandoned": skipped_abandoned,
         "redownload_missing": redownload_missing,
+        "retry_abandoned": retry_abandoned,
         "queued": len(queue),
         "queue": str(output.resolve()),
     }
@@ -169,6 +185,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--audio-root", type=Path, required=True)
     parser.add_argument("--platform", default="kugou")
+    parser.add_argument(
+        "--retry-abandoned",
+        action="store_true",
+        help="Explicitly requeue records that reached the fallback retry limit.",
+    )
     args = parser.parse_args()
     manifest = prepare_queue(
         args.source.expanduser(),
@@ -176,6 +197,7 @@ def main() -> int:
         args.output.expanduser(),
         args.audio_root.expanduser(),
         args.platform,
+        retry_abandoned=args.retry_abandoned,
     )
     print(json.dumps(manifest, ensure_ascii=False))
     return 0

@@ -7,6 +7,7 @@ from typing import Sequence
 
 import pytest
 
+import music_kb.distribution as distribution
 from music_kb.distribution import (
     _REMOTE_COMPATIBILITY_CODE,
     _REMOTE_INSTALL_CODE,
@@ -16,6 +17,19 @@ from music_kb.distribution import (
 )
 from music_kb.errors import ValidationError
 from music_kb.snapshot import create_snapshot, verify_snapshot
+
+
+def test_current_plugin_version_uses_the_shipped_default_when_metadata_is_unavailable(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(distribution, "PLUGIN_MANIFEST_PATH", tmp_path / "missing-plugin.json")
+
+    def no_package(_name: str) -> str:
+        raise distribution.PackageNotFoundError
+
+    monkeypatch.setattr(distribution, "package_version", no_package)
+
+    assert distribution._current_plugin_version() == "0.8.5"
 
 
 def _write_peers(

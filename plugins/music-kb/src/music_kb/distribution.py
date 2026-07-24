@@ -23,6 +23,8 @@ DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 DEFAULT_PLUGIN_CACHE_ROOT = "~/.codex/plugins/cache/music-analysis-kb/music-kb"
 MAX_OUTPUT_CHARS = 2_000
+DEFAULT_PLUGIN_VERSION = "0.8.5"
+PLUGIN_MANIFEST_PATH = Path(__file__).resolve().parents[2] / ".codex-plugin" / "plugin.json"
 
 CommandRunner = Callable[[Sequence[str], int], subprocess.CompletedProcess[str]]
 
@@ -112,9 +114,8 @@ def _remote_executable_setting(value: str, *, field: str, context: str) -> str:
 
 
 def _current_plugin_version() -> str:
-    manifest_path = Path(__file__).resolve().parents[2] / ".codex-plugin" / "plugin.json"
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(PLUGIN_MANIFEST_PATH.read_text(encoding="utf-8"))
         version = str(manifest.get("version") or "").strip()
         if version:
             return version
@@ -123,7 +124,7 @@ def _current_plugin_version() -> str:
     try:
         return package_version("music-kb")
     except PackageNotFoundError:
-        return "0.8.3"
+        return DEFAULT_PLUGIN_VERSION
 
 
 def _identity_file(value: str | None, *, context: str) -> Path | None:

@@ -30,6 +30,34 @@ def test_fallback_artist_matching_accepts_only_declared_aliases() -> None:
     assert not module.artists_match("DINO", "Other", [["DINO", "디노"]])
 
 
+def test_second_unsuccessful_fallback_round_becomes_auditable_abandoned_state() -> None:
+    module = _module()
+    status, metadata = module.fallback_attempt_result(
+        {
+            "status": "failed",
+            "fallback_attempts": 1,
+            "fallback_history": [
+                {
+                    "attempt": 1,
+                    "status": "failed",
+                    "at": "2026-07-24T00:00:00Z",
+                }
+            ],
+        },
+        attempt_status="no_results",
+        retry_from_status="failed",
+        max_attempts=2,
+    )
+
+    assert status == "abandoned"
+    assert metadata["fallback_attempts"] == 2
+    assert metadata["fallback_attempt_limit"] == 2
+    assert metadata["last_fallback_status"] == "no_results"
+    assert metadata["terminal_reason"] == "fallback_retry_limit_exhausted"
+    assert metadata["fallback_history"][-1]["attempt"] == 2
+    assert metadata["fallback_history"][-1]["retry_from_status"] == "failed"
+
+
 def test_fallback_dry_run_does_not_touch_inventory_or_audio(tmp_path: Path) -> None:
     queue = tmp_path / "fallback_queue.jsonl"
     queue.write_text(json.dumps({"identity_key": "kugou:1", "title": "Song", "artist": "Artist"}) + "\n", encoding="utf-8")
@@ -136,6 +164,7 @@ def test_prepare_fallback_queue_only_includes_unique_retryable_statuses(tmp_path
                     {"identity_key": "kugou:1", "title": "Beyond the Dream", "artist": "DINO", "download": {"status": "no_results"}},
                     {"identity_key": "kugou:1", "title": "Beyond the Dream", "artist": "DINO", "download": {"status": "no_results"}},
                     {"identity_key": "kugou:3", "title": "Retry", "artist": "Artist", "download": {"status": "failed"}},
+                    {"identity_key": "kugou:4", "title": "Terminal", "artist": "Artist", "download": {"status": "abandoned", "fallback_attempts": 2}},
                     {"identity_key": "kugou:2", "title": "Done", "artist": "Artist", "download": {"status": "downloaded"}},
                 ]
             }
@@ -155,6 +184,7 @@ def test_prepare_fallback_queue_only_includes_unique_retryable_statuses(tmp_path
     assert manifest["unique_identity_keys"] == 2
     assert manifest["retry_statuses"] == ["no_results", "failed"]
     assert manifest["status_counts"] == {"no_results": 1, "failed": 1}
+    assert manifest["abandoned_excluded"] == 1
     assert rows[0]["artist_aliases"] == [["DINO", "디노"]]
     assert rows[0]["retry_from_status"] == "no_results"
     assert rows[1]["retry_from_status"] == "failed"

@@ -149,6 +149,9 @@ no-results cross-platform fallback is different: its direct wrapper uses two
 state-isolated staging shards by default, then merges only after both terminal
 receipts succeed and the real inventory has not changed. This is the measured
 fast path; it never lets concurrent workers write the durable files directly.
+An item receives at most two fallback rounds across runs; a second unsuccessful
+round becomes an auditable `abandoned` state and no longer re-enters automatic
+download queues. `--retry-abandoned` is the explicit manual recovery path.
 `--executor claude` is an explicit
 compatibility retry, not the normal weekly dependency. Pass `--delivery <canonical.jsonl>` only to resume from
 an already completed CNB delivery; when the same run has a campaign receipt,

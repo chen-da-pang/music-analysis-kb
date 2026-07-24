@@ -79,8 +79,9 @@ be purged, so inventory—not file presence alone—is the dedupe record.
 4. **`chart_dedupe`** — dedupe by `kugou:<mix_song_id>`, falling back to
    normalized title/artist, while preserving each song's `play_link`.
 5. **`historical_dedupe`** — rebuild the inventory and queue only missing,
-   failed, or `no_results` items. Do not interpret a new download as an
-   analysis result.
+   failed, or `no_results` items. `abandoned` is a durable terminal download
+   state and requires an explicit `--retry-abandoned` recovery. Do not
+   interpret a new download as an analysis result.
 6. **`claude_download`** — retain this historical atom name but default to one
    fixed direct worker. It must use `musicdl`'s `MusicClient` plus
    `KugouMusicClient`; it first resolves the queue's exact mix-song page and
@@ -95,8 +96,9 @@ be purged, so inventory—not file presence alone—is the dedupe record.
    imports `musicdl` and starts a short detached supervisor. Its default two
    isolated staging shards never touch real inventory, progress, or audio; one
    serial merger is the sole formal-state writer. `--executor claude` is a
-   compatibility launcher only. Preserve failed/no-result states and
-   `retry_from_status` for the next retry.
+   compatibility launcher only. Preserve `retry_from_status` and fallback
+   attempt history; after the second unsuccessful fallback round, write
+   `abandoned` and do not requeue it automatically.
 8. **`cnb_input_materialization`** — consume only newly downloaded queue rows;
    verify file existence, identity, SHA-256, byte count, and `source_url`; use
    hardlinks into an isolated staging directory and write the LF JSONL manifest.
