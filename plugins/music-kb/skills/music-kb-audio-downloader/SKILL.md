@@ -1,6 +1,6 @@
 ---
 name: music-kb-audio-downloader
-description: Prepare a deduplicated Kugou audio queue from a new chart export and execute that queue through Claude Code using the proven musicdl/KugouMusicClient workflow. Use when the publisher needs to download only newly observed Kugou tracks for a weekly Music KB update. Use only on the publisher machine.
+description: Prepare a deduplicated Kugou audio queue from a new chart export and execute it through Claude Code using the proven musicdl/KugouMusicClient workflow. Retry the primary Kugou worker's no-results or failed records serially through QQ, Migu, then Kuwo with identity, size, duration, and receipt gates. Use when the publisher needs a weekly Music KB download or cross-platform recovery on the publisher machine.
 ---
 
 # Music KB Audio Downloader
@@ -134,31 +134,31 @@ automatically.
 
 ### Fallback invocation
 
-The fallback queue must contain only records whose current inventory status is
-`no_results` or `failed`; it records the original status for audit. Before a
-real run, use `--dry-run` and review the queue count and status breakdown.
-Claude Code must run the fixed short launcher exactly once. The launcher starts
-the fixed worker under a detached supervisor; the outer wrapper, not Claude
-Code's Bash session, waits for its completion receipt. This prevents a long
-download from being killed or restarted by a tool timeout:
-
-Before launching, the wrapper resolves `--worker-python` (or
-`MUSICDL_PYTHON`) and proves that it can import `musicdl`; do not assume the
-plugin virtual environment contains the downloader dependency.
+Invoke fallback only after the primary worker has recorded `no_results` or
+`failed`. The wrapper builds the explicit queue from those statuses, preserves
+each row's `retry_from_status`, and is the only operator entry point:
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/download_music_fallback.py \
-  --queue data/download_runs/<run-id>/fallback_queue.jsonl \
-  --inventory data/song_inventory.json \
-  --work-dir music_downloads/KugouMusicClient \
-  --progress data/download_runs/<run-id>/fallback-progress.json \
+export MUSICDL_PYTHON=/absolute/path/to/python-that-imports-musicdl
+python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_fallback.py \
+  --workspace "$MUSIC_WORKSPACE" \
   --run-id <run-id> \
-  --profile music-analysis-kb/plugins/music-kb/references/fallback-download-profile.json
+  --worker-python "$MUSICDL_PYTHON" \
+  --proxy http://127.0.0.1:7890
 ```
 
-The fallback child may write only the queue run directory, inventory, and
-configured music download directory. It must not call `kugou-cli`, the old
-full-database downloader, or edit inventory by hand.
+First add `--dry-run` and review the queue count and `no_results`/`failed`
+breakdown. For a real run, the wrapper must validate the `fallback_download`
+operation record, prove `--worker-python` can import `musicdl`, then ask Claude
+Code exactly once to start the short launcher. The detached supervisor runs the
+actual worker serially in the configured QQ → Migu → Kuwo order; the wrapper
+waits for its independent completion receipt. Claude Code must not wait, kill,
+wrap, restart, or directly run `download_music_fallback.py`.
+
+Accept a fallback file only after it exists, exceeds 1 MB, and has an ffprobe
+duration of at least 60 seconds. The child may write only the queue run
+directory, inventory, and configured music download directory. It must not call
+`kugou-cli`, the old full-database downloader, or edit inventory by hand.
 
 ## Inventory contract
 
