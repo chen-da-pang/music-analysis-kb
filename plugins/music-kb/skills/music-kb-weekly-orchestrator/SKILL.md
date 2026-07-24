@@ -124,6 +124,14 @@ be purged, so inventory—not file presence alone—is the dedupe record.
     failed or incomplete shard blocks delivery and cleanup; a later invocation
     may retry that exact failed shard index in the same receipt, never under a
     new repository slug.
+10b. **`cnb_campaign_devgpu_recovery`** — only after the same receipt has
+    failed at a CNB build-GPU platform gate, keep that source receipt immutable
+    and write a separate recovery receipt. Reuse its exact repository, main
+    commit, manifest, runtime and durable ledger; run every configured shard
+    serially in one L40 Dev GPU workspace after two clean-allocation gates and
+    a pre-model gate for each shard. This is a full resume, never a probe. Stop
+    the workspace before recovering an external canonical delivery, then
+    continue through `--delivery` and external-delivery reconciliation.
 11. **`cnb_analysis`** — validate the canonical delivery and expected count.
 12. **`knowledge_import`** — import idempotently, backfill song links, enrich
     retrieval tags, and verify the source-link completeness gate.
@@ -187,6 +195,10 @@ same repository and receipt in place. A retry may reuse the receipt-bound work
 directory and ledger clone, but must pass the immutable identity checks and keep
 the same repository slug. Cleanup is irreversible and requires the separate
 repository confirmation flag in addition to audio/CNB-storage confirmations.
+Build-GPU quota failure may use only the explicit Dev GPU recovery atom. It
+must not edit the failed source receipt or claim failed build records succeeded;
+the recovery delivery remains external until local release provenance has been
+reconciled.
 The cleanup atom blocks unless the receipt also proves repository
 creation/push, every shard's success and index set, complete runtime-export
 provenance, and a delivery file whose hash/count match the manifest. A legacy
@@ -211,6 +223,25 @@ uv run music-kb --json weekly-run \
   --cnb-transport lfs \
   --download-dry-run
 ```
+
+When a receipt has the recorded build-GPU platform failure and the explicit
+Dev GPU recovery atom is selected, keep the source receipt untouched:
+
+```bash
+uv run python scripts/cnb_campaign_repository.py recover-devgpu \
+  --policy references/cnb-storage-policy.json \
+  --operations-file references/validated-operations.json \
+  --receipt /path/to/run/cnb/campaign-receipt.json \
+  --recovery-receipt /path/to/run/cnb/devgpu-recovery/receipt.json \
+  --run-dir /path/to/run \
+  --transport lfs \
+  --execute --wait
+```
+
+After the recovery receipt proves a complete canonical delivery, invoke the
+weekly publisher with that delivery path. The existing post-analysis resume
+and external-delivery reconciliation own import, release and cleanup; never
+copy recovery success fields into the failed campaign receipt.
 
 On the publisher Mac this is the fastest measured download profile: the proxy
 is propagated to chart capture, the serial Kugou worker, and the two-way

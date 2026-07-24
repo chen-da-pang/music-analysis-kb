@@ -16,6 +16,7 @@ library.  ``prepare_campaign_repository`` is the repository atom,
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import hashlib
 import json
@@ -856,6 +857,118 @@ def generate_campaign_config(
     return "\n".join(lines)
 
 
+def generate_campaign_devgpu_config(
+    policy: Mapping[str, Any],
+    *,
+    campaign_id: str,
+    repository_slug: str,
+    item_count: int,
+    source_manifest_sha256: str,
+) -> str:
+    """Add one receipt-bound full-resume workspace to the generated config."""
+
+    base = generate_campaign_config(
+        policy,
+        campaign_id=campaign_id,
+        repository_slug=repository_slug,
+        item_count=item_count,
+        source_manifest_sha256=source_manifest_sha256,
+    ).rstrip()
+    campaign = policy["campaign_repository"]
+    image = str(policy["verified_runtime_image_digest"])
+    shard_count = int(campaign["shard_count"])
+    input_root = f"data/input/{campaign_id}"
+    manifest_path = f"{input_root}/manifest.jsonl"
+    ledger_branch = str(campaign["ledger_branch_template"]).format(campaign_id=campaign_id)
+    lines = [
+        base,
+        "  vscode:",
+        "  - git:",
+        "      lfs: false",
+        "    docker:",
+        f"      image: {image}",
+        "      volumes:",
+        "      - music-flamingo-output:/workspace/cache/output:read-write",
+        "    services:",
+        "    - vscode",
+        "    runner:",
+        f"      tags: {campaign['runner_tag']}",
+        "    env:",
+        "      PYTHONUNBUFFERED: '1'",
+        "      HF_HUB_ENABLE_HF_TRANSFER: '1'",
+        "      HF_HOME: /opt/huggingface",
+        "      MUSIC_FLAMINGO_MODEL: nvidia/music-flamingo-think-2601-hf",
+        "      MUSIC_FLAMINGO_REVISION: 1ea2109",
+        "      MUSIC_FLAMINGO_MODEL_DIR: /opt/models/music-flamingo-think-2601-hf",
+        f"      CNB_RUNTIME_IMAGE: {image}",
+        f"      MUSIC_FLAMINGO_MAX_NEW_TOKENS: '{int(campaign['max_new_tokens'])}'",
+        f"      MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS: '{campaign['audio_clip_seconds']}'",
+        f"      MUSIC_FLAMINGO_PROMPT: {_yaml_string(DEFAULT_PROMPT)}",
+        "      WORK_DIR: /workspace/cache/output/music_flamingo_pipeline",
+        f"      MUSIC_FLAMINGO_CAMPAIGN_ID: {_yaml_string(campaign_id)}",
+        f"      MUSIC_FLAMINGO_CAMPAIGN_SOURCE_MANIFEST: {_yaml_string(manifest_path)}",
+        f"      MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT: {_yaml_string(input_root)}",
+        f"      MUSIC_FLAMINGO_CAMPAIGN_TRANSPORT: {_yaml_string(campaign['transport'])}",
+        f"      MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT: '{item_count}'",
+        f"      MUSIC_FLAMINGO_CAMPAIGN_SHARD_COUNT: '{shard_count}'",
+        "      MUSIC_FLAMINGO_CAMPAIGN_MAX_PENDING_ITEMS: '0'",
+        "      MUSIC_FLAMINGO_CONTINUE_ON_ERROR: '1'",
+        "      MUSIC_FLAMINGO_EXECUTION_PROFILE: nvidia-l40/full_precision/bfloat16",
+        "      MUSIC_FLAMINGO_DURABLE_LEDGER_REQUIRED: '1'",
+        "      MUSIC_FLAMINGO_LEDGER_CHECKPOINT_EVERY: '5'",
+        f"      MUSIC_FLAMINGO_LEDGER_REPO_URL: {_yaml_string('https://cnb.cool/' + repository_slug + '.git')}",
+        f"      MUSIC_FLAMINGO_LEDGER_BRANCH: {_yaml_string(ledger_branch)}",
+        "      MUSIC_FLAMINGO_LEDGER_GIT_USER_NAME: CNB Music Campaign Ledger",
+        "      MUSIC_FLAMINGO_LEDGER_GIT_USER_EMAIL: cnb-ledger@wuyoumusic.invalid",
+        f"      MUSIC_FLAMINGO_CAMPAIGN_MANIFEST_SHA256: {_yaml_string(source_manifest_sha256)}",
+        "      MUSIC_FLAMINGO_DETAILED_CUDA_TELEMETRY: '0'",
+        "    stages:",
+        "    - name: Run receipt-bound Dev GPU full resume",
+        "      timeout: 4h",
+        "      script: |",
+        "        set -euo pipefail",
+        "        gate_root=\"/workspace/cache/output/music_flamingo_pipeline/devgpu-recovery-${CNB_BUILD_ID}\"",
+        "        mkdir -p \"$gate_root\"",
+        "        python scripts/check_manual_gpu_gate.py --phase before_hydrate --expected-gpu L40 --minimum-free-mib 40000 --max-utilization-percent 0 --receipt \"$gate_root/gpu-before-hydrate.json\"",
+        "        sleep 60",
+        "        python scripts/check_manual_gpu_gate.py --phase stable_before_hydrate --expected-gpu L40 --minimum-free-mib 40000 --max-utilization-percent 0 --receipt \"$gate_root/gpu-stable-before-hydrate.json\"",
+        f"        for shard_index in $(seq 1 {shard_count}); do",
+        "          export MUSIC_FLAMINGO_CAMPAIGN_SHARD_INDEX=\"$shard_index\"",
+        "          export MUSIC_FLAMINGO_CAMPAIGN_SHARD_ID=\"${MUSIC_FLAMINGO_CAMPAIGN_ID}-s${shard_index}\"",
+        "          export MUSIC_FLAMINGO_RUN_ID=\"${CNB_BUILD_ID}-s${shard_index}-hydrate\"",
+        "          hydrate_dir=\"$(python scripts/music_flamingo_run_context.py print-dir)\"",
+        "          mkdir -p \"$hydrate_dir\"",
+        "          bash scripts/campaign_ledger_git.sh restore \"$hydrate_dir/campaign_ledger.jsonl\"",
+        "          bash scripts/prepare_kugou_campaign_shard.sh",
+        "          python scripts/check_manual_gpu_gate.py --phase \"pre_model_s${shard_index}\" --expected-gpu L40 --minimum-free-mib 40000 --max-utilization-percent 0 --receipt \"$gate_root/gpu-pre-model-s${shard_index}.json\"",
+        "          export MUSIC_FLAMINGO_RUN_ID=\"${CNB_BUILD_ID}-s${shard_index}\"",
+        "          export MUSIC_FLAMINGO_OUTPUT_NAME=\"campaign_${MUSIC_FLAMINGO_CAMPAIGN_ID}_devgpu_s${shard_index}\"",
+        "          bash scripts/run_music_flamingo_campaign.sh",
+        "        done",
+        "    lock:",
+        f"      key: {_yaml_string('music-flamingo-' + campaign_id + '-ledger-writer')}",
+        "      wait: true",
+        "      timeout: 15000",
+        "      expires: 18000",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _campaign_config_with_shard(config_path: Path, env: Mapping[str, str]) -> str:
+    config = config_path.read_text(encoding="utf-8")
+    for key, value in env.items():
+        pattern = re.compile(rf"^(\s+{re.escape(key)}:\s*).+$", re.MULTILINE)
+        config, count = pattern.subn(
+            lambda match: match.group(1) + _yaml_string(value), config, count=1
+        )
+        if count != 1:
+            raise CampaignRepositoryError(
+                f"generated campaign config has {count} fields for required override {key}"
+            )
+    return config
+
+
 def _write_gitattributes(checkout: Path, campaign_id: str, transport: str) -> None:
     path = checkout / ".gitattributes"
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -868,15 +981,17 @@ def _git_push_environment() -> tuple[dict[str, str], Path | None]:
     token = os.environ.get("CNB_TOKEN", "")
     if not token:
         raise CampaignRepositoryError("CNB_TOKEN is required for an executable campaign repository push")
-    askpass = Path(tempfile.mkstemp(prefix="music-kb-cnb-askpass.")[1])
-    askpass.write_text(
-        "#!/bin/sh\ncase \"$1\" in\n  *Username*|*username*) printf '%s\\n' cnb ;;\n  *Password*|*password*) printf '%s\\n' \"$CNB_TOKEN\" ;;\n  *) exit 1 ;;\nesac\n",
-        encoding="utf-8",
-    )
-    askpass.chmod(0o700)
+    encoded = base64.b64encode(f"cnb:{token}".encode("utf-8")).decode("ascii")
     env = os.environ.copy()
-    env.update({"GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0"})
-    return env, askpass
+    env.update(
+        {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {encoded}",
+        }
+    )
+    return env, None
 
 
 def _export_runtime(
@@ -1485,18 +1600,19 @@ def submit_campaign(
                 "MUSIC_FLAMINGO_CAMPAIGN_SHARD_ID": shard_id,
                 "MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT": str(receipt["manifest"]["item_count"]),
             }
-            body = json.dumps(
-                {
-                    "branch": str(campaign["branch"]),
-                    "event": str(campaign["event"]),
-                    "env": env,
-                    "sync": "false",
-                    "title": f"Music Flamingo disposable campaign {receipt['run_id']} shard {index}/{shard_count}",
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
+            title = f"Music Flamingo disposable campaign {receipt['run_id']} shard {index}/{shard_count}"
+            config = _campaign_config_with_shard(Path(str(receipt["campaign_repository_config"])), env)
+            response = runner(
+                [
+                    "cnb", "build", "start-build", "--repo", repository,
+                    "--branch", str(campaign["branch"]),
+                    "--event", str(campaign["event"]),
+                    "--sync", "false",
+                    "--title", title,
+                    "--config", config,
+                    "--verbose",
+                ]
             )
-            response = runner(["cnb", "build", "start-build", "--repo", repository, "--data", body, "--verbose"])
             sn = _extract_build_sn(response)
             attempts = len(retry_history.get(index, [])) + 1
             builds.append(
@@ -1541,6 +1657,338 @@ def submit_campaign(
         receipt["failure"] = {"message": str(exc), "phase": "submit_or_recover"}
         receipt["updated_at"] = now_iso()
         _atomic_write_json(receipt_file, receipt)
+        raise
+
+
+def _authenticated_git_output(command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> str:
+    completed = subprocess.run(list(command), cwd=str(cwd), env=dict(env), text=True, capture_output=True, check=False)
+    if completed.returncode:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise CampaignRepositoryError(f"authenticated git command failed ({completed.returncode}): {detail}")
+    return completed.stdout.strip()
+
+
+def _prepare_devgpu_overlay(
+    *,
+    policy: Mapping[str, Any],
+    source_receipt: Mapping[str, Any],
+    recovery_dir: Path,
+) -> dict[str, Any]:
+    checkout = Path(str(source_receipt["checkout"])).expanduser().resolve()
+    campaign_commit = str(source_receipt.get("campaign_commit", ""))
+    if not re.fullmatch(r"[0-9a-f]{40}", campaign_commit):
+        raise CampaignRepositoryError("source receipt has no valid campaign_commit")
+    if _run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).stdout.strip() != campaign_commit:
+        raise CampaignRepositoryError("source checkout HEAD no longer matches campaign_commit")
+    for relative in ("scripts/check_manual_gpu_gate.py", "scripts/run_music_flamingo_campaign.sh"):
+        if not (checkout / relative).is_file():
+            raise CampaignRepositoryError(f"Dev GPU recovery runtime file is missing: {relative}")
+
+    env, askpass = _git_push_environment()
+    try:
+        remote = f"https://cnb.cool/{source_receipt['repository']}.git"
+        remote_main = _authenticated_git_output(
+            ["git", "ls-remote", remote, "refs/heads/main"], cwd=checkout, env=env
+        ).split()
+        if not remote_main or remote_main[0] != campaign_commit:
+            raise CampaignRepositoryError("remote campaign main no longer matches the receipt campaign_commit")
+
+        branch = f"codex/devgpu-recovery-{source_receipt['run_id']}"
+        config = generate_campaign_devgpu_config(
+            policy,
+            campaign_id=str(source_receipt["run_id"]),
+            repository_slug=str(source_receipt["repository"]),
+            item_count=int(source_receipt["manifest"]["item_count"]),
+            source_manifest_sha256=str(source_receipt["manifest"]["sha256"]),
+        )
+        expected_config_sha256 = hashlib.sha256(config.encode("utf-8")).hexdigest()
+        remote_overlay = _authenticated_git_output(
+            ["git", "ls-remote", remote, f"refs/heads/{branch}"], cwd=checkout, env=env
+        ).split()
+        overlay = recovery_dir / "overlay"
+        if overlay.exists():
+            shutil.rmtree(overlay)
+        _run(["git", "-C", str(checkout), "worktree", "prune"])
+        if remote_overlay:
+            overlay_commit = remote_overlay[0]
+            _authenticated_git_output(
+                ["git", "fetch", "origin", f"refs/heads/{branch}"], cwd=checkout, env=env
+            )
+            _run(["git", "-C", str(checkout), "worktree", "add", "--force", "--detach", str(overlay), overlay_commit])
+            parent = _run(["git", "rev-parse", "HEAD^"], cwd=overlay).stdout.strip()
+            if parent != campaign_commit or sha256_file(overlay / ".cnb.yml") != expected_config_sha256:
+                raise CampaignRepositoryError("existing Dev GPU overlay is not the exact receipt-bound config")
+            return {
+                "branch": branch,
+                "commit": overlay_commit,
+                "parent_campaign_commit": campaign_commit,
+                "config_sha256": expected_config_sha256,
+                "path": str(overlay),
+                "reused": True,
+            }
+        _run(["git", "-C", str(checkout), "worktree", "add", "--force", "--detach", str(overlay), campaign_commit])
+        _run(["git", "checkout", "-B", branch], cwd=overlay)
+        (overlay / ".cnb.yml").write_text(config, encoding="utf-8")
+        _run(["git", "config", "user.name", "Music KB Dev GPU Recovery"], cwd=overlay)
+        _run(["git", "config", "user.email", "music-kb-devgpu@wuyoumusic.invalid"], cwd=overlay)
+        _run(["git", "config", "commit.gpgSign", "false"], cwd=overlay)
+        _run(["git", "add", ".cnb.yml"], cwd=overlay)
+        _run(["git", "commit", "-qm", f"Dev GPU recovery {source_receipt['run_id']}"], cwd=overlay)
+        overlay_commit = _run(["git", "rev-parse", "HEAD"], cwd=overlay).stdout.strip()
+        _run_git_authenticated(
+            ["git", "push", "-u", "origin", f"HEAD:refs/heads/{branch}"], cwd=overlay, env=env
+        )
+        remote_overlay = _authenticated_git_output(
+            ["git", "ls-remote", remote, f"refs/heads/{branch}"], cwd=overlay, env=env
+        ).split()
+        if not remote_overlay or remote_overlay[0] != overlay_commit:
+            raise CampaignRepositoryError("Dev GPU overlay branch did not verify after push")
+        return {
+            "branch": branch,
+            "commit": overlay_commit,
+            "parent_campaign_commit": campaign_commit,
+            "config_sha256": expected_config_sha256,
+            "path": str(overlay),
+            "reused": False,
+        }
+    finally:
+        if askpass is not None:
+            askpass.unlink(missing_ok=True)
+
+
+def _workspace_recovery_stage_status(repository: str, sn: str, runner: JsonRunner) -> tuple[str, str | None]:
+    response = runner(["cnb", "build", "get-build-status", "--repo", repository, "--sn", sn, "--verbose"])
+    data = _response_data(response) or {}
+    pipelines = data.get("pipelinesStatus", {}) if isinstance(data, Mapping) else {}
+    for pipeline_id, pipeline in (pipelines.items() if isinstance(pipelines, Mapping) else []):
+        for stage in (pipeline.get("stages", []) if isinstance(pipeline, Mapping) else []):
+            if stage.get("id") == "stage-0" or stage.get("name") == "Run receipt-bound Dev GPU full resume":
+                status = str(stage.get("status", "")).lower()
+                if status in TERMINAL_BUILD_STATES:
+                    return status, str(pipeline_id)
+                return "running", str(pipeline_id)
+    overall = str(data.get("status", "")).lower() if isinstance(data, Mapping) else ""
+    if overall == "success":
+        raise CampaignRepositoryError(
+            "Dev GPU workspace reported success without the receipt-bound full-resume stage"
+        )
+    return (overall if overall in TERMINAL_BUILD_STATES else "running"), None
+
+
+def _verify_build_gpu_platform_gate(source_receipt: Mapping[str, Any], runner: JsonRunner) -> dict[str, Any]:
+    """Prove every submitted shard stopped at the CNB build-GPU prepare quota gate."""
+
+    failure = source_receipt.get("failure")
+    if not isinstance(failure, Mapping) or failure.get("phase") != "submit_or_recover":
+        raise CampaignRepositoryError("Dev GPU recovery requires a submit_or_recover source failure")
+    builds = source_receipt.get("builds")
+    if not isinstance(builds, list) or not builds:
+        raise CampaignRepositoryError("Dev GPU recovery requires receipt-bound failed build records")
+    repository = str(source_receipt["repository"])
+    evidence: list[dict[str, Any]] = []
+    for build in builds:
+        if not isinstance(build, Mapping) or not str(build.get("sn", "")).strip():
+            raise CampaignRepositoryError("Dev GPU recovery source contains a build without an SN")
+        sn = str(build["sn"])
+        status_response = runner(
+            ["cnb", "build", "get-build-status", "--repo", repository, "--sn", sn, "--verbose"]
+        )
+        status_data = _response_data(status_response) or {}
+        pipelines = status_data.get("pipelinesStatus", {}) if isinstance(status_data, Mapping) else {}
+        matched: dict[str, Any] | None = None
+        for pipeline_id, pipeline in (pipelines.items() if isinstance(pipelines, Mapping) else []):
+            if not isinstance(pipeline, Mapping):
+                continue
+            stages = pipeline.get("stages", [])
+            prepare = next(
+                (
+                    stage
+                    for stage in stages
+                    if isinstance(stage, Mapping)
+                    and (stage.get("id") == "prepare" or stage.get("name") == "Prepare")
+                ),
+                None,
+            )
+            inference = next(
+                (
+                    stage
+                    for stage in stages
+                    if isinstance(stage, Mapping)
+                    and (
+                        stage.get("id") == "stage-0"
+                        or stage.get("name") == "Run disposable Music Flamingo campaign shard"
+                    )
+                ),
+                None,
+            )
+            if not isinstance(prepare, Mapping) or str(prepare.get("status", "")).lower() not in {"error", "failed"}:
+                continue
+            if not isinstance(inference, Mapping) or str(inference.get("status", "")).lower() != "skipped":
+                continue
+            stage_id = str(prepare.get("id") or "prepare")
+            stage_response = runner(
+                [
+                    "cnb", "build", "get-build-stage", "--repo", repository, "--sn", sn,
+                    "--pipelineId", str(pipeline_id), "--stageId", stage_id, "--verbose",
+                ]
+            )
+            stage_data = _response_data(stage_response) or {}
+            serialized = json.dumps(stage_data, ensure_ascii=False).lower()
+            if "gpu core-hours" not in serialized or "pre-freezing" not in serialized:
+                continue
+            detail = str(stage_data.get("error", "")) if isinstance(stage_data, Mapping) else ""
+            matched = {
+                "sn": sn,
+                "pipeline_id": str(pipeline_id),
+                "prepare_stage_id": stage_id,
+                "prepare_status": str(prepare.get("status", "")).lower(),
+                "inference_status": str(inference.get("status", "")).lower(),
+                "classification": "cnb_build_gpu_pre_freezing_quota",
+                "detail": detail,
+            }
+            break
+        if matched is None:
+            raise CampaignRepositoryError(
+                f"build {sn} does not prove the CNB build-GPU pre-freezing quota gate"
+            )
+        evidence.append(matched)
+    return {
+        "classification": "cnb_build_gpu_pre_freezing_quota",
+        "verified_at": now_iso(),
+        "builds": evidence,
+    }
+
+
+def recover_campaign_with_devgpu(
+    *,
+    policy_path: str | Path,
+    operations_path: str | Path,
+    source_receipt_path: str | Path,
+    recovery_receipt_path: str | Path,
+    run_dir: str | Path,
+    execute: bool = False,
+    wait: bool = True,
+    timeout_seconds: float = 14_400,
+    poll_seconds: float = 10.0,
+    runner: JsonRunner = run_cnb,
+    transport: str | None = None,
+) -> dict[str, Any]:
+    """Recover a failed build-GPU campaign through one full Dev GPU workspace."""
+
+    operations = Path(operations_path).expanduser().resolve()
+    load_validated_operations(operations, required_atom="cnb_campaign_devgpu_recovery")
+    operations_sha256 = sha256_file(operations)
+    policy = _policy_with_transport(load_campaign_policy(policy_path), transport)
+    source_file = Path(source_receipt_path).expanduser().resolve()
+    source = _read_json(source_file)
+    binding = validate_campaign_receipt_binding(policy, source)
+    errors = list(binding["errors"])
+    if source.get("status") not in {"failed", "interrupted"}:
+        errors.append("Dev GPU recovery requires a failed or interrupted source receipt")
+    if source.get("repository_created") is not True or source.get("repository_pushed") is not True:
+        errors.append("source receipt lacks repository creation/push proof")
+    if source.get("delivery") is not None:
+        errors.append("source receipt already has a delivery")
+    if errors:
+        raise CampaignRepositoryError("Dev GPU recovery source is invalid: " + "; ".join(errors))
+    platform_gate = _verify_build_gpu_platform_gate(source, runner)
+    if not _repo_exists(str(source["repository"]), runner):
+        raise CampaignRepositoryError("receipt-bound campaign repository is missing")
+
+    recovery_file = Path(recovery_receipt_path).expanduser().resolve()
+    run_dir_path = Path(run_dir).expanduser().resolve()
+    recovery_dir = recovery_file.parent
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    existing = _read_json(recovery_file) if recovery_file.is_file() else {}
+    if existing.get("status") == "completed":
+        return {**existing, "receipt": str(recovery_file)}
+    receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "atom": "cnb_campaign_devgpu_recovery",
+        "status": "planned" if not execute else "preparing",
+        "operations_sha256": operations_sha256,
+        "source_receipt": str(source_file),
+        "source_receipt_sha256": sha256_file(source_file),
+        "run_id": source["run_id"],
+        "repository": source["repository"],
+        "manifest": copy.deepcopy(source["manifest"]),
+        "runtime_image": source["runtime_image"],
+        "campaign_commit": source["campaign_commit"],
+        "build_gpu_platform_gate": platform_gate,
+        "created_at": existing.get("created_at") or now_iso(),
+        "updated_at": now_iso(),
+        "failure": None,
+    }
+    _atomic_write_json(recovery_file, receipt)
+    if not execute:
+        receipt["receipt"] = str(recovery_file)
+        return receipt
+    if not wait:
+        raise CampaignRepositoryError("executable Dev GPU recovery must wait for the full workspace stage")
+
+    workspace_sn = ""
+    try:
+        overlay = _prepare_devgpu_overlay(policy=policy, source_receipt=source, recovery_dir=recovery_dir)
+        receipt["overlay"] = overlay
+        receipt["status"] = "starting_workspace"
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(recovery_file, receipt)
+        response = runner(
+            [
+                "cnb", "workspace", "start-workspace", "--repo", str(source["repository"]),
+                "--branch", str(overlay["branch"]), "--verbose",
+            ]
+        )
+        workspace_sn = _extract_build_sn(response)
+        receipt["workspace"] = {"sn": workspace_sn, "status": "submitted"}
+        receipt["status"] = "running"
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(recovery_file, receipt)
+        started = time.monotonic()
+        pipeline_id: str | None = None
+        while True:
+            if time.monotonic() - started > timeout_seconds:
+                raise CampaignRepositoryError(f"Dev GPU recovery workspace timed out: {workspace_sn}")
+            status, pipeline_id = _workspace_recovery_stage_status(str(source["repository"]), workspace_sn, runner)
+            receipt["workspace"].update({"status": status, "pipeline_id": pipeline_id})
+            receipt["updated_at"] = now_iso()
+            _atomic_write_json(recovery_file, receipt)
+            if status in TERMINAL_BUILD_STATES:
+                if status != "success":
+                    raise CampaignRepositoryError(f"Dev GPU recovery stage reached terminal status {status}")
+                break
+            time.sleep(max(0.1, poll_seconds))
+        try:
+            runner(["cnb", "workspace", "workspace-stop", "--sn", workspace_sn, "--verbose"])
+            receipt["workspace"]["stopped"] = True
+        except Exception as exc:
+            receipt["workspace"]["stop_error"] = str(exc)
+            raise CampaignRepositoryError(f"Dev GPU recovery succeeded but workspace stop failed: {exc}") from exc
+        delivery_source = dict(source)
+        delivery_source["ledger_branch"] = str(policy["campaign_repository"]["ledger_branch_template"]).format(
+            campaign_id=source["run_id"]
+        )
+        delivery = _recover_delivery(delivery_source, run_dir=run_dir_path, require_source_url=True)
+        receipt["logical_shards"] = [
+            {"index": index, "id": f"{source['run_id']}-s{index}", "status": "success", "workspace_sn": workspace_sn}
+            for index in range(1, int(policy["campaign_repository"]["shard_count"]) + 1)
+        ]
+        receipt["delivery"] = delivery
+        receipt["status"] = "completed"
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(recovery_file, receipt)
+        return {**receipt, "receipt": str(recovery_file)}
+    except Exception as exc:
+        if workspace_sn:
+            try:
+                runner(["cnb", "workspace", "workspace-stop", "--sn", workspace_sn, "--verbose"])
+                receipt.setdefault("workspace", {})["stopped_after_failure"] = True
+            except Exception as stop_exc:
+                receipt.setdefault("workspace", {})["stop_error"] = str(stop_exc)
+        receipt["status"] = "failed"
+        receipt["failure"] = {"phase": "devgpu_recovery", "message": str(exc)}
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(recovery_file, receipt)
         raise
 
 
@@ -2242,6 +2690,7 @@ def _parser() -> argparse.ArgumentParser:
             "preflight",
             "prepare",
             "submit",
+            "recover-devgpu",
             "cleanup",
             "reconcile-external-delivery",
             "cleanup-reconciled-external-delivery",
@@ -2255,6 +2704,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--recovery-receipt", type=Path)
     parser.add_argument("--delivery", type=Path)
     parser.add_argument("--release-manifest", type=Path)
     parser.add_argument("--reconciliation-receipt", type=Path)
@@ -2323,6 +2773,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_seconds=args.timeout_seconds,
                 poll_seconds=args.poll_seconds,
                 require_source_url=args.require_source_url,
+                transport=args.transport,
+            )
+        elif args.action == "recover-devgpu":
+            if not args.receipt or not args.recovery_receipt or not args.run_dir:
+                raise CampaignRepositoryError(
+                    "recover-devgpu requires --receipt, --recovery-receipt, and --run-dir"
+                )
+            result = recover_campaign_with_devgpu(
+                policy_path=args.policy,
+                operations_path=args.operations_file,
+                source_receipt_path=args.receipt,
+                recovery_receipt_path=args.recovery_receipt,
+                run_dir=args.run_dir,
+                execute=args.execute,
+                wait=args.wait,
+                timeout_seconds=args.timeout_seconds,
+                poll_seconds=args.poll_seconds,
                 transport=args.transport,
             )
         elif args.action == "cleanup":
