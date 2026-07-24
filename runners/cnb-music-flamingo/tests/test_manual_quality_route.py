@@ -231,7 +231,24 @@ class ManualQualityRouteTests(unittest.TestCase):
                     no_repeat_ngram_size="5",
                 )
 
-    def test_refuses_attempt_to_raise_manual_batch_cap(self) -> None:
+    def test_accepts_exact_six_item_final_quality_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self._request(
+                Path(temp_dir),
+                selection="1\n2\n3\n4\n5\n6\n",
+                ledger_branch="campaign-results/campaign-a-quality-rerun-final-six",
+                source_count=6,
+                max_selected_count=6,
+            )
+
+        self.assertEqual(result["selected_item_count"], 6)
+        self.assertEqual(result["max_selected_count"], 6)
+        self.assertEqual(
+            result["selected_item_ids"],
+            ["track-001", "track-002", "track-003", "track-004", "track-005", "track-006"],
+        )
+
+    def test_refuses_attempt_to_raise_manual_batch_cap_above_six(self) -> None:
         from manual_kugou_quality_route import ManualQualityRouteError
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -240,7 +257,7 @@ class ManualQualityRouteTests(unittest.TestCase):
                     Path(temp_dir),
                     selection="1\n",
                     ledger_branch="campaign-results/campaign-a-quality-rerun-l40-probe-1",
-                    max_selected_count=6,
+                    max_selected_count=7,
                 )
 
     def test_cli_receipt_records_required_quality_controls(self) -> None:
