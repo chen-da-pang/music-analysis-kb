@@ -113,6 +113,38 @@ def cnb_runner_factory(*, target_present: bool = False, existing: list[str] | No
     return state, commands, run
 
 
+def test_run_cnb_rejects_zero_exit_api_authorization_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        MODULE,
+        "_run_json",
+        lambda _command: {
+            "status": 403,
+            "data": {
+                "errcode": 10023,
+                "errmsg": "The token's authorization scope does not match this request. Missing required scopes: repo-delete:rw",
+            },
+        },
+    )
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="status 403.*repo-delete:rw"):
+        MODULE.run_cnb(["cnb", "repositories", "delete-repo"])
+
+
+def test_cnb_optional_still_converts_api_404_to_absence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        MODULE,
+        "_run_json",
+        lambda _command: {"status": 404, "data": {"errcode": 5, "errmsg": "not found"}},
+    )
+
+    response, absent = MODULE._cnb_optional(
+        ["cnb", "repositories", "get-by-id"], MODULE.run_cnb
+    )
+
+    assert response is None
+    assert absent is True
+
+
 def receipt_identity(tmp_path: Path, *, run_id: str = "run-1", count: int = 1) -> dict:
     repository = f"org/music-flamingo-campaign-{run_id}"
     source_manifest = tmp_path / f"{run_id}-source-manifest.jsonl"
