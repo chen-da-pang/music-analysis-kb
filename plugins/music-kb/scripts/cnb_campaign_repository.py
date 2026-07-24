@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -31,14 +32,19 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 try:
+    from music_kb.campaign_delivery import load_campaign_delivery_file
     from music_kb.operation_context import load_validated_operations, now_iso, sha256_file
+    from music_kb.snapshot import verify_snapshot
 except ModuleNotFoundError:  # Allow the documented direct ``python script.py`` invocation.
     _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(_PLUGIN_ROOT / "src"))
+    from music_kb.campaign_delivery import load_campaign_delivery_file
     from music_kb.operation_context import load_validated_operations, now_iso, sha256_file
+    from music_kb.snapshot import verify_snapshot
 
 
 RECEIPT_SCHEMA_VERSION = 1
+EXTERNAL_DELIVERY_RECONCILIATION_SCHEMA_VERSION = 1
 SAFE_RUN_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SAFE_CAMPAIGN_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -347,6 +353,106 @@ def _read_manifest(staging: Path, *, expected_count: int | None = None) -> dict[
         "source_links": sum(1 for row in rows if row.get("source_url")),
         "campaign_id": campaign_id,
     }
+
+
+def _read_manifest_contract(
+    manifest_path: str | Path, *, expected_count: int | None = None
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Read immutable manifest evidence after its staging audio was purged.
+
+    A completed campaign may deliberately remove local/CNB staging audio after
+    delivery and release.  Reconciliation must still bind the preserved JSONL
+    to the original receipt, but it must not pretend that missing disposable
+    audio can be re-hashed.  This parser validates the manifest's own strict
+    contract and leaves actual-file validation to the earlier materialization
+    and delivery evidence.
+    """
+
+    manifest = Path(manifest_path).expanduser().resolve()
+    if not manifest.is_file():
+        raise CampaignRepositoryError(f"campaign source manifest is missing: {manifest}")
+    try:
+        raw = manifest.read_bytes()
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CampaignRepositoryError(f"campaign source manifest is unreadable: {manifest}: {exc}") from exc
+    if not raw or b"\r" in raw or not raw.endswith(b"\n"):
+        raise CampaignRepositoryError("campaign source manifest must be non-empty UTF-8 JSONL with LF line endings")
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    campaign_id: str | None = None
+    physical_lines = text.split("\n")
+    if physical_lines[-1] != "":
+        raise CampaignRepositoryError("campaign source manifest must end with one LF")
+    for line_number, line in enumerate(physical_lines[:-1], 1):
+        if not line:
+            raise CampaignRepositoryError(f"campaign source manifest has an empty line at {line_number}")
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise CampaignRepositoryError(
+                f"campaign source manifest JSON error at line {line_number}: {exc}"
+            ) from exc
+        if not isinstance(row, dict):
+            raise CampaignRepositoryError(f"campaign source manifest row {line_number} is not an object")
+        item_id = str(row.get("id", "")).strip()
+        if not item_id or item_id in seen or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", item_id):
+            raise CampaignRepositoryError(
+                f"campaign source manifest row {line_number} has missing/duplicate/unsafe id"
+            )
+        seen.add(item_id)
+        row_campaign_id = str(row.get("campaign_id", "")).strip()
+        if not row_campaign_id:
+            raise CampaignRepositoryError(f"campaign source manifest row {line_number} has no campaign_id")
+        if campaign_id is None:
+            campaign_id = row_campaign_id
+        elif row_campaign_id != campaign_id:
+            raise CampaignRepositoryError("campaign source manifest mixes campaign_id values")
+        relative = str(row.get("relative_audio_path", "")).strip()
+        pure = PurePosixPath(relative)
+        if not relative or pure.is_absolute() or ".." in pure.parts or not pure.parts or pure.parts[0] != "audio":
+            raise CampaignRepositoryError(
+                f"campaign source manifest row {line_number} has unsafe relative_audio_path"
+            )
+        source_bytes = row.get("source_bytes")
+        if isinstance(source_bytes, bool) or not isinstance(source_bytes, int) or source_bytes <= 0:
+            raise CampaignRepositoryError(
+                f"campaign source manifest row {line_number} has invalid source_bytes"
+            )
+        source_sha256 = str(row.get("sha256", "")).strip().lower()
+        if not SHA256.fullmatch(source_sha256):
+            raise CampaignRepositoryError(
+                f"campaign source manifest row {line_number} has invalid sha256"
+            )
+        if not str(row.get("title", "")).strip() or not str(row.get("artist", "")).strip():
+            raise CampaignRepositoryError(
+                f"campaign source manifest row {line_number} has no title or artist"
+            )
+        source_url = str(row.get("source_url", "")).strip()
+        parsed = urlsplit(source_url)
+        if not source_url or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise CampaignRepositoryError(
+                f"campaign source manifest row {line_number} has missing or unsafe source_url"
+            )
+        rows.append(dict(row))
+    if expected_count is not None and len(rows) != expected_count:
+        raise CampaignRepositoryError(
+            f"campaign source manifest count {len(rows)} != expected {expected_count}"
+        )
+    if not rows or campaign_id is None:
+        raise CampaignRepositoryError("campaign source manifest is empty")
+    return (
+        {
+            "path": str(manifest),
+            "sha256": sha256_file(manifest),
+            "item_count": len(rows),
+            "source_bytes": sum(int(row["source_bytes"]) for row in rows),
+            "source_links": len(rows),
+            "campaign_id": campaign_id,
+        },
+        rows,
+    )
 
 
 def _manifest_binding_fields(summary: Mapping[str, Any]) -> dict[str, Any]:
@@ -1516,6 +1622,527 @@ def cleanup_receipt_validation_errors(
     return sorted(set(errors))
 
 
+_MANIFEST_DELIVERY_IDENTITY_FIELDS = (
+    "campaign_id",
+    "id",
+    "manifest_index",
+    "title",
+    "artist",
+    "relative_audio_path",
+    "source_sha256",
+    "source_bytes",
+    "source_url",
+)
+_DELIVERY_RELEASE_IDENTITY_FIELDS = (
+    *_MANIFEST_DELIVERY_IDENTITY_FIELDS,
+    "output_text_sha256",
+    "generated_token_count",
+    "max_new_tokens",
+    "contract",
+    "attempt_id",
+    "canonical_source",
+)
+
+
+def _manifest_identity_map(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for line_number, row in enumerate(rows, 1):
+        item_id = str(row["id"])
+        if item_id in result:
+            raise CampaignRepositoryError(f"duplicate manifest identity during reconciliation: {item_id}")
+        result[item_id] = {
+            "campaign_id": str(row["campaign_id"]),
+            "id": item_id,
+            "manifest_index": line_number,
+            "title": str(row["title"]),
+            "artist": str(row["artist"]),
+            "relative_audio_path": str(row["relative_audio_path"]),
+            "source_sha256": str(row["sha256"]),
+            "source_bytes": int(row["source_bytes"]),
+            "source_url": str(row["source_url"]),
+        }
+    return result
+
+
+def _delivery_identity_map(entries: Sequence[Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        item_id = str(entry.delivery_id)
+        if item_id in result:
+            raise CampaignRepositoryError(f"duplicate external delivery identity during reconciliation: {item_id}")
+        result[item_id] = {
+            "campaign_id": str(entry.campaign_id),
+            "id": item_id,
+            "manifest_index": int(entry.manifest_index),
+            "title": str(entry.title),
+            "artist": str(entry.artist),
+            "relative_audio_path": str(entry.relative_audio_path),
+            "source_sha256": str(entry.source_sha256),
+            "source_bytes": int(entry.source_bytes),
+            "source_url": str(entry.source_url or ""),
+            "output_text_sha256": str(entry.output_text_sha256),
+            "generated_token_count": int(entry.generated_token_count),
+            "max_new_tokens": int(entry.max_new_tokens),
+            "contract": str(entry.contract),
+            "attempt_id": str(entry.attempt_id),
+            "canonical_source": str(entry.canonical_source),
+        }
+    return result
+
+
+def _release_identity_map(
+    release_manifest: str | Path, *, campaign_id: str
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Verify the immutable release and recover its exact delivery provenance."""
+
+    release = verify_snapshot(Path(release_manifest).expanduser().resolve())
+    database = Path(str(release["database"])).expanduser().resolve()
+    connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """
+            SELECT c.campaign_id, c.delivery_id, c.manifest_index,
+                   c.source_title, c.source_artist, c.relative_audio_path,
+                   c.source_sha256, c.source_bytes, c.output_text_sha256,
+                   c.generated_token_count, c.max_new_tokens, c.contract,
+                   c.attempt_id, c.canonical_source, st.source_url
+            FROM campaign_delivery_provenance AS c
+            JOIN analysis_revision AS ar ON ar.id = c.analysis_id
+            JOIN source_track AS st
+              ON st.recording_id = ar.recording_id
+             AND st.source_name = 'kugou'
+             AND st.source_track_id = c.delivery_id
+            WHERE c.campaign_id = ?
+            ORDER BY c.manifest_index, c.delivery_id
+            """,
+            (campaign_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        item_id = str(row["delivery_id"])
+        if item_id in result:
+            raise CampaignRepositoryError(
+                f"release has duplicate campaign provenance for delivery id: {item_id}"
+            )
+        result[item_id] = {
+            "campaign_id": str(row["campaign_id"]),
+            "id": item_id,
+            "manifest_index": int(row["manifest_index"]),
+            "title": str(row["source_title"]),
+            "artist": str(row["source_artist"]),
+            "relative_audio_path": str(row["relative_audio_path"]),
+            "source_sha256": str(row["source_sha256"]),
+            "source_bytes": int(row["source_bytes"]),
+            "source_url": str(row["source_url"] or ""),
+            "output_text_sha256": str(row["output_text_sha256"]),
+            "generated_token_count": int(row["generated_token_count"]),
+            "max_new_tokens": int(row["max_new_tokens"]),
+            "contract": str(row["contract"]),
+            "attempt_id": str(row["attempt_id"]),
+            "canonical_source": str(row["canonical_source"]),
+        }
+    return release, result
+
+
+def _identity_map_errors(
+    expected: Mapping[str, Mapping[str, Any]],
+    actual: Mapping[str, Mapping[str, Any]],
+    *,
+    fields: Sequence[str],
+    expected_name: str,
+    actual_name: str,
+) -> list[str]:
+    errors: list[str] = []
+    expected_ids = set(expected)
+    actual_ids = set(actual)
+    if expected_ids != actual_ids:
+        errors.append(
+            f"{expected_name}/{actual_name} identity set differs: "
+            f"missing={sorted(expected_ids - actual_ids)[:10]} extra={sorted(actual_ids - expected_ids)[:10]}"
+        )
+    for item_id in sorted(expected_ids & actual_ids):
+        mismatched = [
+            field for field in fields if expected[item_id].get(field) != actual[item_id].get(field)
+        ]
+        if mismatched:
+            errors.append(
+                f"{expected_name}/{actual_name} identity mismatch for {item_id}: {', '.join(mismatched)}"
+            )
+    return errors
+
+
+def _identity_set_sha256(rows: Mapping[str, Mapping[str, Any]]) -> str:
+    payload = [dict(rows[item_id]) for item_id in sorted(rows)]
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _external_delivery_reconciliation_proof(
+    *,
+    policy: Mapping[str, Any],
+    source_receipt_path: str | Path,
+    delivery_path: str | Path,
+    release_manifest_path: str | Path,
+) -> dict[str, Any]:
+    """Build a fail-closed proof for a legacy receipt with external delivery.
+
+    The original failed receipt remains immutable.  The only acceptable
+    substitute for its missing delivery field is an independently revalidated
+    delivery which exactly matches the original manifest and is present in a
+    verified immutable SQLite release.
+    """
+
+    source_receipt_file = Path(source_receipt_path).expanduser().resolve()
+    receipt = _read_json(source_receipt_file)
+    source_receipt_sha256 = sha256_file(source_receipt_file)
+    manifest = receipt.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise CampaignRepositoryError("legacy receipt has no manifest for external-delivery reconciliation")
+    manifest_path = Path(str(manifest.get("path", ""))).expanduser().resolve()
+    manifest_summary, manifest_rows = _read_manifest_contract(
+        manifest_path,
+        expected_count=int(manifest.get("item_count", 0)),
+    )
+    errors = campaign_receipt_binding_errors(policy, receipt, manifest=manifest_summary)
+    if receipt.get("status") not in {"failed", "interrupted"}:
+        errors.append("external-delivery reconciliation only accepts a failed or interrupted legacy receipt")
+    if receipt.get("delivery") is not None:
+        errors.append("legacy receipt already has a delivery; ordinary receipt-bound cleanup is required")
+    if receipt.get("repository_created") is not True or receipt.get("repository_pushed") is not True:
+        errors.append("legacy receipt lacks repository creation/push provenance")
+    runtime_export = receipt.get("runtime_export")
+    if not isinstance(runtime_export, Mapping) or runtime_export.get("validated") is not True:
+        errors.append("legacy receipt lacks validated runtime export provenance")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(receipt.get("github_commit", ""))):
+        errors.append("legacy receipt lacks a valid GitHub source commit")
+    repository = str(receipt.get("repository", ""))
+    if repository == str(policy.get("protected_runtime_repository_slug", "")):
+        errors.append("legacy receipt targets the protected runtime repository")
+    if errors:
+        return {"valid": False, "errors": sorted(set(errors))}
+
+    delivery_file = Path(delivery_path).expanduser().resolve()
+    entries = load_campaign_delivery_file(delivery_file, expected_count=int(manifest_summary["item_count"]))
+    manifest_identity = _manifest_identity_map(manifest_rows)
+    delivery_identity = _delivery_identity_map(entries)
+    errors.extend(
+        _identity_map_errors(
+            manifest_identity,
+            delivery_identity,
+            fields=_MANIFEST_DELIVERY_IDENTITY_FIELDS,
+            expected_name="source manifest",
+            actual_name="external delivery",
+        )
+    )
+    if any(not str(row["source_url"]) for row in delivery_identity.values()):
+        errors.append("external delivery is missing one or more source_url values")
+    release_file = Path(release_manifest_path).expanduser().resolve()
+    release, release_identity = _release_identity_map(
+        release_file,
+        campaign_id=str(manifest_summary["campaign_id"]),
+    )
+    errors.extend(
+        _identity_map_errors(
+            delivery_identity,
+            release_identity,
+            fields=_DELIVERY_RELEASE_IDENTITY_FIELDS,
+            expected_name="external delivery",
+            actual_name="verified release",
+        )
+    )
+    if errors:
+        return {"valid": False, "errors": sorted(set(errors))}
+    return {
+        "valid": True,
+        "source_campaign_receipt": {
+            "path": str(source_receipt_file),
+            "sha256": source_receipt_sha256,
+            "run_id": str(receipt["run_id"]),
+            "repository": repository,
+            "github_commit": str(receipt["github_commit"]),
+            "manifest": manifest_summary,
+        },
+        "external_delivery": {
+            "path": str(delivery_file),
+            "sha256": sha256_file(delivery_file),
+            "count": len(entries),
+            "campaign_id": str(manifest_summary["campaign_id"]),
+        },
+        "release": {
+            "manifest": str(release_file),
+            "manifest_sha256": sha256_file(release_file),
+            "database": str(release["database"]),
+            "database_sha256": str(release["sha256"]),
+            "release_name": str(release["release_name"]),
+        },
+        "identity": {
+            "count": len(delivery_identity),
+            "sha256": _identity_set_sha256(delivery_identity),
+        },
+    }
+
+
+def reconcile_external_delivery(
+    *,
+    policy_path: str | Path,
+    operations_path: str | Path,
+    source_receipt_path: str | Path,
+    delivery_path: str | Path,
+    release_manifest_path: str | Path,
+    reconciliation_receipt_path: str | Path,
+    transport: str | None = None,
+) -> dict[str, Any]:
+    """Persist a separate proof for a legacy campaign; never edit its receipt."""
+
+    operations = Path(operations_path).expanduser().resolve()
+    load_validated_operations(operations, required_atom="cnb_campaign_cleanup")
+    reconciliation_file = Path(reconciliation_receipt_path).expanduser().resolve()
+    result: dict[str, Any] = {
+        "schema_version": EXTERNAL_DELIVERY_RECONCILIATION_SCHEMA_VERSION,
+        "atom": "cnb_external_delivery_reconciliation",
+        "action": "reconcile-external-delivery",
+        "operations_sha256": sha256_file(operations),
+        "status": "blocked",
+        "proof": None,
+        "failures": [],
+        "updated_at": now_iso(),
+    }
+    try:
+        policy = _policy_with_transport(load_campaign_policy(policy_path), transport)
+        proof = _external_delivery_reconciliation_proof(
+            policy=policy,
+            source_receipt_path=source_receipt_path,
+            delivery_path=delivery_path,
+            release_manifest_path=release_manifest_path,
+        )
+        if proof.get("valid"):
+            result.update({"status": "succeeded", "proof": proof})
+        else:
+            result["failures"] = [{"kind": "proof", "error": error} for error in proof.get("errors", [])]
+    except Exception as exc:
+        result["failures"] = [{"kind": "proof", "error": str(exc)}]
+    result["updated_at"] = now_iso()
+    _atomic_write_json(reconciliation_file, result)
+    result["reconciliation_receipt"] = str(reconciliation_file)
+    return result
+
+
+def external_delivery_reconciliation_validation_errors(
+    policy: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    *,
+    operations_sha256: str,
+) -> list[str]:
+    """Revalidate a stored proof immediately before destructive deletion."""
+
+    errors: list[str] = []
+    if reconciliation.get("schema_version") != EXTERNAL_DELIVERY_RECONCILIATION_SCHEMA_VERSION:
+        errors.append("external reconciliation schema_version does not match")
+    if reconciliation.get("atom") != "cnb_external_delivery_reconciliation":
+        errors.append("external reconciliation atom does not match")
+    if reconciliation.get("status") != "succeeded":
+        errors.append("external reconciliation is not succeeded")
+    if reconciliation.get("operations_sha256") != operations_sha256:
+        errors.append("external reconciliation operations_sha256 does not match the validated operations file")
+    stored_proof = reconciliation.get("proof")
+    if not isinstance(stored_proof, Mapping):
+        errors.append("external reconciliation proof is missing")
+        return errors
+    source = stored_proof.get("source_campaign_receipt")
+    delivery = stored_proof.get("external_delivery")
+    release = stored_proof.get("release")
+    identity = stored_proof.get("identity")
+    if not all(isinstance(value, Mapping) for value in (source, delivery, release, identity)):
+        errors.append("external reconciliation proof shape is incomplete")
+        return errors
+    try:
+        rebuilt = _external_delivery_reconciliation_proof(
+            policy=policy,
+            source_receipt_path=str(source["path"]),
+            delivery_path=str(delivery["path"]),
+            release_manifest_path=str(release["manifest"]),
+        )
+    except Exception as exc:
+        errors.append(f"external reconciliation revalidation failed: {exc}")
+        return errors
+    if not rebuilt.get("valid"):
+        errors.extend(f"external reconciliation proof failed: {error}" for error in rebuilt.get("errors", []))
+        return sorted(set(errors))
+    comparisons = (
+        ("source_campaign_receipt", "sha256"),
+        ("source_campaign_receipt", "run_id"),
+        ("source_campaign_receipt", "repository"),
+        ("external_delivery", "sha256"),
+        ("external_delivery", "count"),
+        ("external_delivery", "campaign_id"),
+        ("release", "manifest_sha256"),
+        ("release", "database_sha256"),
+        ("release", "release_name"),
+        ("identity", "count"),
+        ("identity", "sha256"),
+    )
+    for section, field in comparisons:
+        if stored_proof[section].get(field) != rebuilt[section].get(field):
+            errors.append(f"external reconciliation {section}.{field} changed since proof creation")
+    return sorted(set(errors))
+
+
+def _perform_disposable_repository_delete(
+    *, policy: Mapping[str, Any], repository: str, runner: JsonRunner, result: dict[str, Any]
+) -> None:
+    """Delete one already-proven disposable repository and record every check."""
+
+    protected_before = _protected_runtime_status(policy, runner)
+    result["protected_runtime_before"] = protected_before
+    if not protected_before["protected"]:
+        result["failures"].append(
+            {"kind": "protected-runtime", "error": "protected runtime/main/digest is unhealthy"}
+        )
+        return
+    workspaces_response, absent = _cnb_optional(
+        [
+            "cnb",
+            "workspace",
+            "list-workspaces",
+            "--slug",
+            repository,
+            "--status",
+            "running",
+            "--page",
+            "1",
+            "--page-size",
+            "100",
+            "--verbose",
+        ],
+        runner,
+    )
+    workspace_rows = (
+        ((_response_data(workspaces_response) or {}).get("list", []))
+        if not absent and workspaces_response
+        else []
+    )
+    if workspace_rows:
+        result["failures"].append({"kind": "workspace", "error": "running workspace exists"})
+        return
+    organization = str(policy["organization_slug"])
+    before_group = _group_volume(organization, runner)["object"]
+    before_repo = _repo_volume(organization, repository, runner)
+    result.update(
+        {
+            "group_object_used_bytes_before": before_group,
+            "repository_object_bytes_before": before_repo,
+        }
+    )
+    if _repo_exists(repository, runner):
+        try:
+            runner(["cnb", "repositories", "delete-repo", "--repo", repository, "--verbose"])
+            result["deleted"] = True
+        except Exception as exc:
+            result["failures"].append({"kind": "delete", "error": str(exc)})
+    present_after = _repo_exists(repository, runner)
+    after_repo = _repo_volume(organization, repository, runner)
+    after_group = _group_volume(organization, runner)["object"]
+    protected_after = _protected_runtime_status(policy, runner)
+    result.update(
+        {
+            "repository_present_after": present_after,
+            "repository_object_bytes_after": after_repo,
+            "group_object_used_bytes_after": after_group,
+            "group_object_usage_decreased": after_group < before_group,
+            "protected_runtime_after": protected_after,
+        }
+    )
+    if present_after or after_repo != 0:
+        result["failures"].append(
+            {"kind": "repository-verification", "error": "repository is not 404/zero-volume"}
+        )
+    if before_repo > 0 and after_group >= before_group:
+        result["failures"].append(
+            {"kind": "organization-charge-verification", "error": "organization object usage did not decrease"}
+        )
+    if not protected_after["protected"]:
+        result["failures"].append(
+            {
+                "kind": "protected-runtime-verification",
+                "error": "protected runtime/main/digest missing after deletion",
+            }
+        )
+
+
+def cleanup_reconciled_external_delivery_campaign(
+    *,
+    policy_path: str | Path,
+    operations_path: str | Path,
+    reconciliation_receipt_path: str | Path,
+    confirm: bool,
+    release_verified: bool,
+    peer_gate: bool,
+    runner: JsonRunner = run_cnb,
+    transport: str | None = None,
+) -> dict[str, Any]:
+    """Delete a legacy campaign only through a revalidated external proof."""
+
+    operations = Path(operations_path).expanduser().resolve()
+    load_validated_operations(operations, required_atom="cnb_campaign_cleanup")
+    operations_sha256 = sha256_file(operations)
+    policy = _policy_with_transport(load_campaign_policy(policy_path), transport)
+    reconciliation_file = Path(reconciliation_receipt_path).expanduser().resolve()
+    reconciliation = _read_json(reconciliation_file)
+    proof = reconciliation.get("proof") if isinstance(reconciliation.get("proof"), Mapping) else {}
+    source = proof.get("source_campaign_receipt") if isinstance(proof, Mapping) else {}
+    repository = str(source.get("repository", "")) if isinstance(source, Mapping) else ""
+    result: dict[str, Any] = {
+        "action": "cleanup-reconciled-external-delivery",
+        "repository": repository,
+        "confirmed": confirm,
+        "release_verified": release_verified,
+        "peer_gate": peer_gate,
+        "deleted": False,
+        "failures": [],
+    }
+
+    def record_result() -> dict[str, Any]:
+        reconciliation["cleanup"] = copy.deepcopy(result)
+        reconciliation["updated_at"] = now_iso()
+        _atomic_write_json(reconciliation_file, reconciliation)
+        result["reconciliation_receipt"] = str(reconciliation_file)
+        return result
+
+    if not confirm:
+        present = None
+        if repository:
+            try:
+                present = _repo_exists(repository, runner)
+            except Exception as exc:
+                result["failures"].append({"kind": "presence", "error": str(exc)})
+        result.update({"status": "dry_run", "present": present, "clean": False})
+        return record_result()
+    for error in external_delivery_reconciliation_validation_errors(
+        policy, reconciliation, operations_sha256=operations_sha256
+    ):
+        result["failures"].append({"kind": "reconciliation", "error": error})
+    if not release_verified:
+        result["failures"].append({"kind": "release-gate", "error": "verified local release is required"})
+    if not peer_gate:
+        result["failures"].append(
+            {"kind": "peer-gate", "error": "peer gate or explicit peer skip is required"}
+        )
+    if not repository:
+        result["failures"].append({"kind": "repository", "error": "reconciled repository is missing"})
+    if repository == str(policy["protected_runtime_repository_slug"]):
+        result["failures"].append({"kind": "repository", "error": "protected runtime cannot be deleted"})
+    if result["failures"]:
+        result.update({"status": "blocked", "clean": False})
+        return record_result()
+    _perform_disposable_repository_delete(policy=policy, repository=repository, runner=runner, result=result)
+    result["status"] = "succeeded" if not result["failures"] else "failed"
+    result["clean"] = result["status"] == "succeeded"
+    return record_result()
+
+
 def cleanup_campaign_repository(
     *,
     policy_path: str | Path,
@@ -1579,51 +2206,7 @@ def cleanup_campaign_repository(
         result["status"] = "blocked"
         result["clean"] = False
         return record_result()
-    protected_before = _protected_runtime_status(policy, runner)
-    result["protected_runtime_before"] = protected_before
-    if not protected_before["protected"]:
-        result["failures"].append({"kind": "protected-runtime", "error": "protected runtime/main/digest is unhealthy"})
-    if result["failures"]:
-        result["status"] = "blocked"
-        result["clean"] = False
-        return record_result()
-    workspaces_response, absent = _cnb_optional(
-        ["cnb", "workspace", "list-workspaces", "--slug", repository, "--status", "running", "--page", "1", "--page-size", "100", "--verbose"],
-        runner,
-    )
-    workspace_rows = ((_response_data(workspaces_response) or {}).get("list", []) if not absent and workspaces_response else [])
-    if workspace_rows:
-        result["failures"].append({"kind": "workspace", "error": "running workspace exists"})
-        result["status"] = "blocked"
-        result["clean"] = False
-        return record_result()
-    organization = str(policy["organization_slug"])
-    before_group = _group_volume(organization, runner)["object"]
-    before_repo = _repo_volume(organization, repository, runner)
-    result.update({"group_object_used_bytes_before": before_group, "repository_object_bytes_before": before_repo})
-    if _repo_exists(repository, runner):
-        try:
-            runner(["cnb", "repositories", "delete-repo", "--repo", repository, "--verbose"])
-            result["deleted"] = True
-        except Exception as exc:
-            result["failures"].append({"kind": "delete", "error": str(exc)})
-    present_after = _repo_exists(repository, runner)
-    after_repo = _repo_volume(organization, repository, runner)
-    after_group = _group_volume(organization, runner)["object"]
-    protected_after = _protected_runtime_status(policy, runner)
-    result.update({
-        "repository_present_after": present_after,
-        "repository_object_bytes_after": after_repo,
-        "group_object_used_bytes_after": after_group,
-        "group_object_usage_decreased": after_group < before_group,
-        "protected_runtime_after": protected_after,
-    })
-    if present_after or after_repo != 0:
-        result["failures"].append({"kind": "repository-verification", "error": "repository is not 404/zero-volume"})
-    if before_repo > 0 and after_group >= before_group:
-        result["failures"].append({"kind": "organization-charge-verification", "error": "organization object usage did not decrease"})
-    if not protected_after["protected"]:
-        result["failures"].append({"kind": "protected-runtime-verification", "error": "protected runtime/main/digest missing after deletion"})
+    _perform_disposable_repository_delete(policy=policy, repository=repository, runner=runner, result=result)
     result["status"] = "succeeded" if not result["failures"] else "failed"
     result["clean"] = result["status"] == "succeeded"
     return record_result()
@@ -1631,7 +2214,17 @@ def cleanup_campaign_repository(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("preflight", "prepare", "submit", "cleanup"))
+    parser.add_argument(
+        "action",
+        choices=(
+            "preflight",
+            "prepare",
+            "submit",
+            "cleanup",
+            "reconcile-external-delivery",
+            "cleanup-reconciled-external-delivery",
+        ),
+    )
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--operations-file", type=Path, default=Path(__file__).resolve().parents[1] / "references" / "validated-operations.json")
     parser.add_argument("--repository-root", type=Path, default=Path.cwd())
@@ -1640,6 +2233,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--delivery", type=Path)
+    parser.add_argument("--release-manifest", type=Path)
+    parser.add_argument("--reconciliation-receipt", type=Path)
     parser.add_argument("--github-commit")
     parser.add_argument("--expected-count", type=int)
     parser.add_argument("--transport", choices=("lfs", "git-objects"))
@@ -1707,7 +2303,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 require_source_url=args.require_source_url,
                 transport=args.transport,
             )
-        else:
+        elif args.action == "cleanup":
             if not args.receipt:
                 raise CampaignRepositoryError("cleanup requires --receipt")
             result = cleanup_campaign_repository(
@@ -1719,11 +2315,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                 peer_gate=args.peer_gate,
                 transport=args.transport,
             )
+        elif args.action == "reconcile-external-delivery":
+            if not args.receipt or not args.delivery or not args.release_manifest or not args.reconciliation_receipt:
+                raise CampaignRepositoryError(
+                    "reconcile-external-delivery requires --receipt, --delivery, --release-manifest, and --reconciliation-receipt"
+                )
+            result = reconcile_external_delivery(
+                policy_path=args.policy,
+                operations_path=args.operations_file,
+                source_receipt_path=args.receipt,
+                delivery_path=args.delivery,
+                release_manifest_path=args.release_manifest,
+                reconciliation_receipt_path=args.reconciliation_receipt,
+                transport=args.transport,
+            )
+        else:
+            if not args.reconciliation_receipt:
+                raise CampaignRepositoryError(
+                    "cleanup-reconciled-external-delivery requires --reconciliation-receipt"
+                )
+            result = cleanup_reconciled_external_delivery_campaign(
+                policy_path=args.policy,
+                operations_path=args.operations_file,
+                reconciliation_receipt_path=args.reconciliation_receipt,
+                confirm=args.confirm_delete_cnb_repositories,
+                release_verified=args.release_verified,
+                peer_gate=args.peer_gate,
+                transport=args.transport,
+            )
         print(json.dumps(result, ensure_ascii=False))
         if args.action == "preflight":
             return 0 if result.get("clean") else 3
-        if args.action == "cleanup" and args.confirm_delete_cnb_repositories:
+        if args.action in {"cleanup", "cleanup-reconciled-external-delivery"} and args.confirm_delete_cnb_repositories:
             return 0 if result.get("clean") else 4
+        if args.action == "reconcile-external-delivery":
+            return 0 if result.get("status") == "succeeded" else 4
         return 0
     except (CampaignRepositoryError, OSError, ValueError) as exc:
         print(json.dumps({"action": args.action, "status": "failed", "error": str(exc)}, ensure_ascii=False))
