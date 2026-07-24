@@ -41,6 +41,9 @@
     "cnb_campaign_submit": {
       "effective_method": "只对已创建且 receipt 绑定 run_id/repo prefix/runtime digest 的 campaign repository 触发 api_trigger_music_flamingo_campaign；每个静态 shard 使用显式 index/id，轮询所有 CNB build 到 terminal status，任一 shard 未成功不得生成 delivery 或进入清理；同一 receipt 的后续尝试可以按原 index 重试失败 shard，但不得改变 repository slug。全部 shard 成功后从同一仓库 ledger branch 恢复 durable ledger，残留的 receipt-bound ledger clone 可复用，使用 pinned runner 的 build_kugou_canonical_delivery.py 生成并校验本地 canonical delivery；不把 build 日志当作 delivery。"
     },
+    "cnb_campaign_devgpu_recovery": {
+      "effective_method": "仅当同一 campaign receipt 已因构建 GPU 平台门禁失败、repository_created/repository_pushed 为真且无 delivery 时，允许另写不修改原 receipt 的 Dev GPU recovery receipt。恢复必须复用原 run/repository/main commit/manifest/runtime/ledger，将只新增 vscode 入口的 config overlay 推到同一仓库专用分支，在一个 L40 Dev GPU workspace 中先连续两次通过 40,000 MiB free、0% utilization 门禁，再按固定 shard index 串行 hydrate、pre-model gate 和全量推理。不做 probe，不新建 slug，不改模型/prompt/token 合同。全部 shard 成功后停止 workspace，从原 durable ledger 生成并校验 external canonical delivery；原失败 receipt 保持不变，后续只能经 --delivery 导入并使用 external-delivery reconciliation 清理。"
+    },
     "cnb_campaign_cleanup": {
       "effective_method": "只有 canonical delivery 已导入、immutable release 已验证且 peer gate 成功或显式 --skip-peers 后，才可在独立 CNB repository confirmation 下删除 receipt 指定且严格命中 prefix 的 campaign 仓库。所有 CNB CLI JSON response 必须先通过 top-level 2xx API status 验证；404 仅由 optional-resource probe 处理为 absent，403/其他非 2xx 立即作为授权/API failure 停止，不能因 CLI exit 0 被误记为 deleted。正常路径删除前必须验证 receipt schema/atom、repository_created/repository_pushed、GitHub/runtime provenance、manifest path/hash/count/source-links、全部 shard index/status、delivery path/hash/count 和无 running workspace；目标不得是 protected runtime。旧 receipt 为 failed/interrupted 且缺 delivery 时，普通 cleanup 必须继续拒绝；仅专用 external-delivery reconciliation 可读取旧 receipt 而不修改它，并要求原 manifest 和外部 canonical delivery 的 run_id、repository prefix/name、每条 ID/manifest index/relative path/source SHA-256/bytes/source URL 精确相等，且已验证 immutable release 的 campaign_delivery_provenance 对同一 delivery 逐项相等。专用 cleanup 仅接受该 reconciliation receipt，删除前再次核验其 hash、release、peer gate、无 running workspace 和 protected runtime，删除后同样验证 repository 404、对象 volume=0、组织对象用量（原用量非零时）下降和 protected runtime/main/tag 存活。release/peer 未完成、receipt/reconciliation 不匹配或删除验证不全时写入 blocked reconciliation receipt、保留同一仓库，不自动换名或重试。"
     },
@@ -69,7 +72,7 @@
       "effective_method": "只消费本周已去重下载队列和 song_inventory.json；逐首确认 downloaded 状态、实际文件存在、唯一 identity、文件 SHA-256 和有效 play_link，使用硬链接优先将音频放入独立 campaign staging，并生成带 source_bytes、sha256、title、artist、source_url 的 LF JSONL manifest；fresh 路径在父 weekly-run atom 内直接调用 materialize，避免子进程重复获取 publisher lock；写入 weekly atom receipt，不触发 CNB。"
     },
     "cnb_analysis": {
-      "effective_method": "只接收 cnb_campaign_submit 从完整 shard 集合恢复并校验的 CNB canonical delivery；使用 policy 固定 immutable Music Flamingo 镜像、model revision、2048 token 和 240 秒音频时长契约。campaign 仓库的 LFS/普通 Git 传输由 policy 选择，manifest SHA-256、durable ledger 和 delivery expected-count 必须一致；不得把 build 日志当作分析结果。"
+      "effective_method": "只接收 cnb_campaign_submit 从完整 shard 集合恢复并校验的 CNB canonical delivery，或 cnb_campaign_devgpu_recovery 从同一 receipt-bound repository/ledger 恢复并通过同等验证的 external canonical delivery；使用 policy 固定 immutable Music Flamingo 镜像、model revision、2048 token 和 240 秒音频时长契约。campaign 仓库的 LFS/普通 Git 传输由 policy 选择，manifest SHA-256、durable ledger 和 delivery expected-count 必须一致；不得把 build 日志当作分析结果。"
     },
     "knowledge_import": {
       "effective_method": "只导入质量通过的 canonical delivery；幂等导入、重建标签和搜索投影，然后验证 source_links 完整。"
