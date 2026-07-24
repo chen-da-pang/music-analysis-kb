@@ -1,6 +1,6 @@
 {
   "name": "music-kb",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "description": "Local SQLite music-analysis search with natural-language discovery, selected-song lyrics, and read-only MCP tools.",
   "author": {
     "name": "Wuyou Music",

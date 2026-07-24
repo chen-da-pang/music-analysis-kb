@@ -91,8 +91,11 @@ be purged, so inventory—not file presence alone—is the dedupe record.
    shared state. `--executor claude` is only a bounded compatibility retry.
 7. **`fallback_download`** — directly process only the primary worker's
    recorded `no_results`, in the configured fallback order, with the
-   duration/size checks. Preserve failed/no-result states for retry; the legacy
-   Claude executor is explicit rather than a preflight dependency.
+   duration/size checks. The direct wrapper uses two isolated staging shards by
+   default and one serial merger; never run concurrent workers against the real
+   inventory, progress, or audio directory. Preserve failed/no-result states
+   for retry; the legacy Claude executor is explicit rather than a preflight
+   dependency.
 8. **`cnb_input_materialization`** — consume only newly downloaded queue rows;
    verify file existence, identity, SHA-256, byte count, and `source_url`; use
    hardlinks into an isolated staging directory and write the LF JSONL manifest.
@@ -178,9 +181,16 @@ uv run music-kb --json weekly-run \
   --db "$HOME/.music-kb/music-master.sqlite" \
   --chart-database /path/to/music_trends.sqlite \
   --peers-file "$HOME/.config/music-kb/peers.toml" \
+  --proxy http://127.0.0.1:7890 \
   --cnb-transport lfs \
   --download-dry-run
 ```
+
+On the publisher Mac this is the fastest measured download profile: the proxy
+is propagated to chart capture, the serial Kugou worker, and the two-way
+fallback wrapper. Confirm that the local listener is healthy first. The
+default route is a system TUN rather than a bare direct connection; if the
+local listener is unavailable, omit `--proxy` and use that route instead.
 
 For a real publish, remove `--download-dry-run`, review the peer plan, add
 `--publish`, and supply `--confirm-delete-audio`,

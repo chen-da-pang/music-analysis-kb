@@ -430,6 +430,7 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
     def fake_json_command(command, *, cwd, timeout_seconds, env=None):
         name = Path(command[1]).name if len(command) > 1 else ""
         if name == "capture_kugou_chart.py":
+            assert command[command.index("--proxy") + 1] == "http://127.0.0.1:7890"
             chart_path.write_text(
                 json.dumps(
                     {
@@ -458,12 +459,14 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
             }, subprocess.CompletedProcess(command, 0, "", "")
         if name == "run_claude_download.py":
             assert command[command.index("--executor") + 1] == "direct"
+            assert command[command.index("--proxy") + 1] == "http://127.0.0.1:7890"
             return {
                 "queue_manifest": {"queue": str(queue_path), "queued": 1},
                 "worker_progress": {"downloaded": 1},
             }, subprocess.CompletedProcess(command, 0, "", "")
         if name == "run_claude_fallback.py":
             assert command[command.index("--executor") + 1] == "direct"
+            assert command[command.index("--proxy") + 1] == "http://127.0.0.1:7890"
             return {"queue_manifest": {"queued": 0}}, subprocess.CompletedProcess(command, 0, "", "")
         if name == "cnb_campaign_repository.py" and "prepare" in command:
             receipt = Path(command[command.index("--receipt") + 1])
@@ -507,6 +510,7 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
         cnb_command=None,
         chart_database=None,
         state_file=tmp_path / "publish-state.json",
+        proxy="http://127.0.0.1:7890",
         cnb_campaign_dry_run=True,
         cnb_github_commit="a" * 40,
         skip_peers=True,

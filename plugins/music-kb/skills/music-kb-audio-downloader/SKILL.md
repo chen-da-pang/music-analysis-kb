@@ -1,6 +1,6 @@
 ---
 name: music-kb-audio-downloader
-description: Prepare a deduplicated Kugou audio queue from a new chart export and execute it through one fixed musicdl/KugouMusicClient worker. Use when the publisher needs to download only newly observed Kugou tracks for a weekly Music KB update. Use only on the publisher machine.
+description: Prepare a deduplicated Kugou audio queue from a new chart export and execute the verified direct download path. The primary Kugou worker is serial; its QQ/Migu/Kuwo fallback uses two isolated workers with one safe merger. Use only on the publisher machine.
 ---
 
 # Music KB Audio Downloader
@@ -23,9 +23,14 @@ from a completed CNB canonical delivery. The atom has four bounded stages:
    result's `SongInfo.lyric`.
 
 If the primary worker leaves songs as `no_results`, run the separate fallback
-atom through the same direct-executor boundary. It consumes only an explicit no-results queue and runs
-`scripts/download_music_fallback.py` serially through the versioned
-`references/fallback-download-profile.json` sources (QQ, Migu, then Kuwo).
+atom through `scripts/run_claude_fallback.py`. Its direct mode defaults to two
+isolated workers through the versioned `references/fallback-download-profile.json`
+sources (QQ, Migu, then Kuwo). Each worker receives its own queue shard,
+inventory copy, progress file, log, and staging audio directory. Only after
+both workers finish terminal results and the real inventory hash is unchanged
+does one serial merger move verified media and sidecars into the real audio
+directory and update the real inventory/progress. `--parallelism 1` is the
+diagnostic rollback; do not use more than two workers.
 Fallback matching is exact on normalized title and artist, with only aliases
 listed in the queue/profile accepted. A fallback file is accepted only when it
 exists, exceeds 1 MB, and has an `ffprobe` duration of at least 60 seconds.
@@ -36,9 +41,11 @@ capture atom; this atom consumes its processed songs JSON/JSONL/CSV export.
 ## Required boundary
 
 - Run on the publisher Mac only.
-- The one fixed worker may read/write only the workspace, the inventory, the
-  queue run directory, and the configured `music_downloads` directory. Do not
-  run concurrent workers against shared inventory, progress, or lyric receipts.
+- The primary Kugou worker remains the one serial owner of inventory, progress,
+  and lyric receipts. It must not be parallelized.
+- The fallback wrapper may run two workers only through isolated staging and a
+  serial merger. Never start two `download_music_fallback.py` processes against
+  the real inventory, progress, or audio directory directly.
 - Do not use the historical `batch_download.py` for weekly updates. It scans
   the whole SQLite database and predates the queue-level inventory contract.
 - Do not commit `song_inventory.json`, queue runs, audio, progress, logs, or
@@ -106,6 +113,22 @@ is available only for a bounded compatibility retry; it preserves the old
 serial chunk path and inherits `http_proxy`/`https_proxy` when `--proxy` is
 provided.
 
+### Measured publisher profile
+
+On the publisher Mac, the apparent default route is the system TUN proxy, not
+a bare public direct connection. The currently fastest validated fallback
+profile is the direct wrapper with `--parallelism 2` and an explicit healthy
+`http://127.0.0.1:7890` proxy. The direct two-song end-to-end sample completed
+2/2 identity- and `ffprobe`-validated downloads in 15.869 seconds, compared
+with 24.994 seconds for the same serial wrapper shape. Audio CDN transfer also
+benefited from two streams; four streams did not add a repeatable gain.
+
+These are publisher-Mac measurements, not a universal seconds-per-song
+promise: provider parsing and the audio format returned by `musicdl` vary per
+song. Before a real run, verify that the local proxy listener is healthy. If
+it is unavailable, omit `--proxy` and use the system TUN path; do not route
+through an invented endpoint or bypass a platform login/paywall.
+
 ## Lyrics receipt and historical backfill
 
 The audio worker accepts a search result only when its raw Kugou
@@ -140,21 +163,22 @@ automatically.
 
 The fallback queue must contain only records whose current inventory status is
 `no_results`. Before a real run, use `--dry-run` and review the queue count.
-The direct fallback wrapper runs this fixed command and waits for its progress
-receipt. `--executor claude` remains an explicit compatibility retry:
+The direct fallback wrapper owns queue preparation, safe two-way sharding, and
+the final merger. `--executor claude` remains an explicit single-worker
+compatibility retry:
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/download_music_fallback.py \
-  --queue data/download_runs/<run-id>/fallback_queue.jsonl \
-  --inventory data/song_inventory.json \
-  --work-dir music_downloads/KugouMusicClient \
-  --progress data/download_runs/<run-id>/fallback-progress.json \
+python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_fallback.py \
+  --workspace "$MUSIC_WORKSPACE" \
   --run-id <run-id> \
-  --profile music-analysis-kb/plugins/music-kb/references/fallback-download-profile.json
+  --worker-python "$MUSICDL_PYTHON" \
+  --parallelism 2 \
+  --proxy http://127.0.0.1:7890
 ```
 
-The fallback child may write only the queue run directory, inventory, and
-configured music download directory. It must not call `kugou-cli`, the old
+The fallback children may write only their run-local staging directories. The
+serial merger is the only code allowed to touch the real inventory/progress
+and configured music directory. The atom must not call `kugou-cli`, the old
 full-database downloader, or edit inventory by hand.
 
 ## Inventory contract

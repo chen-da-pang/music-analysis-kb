@@ -144,7 +144,11 @@ run materializes one disposable CNB campaign repository per run id after the
 fixed direct download worker. The worker retains one Kugou HTTP session and
 resolves the exact mix-song page before the legacy title/artist fallback. It
 writes comparable inventory/queue/lookup/download/lyrics/commit timings while
-preserving one serial owner of the inventory, progress, and lyric receipt.
+preserving one serial owner of the inventory, progress, and lyric receipt. The
+no-results cross-platform fallback is different: its direct wrapper uses two
+state-isolated staging shards by default, then merges only after both terminal
+receipts succeed and the real inventory has not changed. This is the measured
+fast path; it never lets concurrent workers write the durable files directly.
 `--executor claude` is an explicit
 compatibility retry, not the normal weekly dependency. Pass `--delivery <canonical.jsonl>` only to resume from
 an already completed CNB delivery; when the same run has a campaign receipt,
