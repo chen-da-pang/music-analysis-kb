@@ -139,9 +139,31 @@ def _run_json(command: Sequence[str], *, cwd: Path | None = None, timeout: float
 
 
 def run_cnb(command: Sequence[str]) -> dict[str, Any]:
-    """Run a CNB CLI command and return its JSON response."""
+    """Run a CNB CLI command and reject a non-success OpenAPI response.
 
-    return _run_json(command)
+    CNB's CLI can exit zero after printing an OpenAPI error object.  Process
+    success is therefore not authorization or mutation success; callers may
+    only act on a 2xx response.  Optional 404 probes remain compatible because
+    ``_cnb_optional`` recognizes the raised status and converts it to absence.
+    """
+
+    response = _run_json(command)
+    raw_status = response.get("status")
+    try:
+        status = int(raw_status)
+    except (TypeError, ValueError) as exc:
+        raise CampaignRepositoryError(
+            f"CNB response has no valid API status: {' '.join(command)}"
+        ) from exc
+    if 200 <= status < 300:
+        return response
+    data = response.get("data")
+    if isinstance(data, Mapping):
+        detail = str(data.get("errmsg") or data.get("message") or data.get("errcode") or "")
+    else:
+        detail = str(data or "")
+    suffix = f": {detail}" if detail else ""
+    raise CampaignRepositoryError(f"CNB API request failed with status {status}{suffix}")
 
 
 def _response_data(response: Mapping[str, Any]) -> Any:

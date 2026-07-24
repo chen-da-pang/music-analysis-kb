@@ -172,6 +172,13 @@ the disposable campaign prepare/preflight path and to final storage cleanup.
 per-file, and ordinary Git headroom gates pass. `--cnb-command` is an explicit
 legacy fallback and does not use the disposable repository path.
 
+CNB CLI process exit code alone is not success evidence: every JSON response
+must have a 2xx top-level API status before an atom records progress. An
+optional-resource 404 may become an audited absence only in the explicit probe
+path; a 403 (including a missing `repo-delete:rw` scope) or any other non-2xx
+status stops the atom before it can claim a repository was created, deleted, or
+cleaned.
+
 The campaign policy is
 `plugins/music-kb/references/cnb-storage-policy.json`. A campaign repository is
 temporary; GitHub is the only source of runner code. A failed build, ledger
