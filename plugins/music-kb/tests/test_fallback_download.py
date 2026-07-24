@@ -4,11 +4,13 @@ import importlib.util
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "download_music_fallback.py"
 PREPARE = Path(__file__).parents[1] / "scripts" / "prepare_fallback_queue.py"
+LAUNCHER = Path(__file__).parents[1] / "scripts" / "launch_music_fallback_worker.py"
 PROFILE = Path(__file__).parents[1] / "references" / "fallback-download-profile.json"
 
 
@@ -60,7 +62,72 @@ def test_fallback_dry_run_does_not_touch_inventory_or_audio(tmp_path: Path) -> N
     assert not audio.exists()
 
 
-def test_prepare_fallback_queue_only_includes_unique_no_results(tmp_path: Path) -> None:
+def test_detached_launcher_writes_completion_without_touching_dry_run_inventory(tmp_path: Path) -> None:
+    queue = tmp_path / "fallback_queue.jsonl"
+    queue.write_text(json.dumps({"identity_key": "kugou:1", "title": "Song", "artist": "Artist"}) + "\n", encoding="utf-8")
+    inventory = tmp_path / "inventory.json"
+    original = {"songs": [{"identity_key": "kugou:1", "download": {"status": "no_results"}}]}
+    inventory.write_text(json.dumps(original), encoding="utf-8")
+    launch = tmp_path / "launch.json"
+    completion = tmp_path / "completion.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER),
+            "--queue", str(queue),
+            "--inventory", str(inventory),
+            "--work-dir", str(tmp_path / "audio"),
+            "--progress", str(tmp_path / "progress.json"),
+            "--run-id", "detached-test",
+            "--profile", str(PROFILE),
+            "--launch-receipt", str(launch),
+            "--completion-receipt", str(completion),
+            "--worker-log", str(tmp_path / "worker.log"),
+            "--worker-python", sys.executable,
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    launched = json.loads(result.stdout)
+    assert launched["status"] == "launched"
+    deadline = time.monotonic() + 10
+    while not completion.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    finished = json.loads(completion.read_text(encoding="utf-8"))
+    assert finished["status"] == "succeeded"
+    assert finished["exit_code"] == 0
+    assert json.loads(inventory.read_text(encoding="utf-8")) == original
+
+
+def test_detached_launcher_refuses_duplicate_receipt(tmp_path: Path) -> None:
+    receipt = tmp_path / "launch.json"
+    receipt.write_text("{}\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER),
+            "--queue", str(tmp_path / "queue.jsonl"),
+            "--inventory", str(tmp_path / "inventory.json"),
+            "--work-dir", str(tmp_path / "audio"),
+            "--progress", str(tmp_path / "progress.json"),
+            "--run-id", "duplicate-test",
+            "--profile", str(PROFILE),
+            "--launch-receipt", str(receipt),
+            "--completion-receipt", str(tmp_path / "completion.json"),
+            "--worker-log", str(tmp_path / "worker.log"),
+            "--worker-python", sys.executable,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "refusing a duplicate worker" in result.stderr
+
+
+def test_prepare_fallback_queue_only_includes_unique_retryable_statuses(tmp_path: Path) -> None:
     inventory = tmp_path / "inventory.json"
     inventory.write_text(
         json.dumps(
@@ -68,6 +135,7 @@ def test_prepare_fallback_queue_only_includes_unique_no_results(tmp_path: Path) 
                 "songs": [
                     {"identity_key": "kugou:1", "title": "Beyond the Dream", "artist": "DINO", "download": {"status": "no_results"}},
                     {"identity_key": "kugou:1", "title": "Beyond the Dream", "artist": "DINO", "download": {"status": "no_results"}},
+                    {"identity_key": "kugou:3", "title": "Retry", "artist": "Artist", "download": {"status": "failed"}},
                     {"identity_key": "kugou:2", "title": "Done", "artist": "Artist", "download": {"status": "downloaded"}},
                 ]
             }
@@ -76,13 +144,30 @@ def test_prepare_fallback_queue_only_includes_unique_no_results(tmp_path: Path) 
     )
     queue = tmp_path / "fallback.jsonl"
     result = subprocess.run(
-        [sys.executable, str(PREPARE), "--inventory", str(inventory), "--output", str(queue), "--profile", str(PROFILE)],
+        [sys.executable, str(PREPARE), "--inventory", str(inventory), "--output", str(queue), "--profile", str(PROFILE), "--statuses", "no_results,failed"],
         capture_output=True,
         text=True,
         check=True,
     )
     manifest = json.loads(result.stdout)
-    row = json.loads(queue.read_text(encoding="utf-8"))
-    assert manifest["queued"] == 1
-    assert manifest["unique_identity_keys"] == 1
-    assert row["artist_aliases"] == [["DINO", "디노"]]
+    rows = [json.loads(line) for line in queue.read_text(encoding="utf-8").splitlines()]
+    assert manifest["queued"] == 2
+    assert manifest["unique_identity_keys"] == 2
+    assert manifest["retry_statuses"] == ["no_results", "failed"]
+    assert manifest["status_counts"] == {"no_results": 1, "failed": 1}
+    assert rows[0]["artist_aliases"] == [["DINO", "디노"]]
+    assert rows[0]["retry_from_status"] == "no_results"
+    assert rows[1]["retry_from_status"] == "failed"
+
+
+def test_prepare_fallback_queue_rejects_nonretryable_status(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text('{"songs": []}\n', encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(PREPARE), "--inventory", str(inventory), "--output", str(tmp_path / "queue.jsonl"), "--profile", str(PROFILE), "--statuses", "no_results,downloaded"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "unsupported retry statuses: downloaded" in result.stderr

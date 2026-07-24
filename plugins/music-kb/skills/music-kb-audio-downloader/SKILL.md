@@ -15,22 +15,21 @@ from a completed CNB canonical delivery. The atom has four bounded stages:
    `kugou:<mix_song_id>` first and by normalized title + artist as a fallback.
 3. Write a JSONL queue containing only songs that are not already downloaded.
 4. Run the deterministic `scripts/download_music_queue.py` worker directly in
-   one serial process. It uses `musicdl` with
-   `KugouMusicClient`, first resolves the queue's exact Kugou mix-song page to
-   one verified audio hash, and falls back to title/artist search only when the
-   direct parser cannot produce an audio URL. It updates the inventory after
-   every attempt and writes an identity-bound lyric receipt from the exact
-   result's `SongInfo.lyric`.
+   one serial process. It uses `musicdl` with `KugouMusicClient`, first resolves
+   the queue's exact Kugou mix-song page to one verified audio hash, and falls
+   back to title/artist search only when that direct parser cannot produce an
+   audio URL. It updates the inventory after every attempt and writes an
+   identity-bound lyric receipt from the exact result's `SongInfo.lyric`.
 
-If the primary worker leaves songs as `no_results`, run the separate fallback
-atom through `scripts/run_claude_fallback.py`. Its direct mode defaults to two
-isolated workers through the versioned `references/fallback-download-profile.json`
-sources (QQ, Migu, then Kuwo). Each worker receives its own queue shard,
-inventory copy, progress file, log, and staging audio directory. Only after
-both workers finish terminal results and the real inventory hash is unchanged
-does one serial merger move verified media and sidecars into the real audio
-directory and update the real inventory/progress. `--parallelism 1` is the
-diagnostic rollback; do not use more than two workers.
+If the primary worker leaves songs as `no_results` or `failed`, run the separate
+fallback atom through `scripts/run_claude_fallback.py`. Its direct mode defaults
+to two isolated workers through the versioned
+`references/fallback-download-profile.json` sources (QQ, Migu, then Kuwo). Each
+worker receives its own queue shard, inventory copy, progress file, log, and
+staging audio directory. Only after every shard reaches terminal results and the
+real inventory hash is unchanged does one serial merger move verified media and
+sidecars into the real audio directory and update the real inventory/progress.
+`--parallelism 1` is the diagnostic rollback; do not use more than two workers.
 Fallback matching is exact on normalized title and artist, with only aliases
 listed in the queue/profile accepted. A fallback file is accepted only when it
 exists, exceeds 1 MB, and has an `ffprobe` duration of at least 60 seconds.
@@ -161,25 +160,33 @@ automatically.
 
 ### Fallback invocation
 
-The fallback queue must contain only records whose current inventory status is
-`no_results`. Before a real run, use `--dry-run` and review the queue count.
-The direct fallback wrapper owns queue preparation, safe two-way sharding, and
-the final merger. `--executor claude` remains an explicit single-worker
-compatibility retry:
+The fallback queue contains only records whose current inventory status is
+`no_results` or `failed`. Before a real run, use `--dry-run` and review the
+queue count and status breakdown. The direct fallback wrapper owns queue
+preparation, safe two-way sharding, and the final merger. `--executor claude`
+remains an explicit compatibility way to start the same short launcher:
 
 ```bash
+export MUSICDL_PYTHON=/absolute/path/to/python-that-imports-musicdl
 python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_fallback.py \
   --workspace "$MUSIC_WORKSPACE" \
   --run-id <run-id> \
   --worker-python "$MUSICDL_PYTHON" \
-  --parallelism 2 \
   --proxy http://127.0.0.1:7890
 ```
 
-The fallback children may write only their run-local staging directories. The
-serial merger is the only code allowed to touch the real inventory/progress
-and configured music directory. The atom must not call `kugou-cli`, the old
-full-database downloader, or edit inventory by hand.
+For a real run, the wrapper validates the `fallback_download` operation record,
+proves `--worker-python` can import `musicdl`, then starts the short detached
+launcher. The supervisor runs the actual P=2 isolated shards and its serial
+merger is the only code allowed to touch real inventory/progress and the
+configured music directory. `--executor claude` may start that launcher for
+compatibility, but Claude must not wait, kill, wrap, restart, or directly run
+`download_music_fallback.py`.
+
+Accept a fallback file only after it exists, exceeds 1 MB, and has an ffprobe
+duration of at least 60 seconds. Each child may write only its run-local shard
+directory; it must not call `kugou-cli`, the old full-database downloader, or
+edit real inventory by hand.
 
 ## Inventory contract
 

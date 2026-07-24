@@ -83,19 +83,20 @@ be purged, so inventory—not file presence alone—is the dedupe record.
    analysis result.
 6. **`claude_download`** — retain this historical atom name but default to one
    fixed direct worker. It must use `musicdl`'s `MusicClient` plus
-   `KugouMusicClient`; it must first use the queue's exact mix-song page and
-   verified audio hash to resolve one track, then fall back to title/artist
-   search only when that direct path cannot produce an audio URL. It must not
-   call `kugou-cli` or the legacy full-database downloader. Keep one song-level
-   inventory row per platform identity and do not run concurrent workers against
-   shared state. `--executor claude` is only a bounded compatibility retry.
+   `KugouMusicClient`; it first resolves the queue's exact mix-song page and
+   verified audio hash, then falls back to title/artist search only when needed.
+   It must not call `kugou-cli` or the legacy full-database downloader. Keep one
+   song-level inventory row per platform identity and do not run concurrent
+   workers against shared state. `--executor claude` is only a bounded
+   compatibility retry.
 7. **`fallback_download`** — directly process only the primary worker's
-   recorded `no_results`, in the configured fallback order, with the
-   duration/size checks. The direct wrapper uses two isolated staging shards by
-   default and one serial merger; never run concurrent workers against the real
-   inventory, progress, or audio directory. Preserve failed/no-result states
-   for retry; the legacy Claude executor is explicit rather than a preflight
-   dependency.
+   recorded `no_results` or `failed` states in the configured fallback order,
+   with duration/size checks. `run_claude_fallback.py` validates a Python that
+   imports `musicdl` and starts a short detached supervisor. Its default two
+   isolated staging shards never touch real inventory, progress, or audio; one
+   serial merger is the sole formal-state writer. `--executor claude` is a
+   compatibility launcher only. Preserve failed/no-result states and
+   `retry_from_status` for the next retry.
 8. **`cnb_input_materialization`** — consume only newly downloaded queue rows;
    verify file existence, identity, SHA-256, byte count, and `source_url`; use
    hardlinks into an isolated staging directory and write the LF JSONL manifest.
@@ -188,9 +189,9 @@ uv run music-kb --json weekly-run \
 
 On the publisher Mac this is the fastest measured download profile: the proxy
 is propagated to chart capture, the serial Kugou worker, and the two-way
-fallback wrapper. Confirm that the local listener is healthy first. The
-default route is a system TUN rather than a bare direct connection; if the
-local listener is unavailable, omit `--proxy` and use that route instead.
+fallback wrapper. Confirm that the local listener is healthy first. The default
+route is a system TUN rather than a bare direct connection; if the listener is
+unavailable, omit `--proxy` and use that route instead.
 
 For a real publish, remove `--download-dry-run`, review the peer plan, add
 `--publish`, and supply `--confirm-delete-audio`,
