@@ -91,13 +91,20 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _run(command: Sequence[str], *, cwd: Path | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    timeout: float | None = None,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         list(command),
         cwd=str(cwd) if cwd is not None else None,
         text=True,
         capture_output=True,
         timeout=timeout,
+        env=dict(env) if env is not None else None,
         check=False,
     )
     if completed.returncode != 0:
@@ -108,8 +115,14 @@ def _run(command: Sequence[str], *, cwd: Path | None = None, timeout: float | No
     return completed
 
 
-def _run_json(command: Sequence[str], *, cwd: Path | None = None, timeout: float | None = None) -> dict[str, Any]:
-    completed = _run(command, cwd=cwd, timeout=timeout)
+def _run_json(
+    command: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    timeout: float | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    completed = _run(command, cwd=cwd, timeout=timeout, env=env)
     output = completed.stdout.strip()
     if not output:
         raise CampaignRepositoryError(f"command returned no JSON: {' '.join(command)}")
@@ -148,7 +161,10 @@ def run_cnb(command: Sequence[str]) -> dict[str, Any]:
     ``_cnb_optional`` recognizes the raised status and converts it to absence.
     """
 
-    response = _run_json(command)
+    cli_env = os.environ.copy()
+    cli_env.pop("CNB_TOKEN", None)
+    cli_env.pop("MUSIC_KB_CNB_GIT_TOKEN", None)
+    response = _run_json(command, env=cli_env)
     raw_status = response.get("status")
     try:
         status = int(raw_status)
@@ -978,9 +994,11 @@ def _write_gitattributes(checkout: Path, campaign_id: str, transport: str) -> No
 
 
 def _git_push_environment() -> tuple[dict[str, str], Path | None]:
-    token = os.environ.get("CNB_TOKEN", "")
+    token = os.environ.get("MUSIC_KB_CNB_GIT_TOKEN", "") or os.environ.get("CNB_TOKEN", "")
     if not token:
-        raise CampaignRepositoryError("CNB_TOKEN is required for an executable campaign repository push")
+        raise CampaignRepositoryError(
+            "MUSIC_KB_CNB_GIT_TOKEN is required for an executable campaign repository push"
+        )
     encoded = base64.b64encode(f"cnb:{token}".encode("utf-8")).decode("ascii")
     env = os.environ.copy()
     env.update(

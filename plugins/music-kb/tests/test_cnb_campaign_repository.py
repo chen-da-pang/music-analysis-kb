@@ -123,7 +123,7 @@ def test_run_cnb_rejects_zero_exit_api_authorization_error(monkeypatch: pytest.M
     monkeypatch.setattr(
         MODULE,
         "_run_json",
-        lambda _command: {
+        lambda _command, **_kwargs: {
             "status": 403,
             "data": {
                 "errcode": 10023,
@@ -140,7 +140,7 @@ def test_cnb_optional_still_converts_api_404_to_absence(monkeypatch: pytest.Monk
     monkeypatch.setattr(
         MODULE,
         "_run_json",
-        lambda _command: {"status": 404, "data": {"errcode": 5, "errmsg": "not found"}},
+        lambda _command, **_kwargs: {"status": 404, "data": {"errcode": 5, "errmsg": "not found"}},
     )
 
     response, absent = MODULE._cnb_optional(
@@ -888,7 +888,8 @@ def test_devgpu_recovery_stage_script_is_valid_posix_sh(tmp_path: Path) -> None:
 def test_git_push_environment_uses_preemptive_basic_header_without_askpass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("CNB_TOKEN", "existing-admin-token")
+    monkeypatch.setenv("CNB_TOKEN", "wrong-cli-token")
+    monkeypatch.setenv("MUSIC_KB_CNB_GIT_TOKEN", "existing-admin-token")
     env, askpass = MODULE._git_push_environment()
     assert askpass is None
     assert env["GIT_TERMINAL_PROMPT"] == "0"
@@ -897,6 +898,25 @@ def test_git_push_environment_uses_preemptive_basic_header_without_askpass(
     assert scheme == "Basic"
     assert base64.b64decode(encoded).decode("utf-8") == "cnb:existing-admin-token"
     assert "GIT_ASKPASS" not in env or env["GIT_ASKPASS"] == os.environ.get("GIT_ASKPASS")
+
+
+def test_run_cnb_strips_git_tokens_and_preserves_cli_oauth_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+    monkeypatch.setenv("CNB_TOKEN", "repository-token")
+    monkeypatch.setenv("MUSIC_KB_CNB_GIT_TOKEN", "dedicated-git-token")
+    monkeypatch.setenv("HOME", "/oauth-home")
+
+    def fake_run_json(_command, **kwargs):
+        captured.update(kwargs["env"])
+        return {"status": 200, "data": {"ok": True}}
+
+    monkeypatch.setattr(MODULE, "_run_json", fake_run_json)
+    MODULE.run_cnb(["cnb", "workspace", "workspace-stop", "--sn", "cnb-demo"])
+    assert "CNB_TOKEN" not in captured
+    assert "MUSIC_KB_CNB_GIT_TOKEN" not in captured
+    assert captured["HOME"] == "/oauth-home"
 
 
 def test_prepare_devgpu_overlay_reuses_exact_remote_branch(
@@ -933,7 +953,7 @@ def test_prepare_devgpu_overlay_reuses_exact_remote_branch(
         ["git", "rev-parse", "HEAD"], cwd=checkout, text=True, capture_output=True, check=True
     ).stdout.strip()
     subprocess.run(["git", "checkout", "--detach", campaign_commit], cwd=checkout, check=True)
-    monkeypatch.setenv("CNB_TOKEN", "existing-admin-token")
+    monkeypatch.setenv("MUSIC_KB_CNB_GIT_TOKEN", "existing-admin-token")
 
     remote_overlay_commit = {"value": overlay_commit}
 
