@@ -264,6 +264,37 @@ def _delivery_bound_staging_paths(workspace: Path, delivery: Path | None) -> tup
     return tuple(paths)
 
 
+def _discover_legacy_external_delivery_receipt(
+    workspace: Path,
+    delivery: Path | None,
+    *,
+    expected_count: int | None,
+) -> Path | None:
+    """Find only the source-run receipt a supplied delivery can reconcile.
+
+    A delivery path is never trusted as a deletion path. Its validated campaign
+    ID only selects one receipt beneath this workspace; the adapter later
+    revalidates every manifest, delivery, release, and remote safety field.
+    """
+
+    if delivery is None or not delivery.is_file():
+        return None
+    entries = load_campaign_delivery_file(delivery, expected_count=expected_count)
+    campaign_ids = {entry.campaign_id for entry in entries}
+    if len(campaign_ids) != 1:
+        return None
+    source_run_id = _safe_run_id(next(iter(campaign_ids)))
+    candidate = (
+        workspace / "data" / "weekly_runs" / source_run_id / "cnb" / "campaign-receipt.json"
+    ).resolve()
+    receipt = _read_optional_json(candidate)
+    if receipt is None:
+        return None
+    if receipt.get("status") not in {"failed", "interrupted"} or receipt.get("delivery") is not None:
+        return None
+    return candidate
+
+
 def _load_chart_profile(path: str | Path) -> dict[str, Any]:
     profile_path = Path(path).expanduser().resolve()
     try:
@@ -518,6 +549,7 @@ def run_weekly_run(
     campaign_receipt_result: dict[str, Any] | None = None
     materialization_result: dict[str, Any] | None = None
     download_result: dict[str, Any] = {}
+    legacy_external_receipt_path: Path | None = None
     campaign_resume = False
     campaign_resume_has_delivery = False
     download_resume = False
@@ -1137,6 +1169,13 @@ def run_weekly_run(
             else:
                 raise RuntimeError("CNB stage did not produce a canonical campaign delivery")
 
+        if delivery_supplied:
+            legacy_external_receipt_path = _discover_legacy_external_delivery_receipt(
+                root,
+                delivery_path,
+                expected_count=analysis_expected_count,
+            )
+
         import_result: dict[str, Any]
         with atom(context, "knowledge_import", inputs={"delivery": str(delivery_path) if delivery_path else None}) as outputs:
             if delivery_path is None or not delivery_path.is_file():
@@ -1334,14 +1373,13 @@ def run_weekly_run(
             "cnb_campaign_cleanup",
             inputs={
                 "receipt": str(campaign_receipt_path),
+                "legacy_external_receipt": str(legacy_external_receipt_path) if legacy_external_receipt_path else None,
                 "confirm": confirm_delete_cnb_repositories,
                 "cleanup_gate": cleanup_gate,
             },
         ) as outputs:
             campaign_exists = campaign_receipt_path.is_file() and campaign_receipt_result is not None
-            if not campaign_exists:
-                outputs.update({"status": "skipped", "reason": "no disposable campaign receipt"})
-            else:
+            if campaign_exists:
                 command = [
                     sys.executable,
                     str(campaign_adapter_path),
@@ -1371,6 +1409,82 @@ def run_weekly_run(
                     outputs.setdefault("status", "dry_run")
                 elif cleanup_result.get("clean") is not True:
                     raise RuntimeError(f"disposable campaign repository cleanup did not verify: {cleanup_result}")
+            elif legacy_external_receipt_path is not None:
+                reconciliation_path = (
+                    legacy_external_receipt_path.parent / "external-delivery-reconciliation.json"
+                ).resolve()
+                if not confirm_delete_cnb_repositories:
+                    outputs.update(
+                        {
+                            "status": "dry_run",
+                            "reason": "legacy external-delivery reconciliation requires explicit repository deletion confirmation",
+                            "reconciliation_receipt": str(reconciliation_path),
+                        }
+                    )
+                else:
+                    if release_result is None:
+                        raise RuntimeError("external-delivery reconciliation requires a verified release")
+                    reconcile_command = [
+                        sys.executable,
+                        str(campaign_adapter_path),
+                        "reconcile-external-delivery",
+                        "--policy",
+                        str(cnb_storage_policy_path),
+                        "--operations-file",
+                        str(operations_path),
+                        "--receipt",
+                        str(legacy_external_receipt_path),
+                        "--delivery",
+                        str(delivery_path),
+                        "--release-manifest",
+                        str(release_result["manifest"]),
+                        "--reconciliation-receipt",
+                        str(reconciliation_path),
+                        "--transport",
+                        cnb_transport,
+                    ]
+                    reconciliation_result, _ = _json_command_allow_failure(
+                        reconcile_command,
+                        cwd=root,
+                        timeout_seconds=min(timeout_seconds, 600),
+                    )
+                    outputs["external_reconciliation"] = reconciliation_result
+                    if reconciliation_result.get("status") != "succeeded":
+                        raise RuntimeError(
+                            "external delivery reconciliation did not verify: "
+                            f"{reconciliation_result}"
+                        )
+                    cleanup_command = [
+                        sys.executable,
+                        str(campaign_adapter_path),
+                        "cleanup-reconciled-external-delivery",
+                        "--policy",
+                        str(cnb_storage_policy_path),
+                        "--operations-file",
+                        str(operations_path),
+                        "--reconciliation-receipt",
+                        str(reconciliation_path),
+                        "--transport",
+                        cnb_transport,
+                        "--confirm-delete-cnb-repositories",
+                    ]
+                    if release_verification is not None and release_verification.get("valid") is True:
+                        cleanup_command.append("--release-verified")
+                    if cleanup_gate:
+                        cleanup_command.append("--peer-gate")
+                    cleanup_result, _ = _json_command_allow_failure(
+                        cleanup_command,
+                        cwd=root,
+                        timeout_seconds=min(timeout_seconds, 600),
+                    )
+                    outputs.update(cleanup_result)
+                    if cleanup_result.get("clean") is not True:
+                        raise RuntimeError(
+                            "reconciled disposable campaign repository cleanup did not verify: "
+                            f"{cleanup_result}"
+                        )
+            else:
+                outputs.update({"status": "skipped", "reason": "no disposable campaign receipt"})
         with atom(
             context,
             "audio_cleanup",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -177,6 +178,150 @@ def completed_receipt(tmp_path: Path, *, count: int = 2) -> dict:
         "state": str(tmp_path / "state.json"),
     }
     return receipt
+
+
+def external_delivery_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    source_url: str = "https://example.test/song",
+) -> tuple[Path, Path, Path]:
+    """Build one legacy receipt, an external delivery, and released provenance."""
+
+    source_sha256 = "b" * 64
+    output_text = "A verified Pop recording."
+    delivery_row = {
+        "schema_version": 1,
+        "campaign_id": "run-1",
+        "id": "song-1",
+        "manifest_index": 1,
+        "title": "Song",
+        "artist": "Artist",
+        "relative_audio_path": "audio/song-1.mp3",
+        "source_sha256": source_sha256,
+        "source_bytes": 123,
+        "source_url": source_url,
+        "output_text": output_text,
+        "output_text_sha256": hashlib.sha256(output_text.encode("utf-8")).hexdigest(),
+        "generated_token_count": 12,
+        "max_new_tokens": 2048,
+        "contract": "contract-1",
+        "attempt_id": "attempt-1",
+        "canonical_source": "campaign",
+    }
+    source_manifest = tmp_path / "source-manifest.jsonl"
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "id": delivery_row["id"],
+                "relative_audio_path": delivery_row["relative_audio_path"],
+                "source_bytes": delivery_row["source_bytes"],
+                "sha256": delivery_row["source_sha256"],
+                "title": delivery_row["title"],
+                "artist": delivery_row["artist"],
+                "campaign_id": delivery_row["campaign_id"],
+                "source_url": delivery_row["source_url"],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    receipt = receipt_identity(tmp_path, count=1)
+    receipt.update(
+        {
+            "status": "failed",
+            "manifest": {
+                "path": str(source_manifest),
+                "sha256": MODULE.sha256_file(source_manifest),
+                "item_count": 1,
+                "source_bytes": 123,
+                "source_links": 1,
+                "campaign_id": "run-1",
+            },
+        }
+    )
+    receipt_path = tmp_path / "legacy-receipt.json"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    delivery_path = tmp_path / "external-delivery.jsonl"
+    delivery_path.write_text(
+        json.dumps(delivery_row, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    release_manifest = tmp_path / "manifest.json"
+    release_manifest.write_text("{}\n", encoding="utf-8")
+    database = tmp_path / "release.sqlite"
+    connection = sqlite3.connect(database)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE analysis_revision (id TEXT PRIMARY KEY, recording_id TEXT NOT NULL);
+            CREATE TABLE source_track (
+                recording_id TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                source_track_id TEXT NOT NULL,
+                source_url TEXT
+            );
+            CREATE TABLE campaign_delivery_provenance (
+                campaign_id TEXT NOT NULL,
+                delivery_id TEXT NOT NULL,
+                analysis_id TEXT NOT NULL,
+                manifest_index INTEGER NOT NULL,
+                source_title TEXT NOT NULL,
+                source_artist TEXT NOT NULL,
+                relative_audio_path TEXT NOT NULL,
+                source_sha256 TEXT NOT NULL,
+                source_bytes INTEGER NOT NULL,
+                output_text_sha256 TEXT NOT NULL,
+                generated_token_count INTEGER NOT NULL,
+                max_new_tokens INTEGER NOT NULL,
+                contract TEXT NOT NULL,
+                attempt_id TEXT NOT NULL,
+                canonical_source TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute("INSERT INTO analysis_revision VALUES (?, ?)", ("analysis-1", "recording-1"))
+        connection.execute(
+            "INSERT INTO source_track VALUES (?, ?, ?, ?)",
+            ("recording-1", "kugou", delivery_row["id"], delivery_row["source_url"]),
+        )
+        connection.execute(
+            "INSERT INTO campaign_delivery_provenance VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                delivery_row["campaign_id"],
+                delivery_row["id"],
+                "analysis-1",
+                delivery_row["manifest_index"],
+                delivery_row["title"],
+                delivery_row["artist"],
+                delivery_row["relative_audio_path"],
+                delivery_row["source_sha256"],
+                delivery_row["source_bytes"],
+                delivery_row["output_text_sha256"],
+                delivery_row["generated_token_count"],
+                delivery_row["max_new_tokens"],
+                delivery_row["contract"],
+                delivery_row["attempt_id"],
+                delivery_row["canonical_source"],
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    monkeypatch.setattr(
+        MODULE,
+        "verify_snapshot",
+        lambda _path: {
+            "valid": True,
+            "manifest": str(release_manifest),
+            "database": str(database),
+            "release_name": "fixture-release",
+            "sha256": MODULE.sha256_file(database),
+        },
+    )
+    return receipt_path, delivery_path, release_manifest
 
 
 def test_run_id_and_repository_name_are_strict() -> None:
@@ -799,3 +944,81 @@ def test_cleanup_deletes_only_after_complete_receipt_proof(tmp_path: Path) -> No
     assert result["clean"] is True
     assert result["deleted"] is True
     assert any("delete-repo" in " ".join(command) for command in commands)
+
+
+def test_reconciled_external_delivery_deletes_legacy_repository_without_mutating_source_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(policy()), encoding="utf-8")
+    receipt_path, delivery_path, release_manifest = external_delivery_evidence(tmp_path, monkeypatch)
+    source_before = receipt_path.read_bytes()
+    reconciliation_path = tmp_path / "external-reconciliation.json"
+
+    reconciliation = MODULE.reconcile_external_delivery(
+        policy_path=policy_path,
+        operations_path=OPERATIONS,
+        source_receipt_path=receipt_path,
+        delivery_path=delivery_path,
+        release_manifest_path=release_manifest,
+        reconciliation_receipt_path=reconciliation_path,
+        transport="git-objects",
+    )
+
+    assert reconciliation["status"] == "succeeded"
+    assert reconciliation["proof"]["identity"]["count"] == 1
+    assert receipt_path.read_bytes() == source_before
+
+    state, commands, base_runner = cnb_runner_factory(target_present=True)
+
+    def runner(command):
+        if "delete-repo" in " ".join(command):
+            state["target_present"] = False
+            state["group_object"] -= 100
+        return base_runner(command)
+
+    cleanup = MODULE.cleanup_reconciled_external_delivery_campaign(
+        policy_path=policy_path,
+        operations_path=OPERATIONS,
+        reconciliation_receipt_path=reconciliation_path,
+        confirm=True,
+        release_verified=True,
+        peer_gate=True,
+        runner=runner,
+        transport="git-objects",
+    )
+
+    assert cleanup["status"] == "succeeded"
+    assert cleanup["clean"] is True
+    assert cleanup["deleted"] is True
+    assert receipt_path.read_bytes() == source_before
+    assert any("delete-repo" in " ".join(command) for command in commands)
+    saved = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    assert saved["cleanup"]["status"] == "succeeded"
+
+
+def test_external_delivery_reconciliation_fails_closed_on_manifest_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(policy()), encoding="utf-8")
+    receipt_path, delivery_path, release_manifest = external_delivery_evidence(tmp_path, monkeypatch)
+    source_before = receipt_path.read_bytes()
+    row = json.loads(delivery_path.read_text(encoding="utf-8"))
+    row["source_url"] = "https://example.test/not-the-manifest-url"
+    delivery_path.write_text(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    reconciliation_path = tmp_path / "external-reconciliation.json"
+
+    reconciliation = MODULE.reconcile_external_delivery(
+        policy_path=policy_path,
+        operations_path=OPERATIONS,
+        source_receipt_path=receipt_path,
+        delivery_path=delivery_path,
+        release_manifest_path=release_manifest,
+        reconciliation_receipt_path=reconciliation_path,
+        transport="git-objects",
+    )
+
+    assert reconciliation["status"] == "blocked"
+    assert any("source manifest/external delivery identity mismatch" in item["error"] for item in reconciliation["failures"])
+    assert receipt_path.read_bytes() == source_before

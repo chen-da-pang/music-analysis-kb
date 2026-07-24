@@ -46,7 +46,14 @@ download, fallback, CNB input, campaign repository, campaign submit, and CNB
 analysis as skipped; do not query CNB capacity or repeat pre-analysis work. If
 the same run also has a campaign receipt, bind the supplied delivery to that
 receipt and still run receipt-bound cleanup after the local release and peer
-gates. An external delivery with no campaign receipt has nothing to clean up.
+gates. An external delivery normally has no disposable repository to clean up.
+The narrow legacy exception is a local source-run receipt that is still
+`failed` or `interrupted`, has no delivery field, and maps exactly to the
+delivery's campaign ID. After the new release and peer gate, cleanup must create
+a separate external-delivery reconciliation receipt—without editing the failed
+receipt—and compare every source-manifest and delivery ID, index, path, hash,
+byte count, and listening URL against the verified release provenance. Only
+that receipt may authorize the dedicated destructive cleanup.
 
 When a run directory already contains a failed or interrupted campaign receipt,
 the next invocation with the same `--run-id` is a campaign resume. It restores
@@ -137,9 +144,12 @@ be purged, so inventory—not file presence alone—is the dedupe record.
 18. **`cnb_campaign_cleanup`** — only after local release verification and either
     successful enabled peers or explicit peer skip, delete the exact receipt-bound
     disposable repository when `--confirm-delete-cnb-repositories` is present.
-    Verify no running workspace, repository 404, zero repository object volume,
-    organization usage decrease when applicable, and protected runtime/main/tag
-    survival. Gate blocks and dry-runs are written to the campaign receipt.
+    A legacy failed/interrupted receipt with no delivery can use only its
+    separately revalidated external-delivery reconciliation receipt; never
+    rewrite the old receipt to pretend it completed. Verify no running workspace,
+    repository 404, zero repository object volume, organization usage decrease
+    when applicable, and protected runtime/main/tag survival. Gate blocks and
+    dry-runs are written to the corresponding receipt.
 19. **`audio_cleanup`** — only after the same release/peer gate and
     `--confirm-delete-audio`; delete audio whose platform track ID is present in
     the verified KB and mark `purged_after_analysis`. For a supplied canonical
@@ -172,8 +182,11 @@ the same repository slug. Cleanup is irreversible and requires the separate
 repository confirmation flag in addition to audio/CNB-storage confirmations.
 The cleanup atom blocks unless the receipt also proves repository
 creation/push, every shard's success and index set, complete runtime-export
-provenance, and a delivery file whose hash/count match the manifest; blocked
-and dry-run outcomes are written back to that receipt.
+provenance, and a delivery file whose hash/count match the manifest. A legacy
+receipt without that delivery remains blocked unless a separately stored
+external-delivery reconciliation proves the untouched receipt's manifest,
+external delivery, and verified release provenance are exactly the same.
+Blocked and dry-run outcomes are written back to the corresponding receipt.
 
 ## Invocation examples
 

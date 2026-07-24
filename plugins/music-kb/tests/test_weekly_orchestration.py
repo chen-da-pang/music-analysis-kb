@@ -10,6 +10,7 @@ import pytest
 from music_kb.schema import initialize_database
 from music_kb.weekly_orchestration import (
     _cleanup_gate_satisfied,
+    _discover_legacy_external_delivery_receipt,
     _cnb_cleanup_receipt_is_acceptable,
     _delivery_bound_staging_paths,
     _inventory_database_path,
@@ -83,6 +84,32 @@ def test_delivery_bound_staging_paths_are_scoped_to_canonical_delivery(tmp_path:
         campaign_staging.resolve(),
     )
     assert _delivery_bound_staging_paths(workspace, tmp_path / "external-delivery.jsonl") == ()
+
+
+def test_supplied_delivery_discovers_only_failed_source_campaign_receipt(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    row = json.loads(FIXTURE.read_text(encoding="utf-8").splitlines()[0])
+    row["source_url"] = "https://example.test/listen"
+    delivery = workspace / "external-delivery.jsonl"
+    delivery.parent.mkdir(parents=True)
+    delivery.write_text(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    source_receipt = (
+        workspace
+        / "data"
+        / "weekly_runs"
+        / row["campaign_id"]
+        / "cnb"
+        / "campaign-receipt.json"
+    )
+    source_receipt.parent.mkdir(parents=True)
+    source_receipt.write_text(json.dumps({"status": "failed", "delivery": None}), encoding="utf-8")
+
+    assert _discover_legacy_external_delivery_receipt(
+        workspace, delivery, expected_count=1
+    ) == source_receipt.resolve()
+
+    source_receipt.write_text(json.dumps({"status": "completed", "delivery": None}), encoding="utf-8")
+    assert _discover_legacy_external_delivery_receipt(workspace, delivery, expected_count=1) is None
 
 
 def test_cleanup_gate_requires_publish_and_release() -> None:
@@ -207,11 +234,21 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
         "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows),
         encoding="utf-8",
     )
+    legacy_receipt = (
+        tmp_path
+        / "data"
+        / "weekly_runs"
+        / rows[0]["campaign_id"]
+        / "cnb"
+        / "campaign-receipt.json"
+    )
+    legacy_receipt.parent.mkdir(parents=True)
+    legacy_receipt.write_text(json.dumps({"status": "failed", "delivery": None}), encoding="utf-8")
 
     database = tmp_path / "master.sqlite"
     initialize_database(database)
     inventory = tmp_path / "data" / "song_inventory.json"
-    inventory.parent.mkdir(parents=True)
+    inventory.parent.mkdir(parents=True, exist_ok=True)
     inventory.write_text('{"schema_version":1,"songs":[]}\n', encoding="utf-8")
     audio_root = tmp_path / "audio"
     audio_root.mkdir()
@@ -263,6 +300,8 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
     assert state["atoms"]["snapshot"]["outputs"]["verification"]["valid"] is True
     assert state["atoms"]["local_snapshot_install"]["outputs"]["status"] == "skipped"
     assert state["atoms"]["peer_publish"]["outputs"]["reason"] == "peer sync explicitly skipped"
+    assert state["atoms"]["cnb_campaign_cleanup"]["outputs"]["status"] == "dry_run"
+    assert "explicit repository deletion confirmation" in state["atoms"]["cnb_campaign_cleanup"]["outputs"]["reason"]
     assert not (tmp_path / "data" / "weekly_runs" / "supplied-delivery-resume" / "charts").exists()
 
 
