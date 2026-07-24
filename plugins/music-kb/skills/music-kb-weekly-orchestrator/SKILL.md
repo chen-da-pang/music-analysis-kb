@@ -135,8 +135,11 @@ be purged, so inventory—not file presence alone—is the dedupe record.
     survival. Gate blocks and dry-runs are written to the campaign receipt.
 19. **`audio_cleanup`** — only after the same release/peer gate and
     `--confirm-delete-audio`; delete audio whose platform track ID is present in
-    the verified KB and mark `purged_after_analysis`. Preserve unmatched or
-    downloaded-but-not-analyzed audio.
+    the verified KB and mark `purged_after_analysis`. For a supplied canonical
+    delivery, also remove only receipt-bound local CNB input/check-out audio
+    whose manifest exactly matches every delivery ID, source hash/bytes, and
+    source URL; preserve the manifests, canonical evidence, and every unmatched
+    or downloaded-but-not-analyzed audio file.
 20. **`cnb_storage_cleanup`** — with `--confirm-delete-cnb-storage`, clean only
     visible legacy refs/assets allowed by policy after the disposable repository
     has been handled. Never delete `main`, the protected runtime, the master DB,

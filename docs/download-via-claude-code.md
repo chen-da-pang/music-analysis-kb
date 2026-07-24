@@ -13,7 +13,9 @@ The reusable workflow is now split into two tools:
 - The same worker writes an append-only exact-identity lyric receipt from
   `SongInfo.lyric`; it never promotes a loose `.lrc` file into the database.
 - `prune_audio_library.py` removes local audio only after the release and link
-  and lyric-coverage counts pass their safety gates; it preserves the
+  and lyric-coverage counts pass their safety gates; for a supplied canonical
+  delivery it also removes only manifest/hash-bound local CNB staging audio and
+  preserves manifests, canonical evidence, unmatched files, and the
   deduplication inventory.
 
 `run_claude_download.py` is the atom entry point. It invokes Claude Code with

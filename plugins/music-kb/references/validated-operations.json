@@ -88,7 +88,7 @@
       "effective_method": "读取 publisher-only peers.toml；只同步 release，远端验证后原子切换 current.sqlite；单个 peer 失败可按名称重试。"
     },
     "audio_cleanup": {
-      "effective_method": "仅在本地 release 已验证，且所有启用 peer 成功或用户显式选择 --skip-peers 后，校验 provenance/source_tracks/source_links 和 inventory；只删除能按平台 track ID 精确匹配知识库 source_track 的本地音频目录，并标记 purged_after_analysis。未匹配、尚未分析的下载音频必须保留。"
+      "effective_method": "仅在本地 release 已验证，且所有启用 peer 成功或用户显式选择 --skip-peers 后，校验 provenance/source_tracks/source_links 和 inventory；删除能按平台 track ID 精确匹配知识库 source_track 的本地音频目录，并标记 purged_after_analysis。若本次为 supplied canonical delivery，还必须逐项校验本地 CNB staging manifest 与 delivery 的 id/campaign_id/relative path/source SHA-256/bytes/source URL 以及实际音频 hash，只有完全一致才删除 staging audio；保留 manifest、canonical evidence、未匹配和未分析音频。"
     },
     "cnb_storage_cleanup": {
       "effective_method": "CNB 只作为 GitHub runner 的可丢弃 GPU 运行镜像；fresh campaign 的 repository/input/result/ledger 在本周 canonical delivery 和本地 release/peer gate 完成后由 cnb_campaign_cleanup 整仓删除并验证 404/zero charge/group drop/runtime protection。随后仅清理受保护 runtime 仓库中仍命中明确旧分支/附件白名单的可见残留；不删除 main、runtime、master DB、release 或 canonical 本地证据。普通可见清理若 moss 对象计数仍高，记录 server_gc_pending=true，不把它误报成已回收。"

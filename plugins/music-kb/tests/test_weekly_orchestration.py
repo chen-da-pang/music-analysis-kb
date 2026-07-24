@@ -11,6 +11,7 @@ from music_kb.schema import initialize_database
 from music_kb.weekly_orchestration import (
     _cleanup_gate_satisfied,
     _cnb_cleanup_receipt_is_acceptable,
+    _delivery_bound_staging_paths,
     _inventory_database_path,
     _resolve_campaign_repository_root,
     run_weekly_run,
@@ -53,6 +54,35 @@ def test_inventory_database_path_honors_explicit_chart_database(tmp_path: Path) 
 
     assert _inventory_database_path(tmp_path, explicit) == explicit
     assert _inventory_database_path(tmp_path, None) == tmp_path / "data" / "music_trends.sqlite"
+
+
+def test_delivery_bound_staging_paths_are_scoped_to_canonical_delivery(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    run_id = "kugou-weekly-20260721"
+    delivery = workspace / "data" / "weekly_runs" / run_id / "cnb" / "canonical" / "delivery.jsonl"
+    delivery.parent.mkdir(parents=True)
+    delivery.write_text("{}\n", encoding="utf-8")
+    input_staging = workspace / "data" / "weekly_runs" / run_id / "cnb-input"
+    campaign_staging = (
+        workspace
+        / "data"
+        / "weekly_runs"
+        / run_id
+        / "cnb"
+        / "campaign-repository"
+        / "repo"
+        / "data"
+        / "input"
+        / run_id
+    )
+    input_staging.mkdir(parents=True)
+    campaign_staging.mkdir(parents=True)
+
+    assert _delivery_bound_staging_paths(workspace, delivery) == (
+        input_staging.resolve(),
+        campaign_staging.resolve(),
+    )
+    assert _delivery_bound_staging_paths(workspace, tmp_path / "external-delivery.jsonl") == ()
 
 
 def test_cleanup_gate_requires_publish_and_release() -> None:
