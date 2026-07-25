@@ -199,6 +199,38 @@ def receipt_identity(tmp_path: Path, *, run_id: str = "run-1", count: int = 1) -
     }
 
 
+def write_devgpu_history_review(source_path: Path, *, path: Path | None = None) -> Path:
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    review_path = path or source_path.with_name("history-review.json")
+    review_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "atom": "cnb_campaign_devgpu_recovery",
+                "run_id": source["run_id"],
+                "repository": source["repository"],
+                "source_receipt_sha256": MODULE.sha256_file(source_path),
+                "operations_sha256": MODULE.sha256_file(OPERATIONS),
+                "reviewed_at": "2026-07-25T00:00:00Z",
+                "failure_fingerprint": {"classification": "initial_dirty_l40_allocation"},
+                "history_evidence": [
+                    {
+                        "source": "github-issue:73",
+                        "finding": "A dirty allocation must fail closed before hydrate.",
+                        "reused_operation": "same-receipt serial recovery",
+                    }
+                ],
+                "decision": {
+                    "action": "retry_same_receipt",
+                    "rationale": "The immutable campaign identity and GPU gate remain valid.",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return review_path
+
+
 def completed_receipt(tmp_path: Path, *, count: int = 2) -> dict:
     receipt = receipt_identity(tmp_path, count=count)
     receipt["status"] = "completed"
@@ -1127,6 +1159,7 @@ def test_devgpu_recovery_stops_workspace_after_stage_failure(
     source.update({"status": "failed", "campaign_commit": "c" * 40})
     source_path = tmp_path / "source-receipt.json"
     source_path.write_text(json.dumps(source), encoding="utf-8")
+    history_review = write_devgpu_history_review(source_path)
     recovery_path = tmp_path / "recovery" / "receipt.json"
     _, commands, base_runner = cnb_runner_factory(target_present=True)
     monkeypatch.setattr(
@@ -1159,6 +1192,7 @@ def test_devgpu_recovery_stops_workspace_after_stage_failure(
             source_receipt_path=source_path,
             recovery_receipt_path=recovery_path,
             run_dir=tmp_path,
+            history_review_path=history_review,
             execute=True,
             wait=True,
             poll_seconds=0,
@@ -1170,6 +1204,59 @@ def test_devgpu_recovery_stops_workspace_after_stage_failure(
     assert saved["status"] == "failed"
     assert saved["workspace"]["stopped_after_failure"] is True
     assert sum("workspace-stop" in " ".join(command) for command in commands) == 1
+
+
+def test_devgpu_recovery_requires_a_receipt_bound_history_review_before_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    value = policy()
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(value), encoding="utf-8")
+    source = receipt_identity(tmp_path, count=2)
+    source.update({"status": "failed", "campaign_commit": "c" * 40})
+    source_path = tmp_path / "source-receipt.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    recovery_path = tmp_path / "recovery" / "receipt.json"
+    _, commands, runner = cnb_runner_factory(target_present=True)
+    monkeypatch.setattr(
+        MODULE,
+        "_verify_build_gpu_platform_gate",
+        lambda *_args, **_kwargs: {"classification": "cnb_build_gpu_pre_freezing_quota", "builds": []},
+    )
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="requires --history-review"):
+        MODULE.recover_campaign_with_devgpu(
+            policy_path=policy_path,
+            operations_path=OPERATIONS,
+            source_receipt_path=source_path,
+            recovery_receipt_path=recovery_path,
+            run_dir=tmp_path,
+            execute=True,
+            wait=True,
+            poll_seconds=0,
+            timeout_seconds=2,
+            runner=runner,
+            transport="git-objects",
+        )
+    assert not any("start-workspace" in " ".join(command) for command in commands)
+
+
+def test_devgpu_history_review_rejects_a_different_source_receipt(tmp_path: Path) -> None:
+    source = receipt_identity(tmp_path, count=2)
+    source_path = tmp_path / "source-receipt.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    history_review = write_devgpu_history_review(source_path)
+    review = json.loads(history_review.read_text(encoding="utf-8"))
+    review["source_receipt_sha256"] = "0" * 64
+    history_review.write_text(json.dumps(review), encoding="utf-8")
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="source_receipt_sha256"):
+        MODULE._validated_devgpu_history_review(
+            history_review,
+            source_receipt_path=source_path,
+            source_receipt=source,
+            operations_sha256=MODULE.sha256_file(OPERATIONS),
+        )
 
 
 def test_devgpu_workspace_success_requires_the_full_resume_stage() -> None:
@@ -1248,6 +1335,7 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
     source_path = tmp_path / "source-receipt.json"
     source_path.write_text(json.dumps(source, sort_keys=True), encoding="utf-8")
     source_sha = MODULE.sha256_file(source_path)
+    history_review = write_devgpu_history_review(source_path)
     recovery_path = tmp_path / "devgpu-recovery.json"
     _, commands, base_runner = cnb_runner_factory(target_present=True)
 
@@ -1307,6 +1395,7 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
         source_receipt_path=source_path,
         recovery_receipt_path=recovery_path,
         run_dir=tmp_path,
+        history_review_path=history_review,
         execute=True,
         wait=True,
         poll_seconds=0,
@@ -1316,6 +1405,7 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
     )
     assert result["status"] == "completed"
     assert result["workspace"]["stopped"] is True
+    assert result["history_review"]["sha256"] == MODULE.sha256_file(history_review)
     assert [item["index"] for item in result["logical_shards"]] == [1, 2]
     assert MODULE.sha256_file(source_path) == source_sha
     assert sum("start-workspace" in " ".join(command) for command in commands) == 1
