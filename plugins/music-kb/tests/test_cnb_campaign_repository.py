@@ -958,6 +958,10 @@ def test_devgpu_recovery_rejects_unknown_or_malformed_gpu_profiles() -> None:
     malformed["devgpu_recovery_profiles"]["H20"]["minimum_free_mib"] = 0
     with pytest.raises(MODULE.CampaignRepositoryError, match="minimum_free_mib"):
         MODULE.resolve_devgpu_recovery_profile(malformed, "H20")
+    malformed = policy()
+    malformed["devgpu_recovery_profiles"]["H20"]["runner_tag"] = "cnb:arch:amd64:gpu:L40"
+    with pytest.raises(MODULE.CampaignRepositoryError, match="runner_tag"):
+        MODULE.resolve_devgpu_recovery_profile(malformed, "H20")
 
 
 def test_recover_devgpu_cli_passes_the_selected_profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -115,8 +115,8 @@ def resolve_devgpu_recovery_profile(policy: Mapping[str, Any], profile_name: str
     expected_gpu = str(raw.get("expected_gpu", "")).strip()
     execution_profile = str(raw.get("execution_profile", "")).strip()
     minimum_free_mib = raw.get("minimum_free_mib")
-    if not runner_tag.startswith("cnb:arch:amd64:gpu:"):
-        raise CampaignRepositoryError(f"Dev GPU profile {name} has an unsafe runner_tag")
+    if runner_tag != f"cnb:arch:amd64:gpu:{name}":
+        raise CampaignRepositoryError(f"Dev GPU profile {name} runner_tag must select that exact GPU")
     if expected_gpu != name:
         raise CampaignRepositoryError(f"Dev GPU profile {name} expected_gpu must equal its profile name")
     if execution_profile != f"nvidia-{name.lower()}/full_precision/bfloat16":
