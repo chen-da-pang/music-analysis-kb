@@ -19,6 +19,7 @@ class ManualGpuGateError(ValueError):
 
 
 _QUERY = "name,uuid,memory.total,memory.used,memory.free,utilization.gpu"
+_COMPUTE_PROCESS_QUERY = "pid,process_name,used_memory"
 
 
 def _parse_nonnegative_integer(value: str, *, field: str) -> int:
@@ -63,6 +64,76 @@ def query_gpu() -> dict[str, object]:
         detail = (result.stderr or result.stdout).strip()
         raise ManualGpuGateError(f"nvidia-smi query failed with exit {result.returncode}: {detail}")
     return parse_gpu_query(result.stdout)
+
+
+def parse_compute_process_query(output: str) -> list[dict[str, object]]:
+    """Parse the visible GPU compute-process table without recording commands."""
+    if output.strip().lower() in {
+        "no running processes found",
+        "no running compute processes found",
+    }:
+        return []
+    rows = [row for row in csv.reader(line for line in output.splitlines() if line.strip())]
+    processes: list[dict[str, object]] = []
+    for row in rows:
+        values = [column.strip() for column in row]
+        if len(values) != 3:
+            raise ManualGpuGateError(
+                f"Expected three compute-process fields, received {len(values)}"
+            )
+        pid, process_name, used_memory = values
+        parsed_pid = _parse_nonnegative_integer(pid, field="process.pid")
+        if parsed_pid == 0:
+            raise ManualGpuGateError("process.pid must be positive")
+        if not process_name:
+            raise ManualGpuGateError("process.name must not be empty")
+        processes.append(
+            {
+                "pid": parsed_pid,
+                "process_name": process_name,
+                "memory_used_mib": _parse_nonnegative_integer(
+                    used_memory,
+                    field="process.used_memory",
+                ),
+            }
+        )
+    return processes
+
+
+def query_compute_processes() -> dict[str, object]:
+    """Return only the GPU process details needed to classify a dirty allocation.
+
+    NVIDIA containers may hide host processes.  That limitation is evidence in
+    itself, so an unavailable or malformed query is recorded instead of being
+    silently treated as an empty process table.  It never changes admission:
+    ``query_gpu`` remains the fail-closed gate.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                f"--query-compute-apps={_COMPUTE_PROCESS_QUERY}",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        return {
+            "status": "unavailable",
+            "error": f"nvidia-smi compute-process query unavailable: {type(exc).__name__}",
+        }
+    if result.returncode != 0:
+        return {
+            "status": "unavailable",
+            "error": f"nvidia-smi compute-process query failed with exit {result.returncode}",
+        }
+    try:
+        processes = parse_compute_process_query(result.stdout)
+    except ManualGpuGateError as exc:
+        return {"status": "unavailable", "error": str(exc)}
+    return {"status": "available", "processes": processes}
 
 
 def validate_gpu_allocation(
@@ -138,15 +209,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         "checked_at_epoch_seconds": round(time.time(), 3),
     }
     try:
-        snapshot = validate_gpu_allocation(
-            query_gpu(),
+        snapshot = query_gpu()
+        # Preserve the observed snapshot even when validation rejects it.  A
+        # failure receipt without the measurement cannot distinguish a dirty
+        # CNB allocation from a runner-side model load.
+        result.update(snapshot)
+        validate_gpu_allocation(
+            snapshot,
             expected_gpu=args.expected_gpu,
             minimum_free_mib=args.minimum_free_mib,
             max_utilization_percent=args.max_utilization_percent,
         )
-        result.update({"status": "pass", **snapshot})
+        result["status"] = "pass"
     except (ManualGpuGateError, OSError) as exc:
         result.update({"status": "fail", "error": str(exc)})
+    result["compute_processes"] = query_compute_processes()
     _atomic_write_json(args.receipt, result)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result["status"] == "pass" else 2
