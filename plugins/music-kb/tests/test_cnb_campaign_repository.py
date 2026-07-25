@@ -996,7 +996,7 @@ def test_run_cnb_strips_git_tokens_and_preserves_cli_oauth_environment(
     assert captured["HOME"] == "/oauth-home"
 
 
-def test_prepare_devgpu_overlay_reuses_exact_remote_branch(
+def test_prepare_devgpu_overlay_refreshes_allowed_runner_file_then_reuses_remote_branch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     value = policy()
@@ -1059,15 +1059,46 @@ def test_prepare_devgpu_overlay_reuses_exact_remote_branch(
         "repository": "org/music-flamingo-campaign-run-1",
         "manifest": {"item_count": 2, "sha256": "b" * 64},
     }
+    refresh_export = tmp_path / "refresh-export"
+    refreshed_gate = refresh_export / "scripts" / "check_manual_gpu_gate.py"
+    refreshed_gate.parent.mkdir(parents=True)
+    refreshed_gate.write_text("# refreshed gate\n", encoding="utf-8")
+    runner_refresh = {
+        "schema_version": 1,
+        "github_repository": "chen-da-pang/music-analysis-kb",
+        "github_commit": "f" * 40,
+        "files": [
+            {
+                "path": "scripts/check_manual_gpu_gate.py",
+                "bytes": refreshed_gate.stat().st_size,
+                "sha256": MODULE.sha256_file(refreshed_gate),
+            }
+        ],
+    }
     result = MODULE._prepare_devgpu_overlay(
         policy=value,
         source_receipt=source,
         recovery_dir=tmp_path / "recovery",
+        runtime_export_dir=refresh_export,
+        runner_refresh=runner_refresh,
     )
-    assert result["reused"] is True
-    assert result["commit"] == overlay_commit
+    assert result["updated"] is True
+    assert result["previous_commit"] == overlay_commit
+    assert result["commit"] != overlay_commit
     assert result["parent_campaign_commit"] == campaign_commit
     assert MODULE.sha256_file(Path(result["path"]) / ".cnb.yml") == result["config_sha256"]
+    assert (Path(result["path"]) / "scripts" / "check_manual_gpu_gate.py").read_text(encoding="utf-8") == "# refreshed gate\n"
+    assert json.loads((Path(result["path"]) / MODULE.DEVGPU_RECOVERY_REFRESH_METADATA).read_text(encoding="utf-8")) == runner_refresh
+
+    reused = MODULE._prepare_devgpu_overlay(
+        policy=value,
+        source_receipt=source,
+        recovery_dir=tmp_path / "recovery",
+        runtime_export_dir=refresh_export,
+        runner_refresh=runner_refresh,
+    )
+    assert reused["reused"] is True
+    assert reused["commit"] == result["commit"]
 
     repaired_policy = json.loads(json.dumps(value))
     repaired_policy["campaign_repository"]["audio_clip_seconds"] = 239
@@ -1075,10 +1106,12 @@ def test_prepare_devgpu_overlay_reuses_exact_remote_branch(
         policy=repaired_policy,
         source_receipt=source,
         recovery_dir=tmp_path / "recovery",
+        runtime_export_dir=refresh_export,
+        runner_refresh=runner_refresh,
     )
     assert repaired["updated"] is True
     assert repaired["reused"] is False
-    assert repaired["previous_commit"] == overlay_commit
+    assert repaired["previous_commit"] == result["commit"]
     assert repaired["commit"] == remote_overlay_commit["value"]
     assert repaired["commit"] != overlay_commit
 
@@ -1086,6 +1119,8 @@ def test_prepare_devgpu_overlay_reuses_exact_remote_branch(
         policy=repaired_policy,
         source_receipt=source,
         recovery_dir=tmp_path / "recovery",
+        runtime_export_dir=refresh_export,
+        runner_refresh=runner_refresh,
     )
     assert reused_repair["reused"] is True
     assert reused_repair["commit"] == repaired["commit"]
@@ -1185,6 +1220,12 @@ def test_devgpu_recovery_stops_workspace_after_stage_failure(
             "path": str(tmp_path / "overlay"),
         },
     )
+    monkeypatch.setattr(MODULE, "_validate_commit", lambda _root, commit: commit)
+    monkeypatch.setattr(
+        MODULE,
+        "_prepare_devgpu_runner_refresh",
+        lambda **_kwargs: (tmp_path / "runtime-export", {"github_commit": "a" * 40, "files": []}),
+    )
     with pytest.raises(MODULE.CampaignRepositoryError, match="terminal status failed"):
         MODULE.recover_campaign_with_devgpu(
             policy_path=policy_path,
@@ -1199,6 +1240,8 @@ def test_devgpu_recovery_stops_workspace_after_stage_failure(
             timeout_seconds=2,
             runner=runner,
             transport="git-objects",
+            repository_root=tmp_path,
+            github_commit="a" * 40,
         )
     saved = json.loads(recovery_path.read_text(encoding="utf-8"))
     assert saved["status"] == "failed"
@@ -1235,6 +1278,41 @@ def test_devgpu_recovery_requires_a_receipt_bound_history_review_before_workspac
             wait=True,
             poll_seconds=0,
             timeout_seconds=2,
+            runner=runner,
+            transport="git-objects",
+        )
+    assert not any("start-workspace" in " ".join(command) for command in commands)
+
+
+def test_devgpu_recovery_requires_github_runner_refresh_before_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    value = policy()
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(value), encoding="utf-8")
+    source = receipt_identity(tmp_path, count=2)
+    source.update({"status": "failed", "campaign_commit": "c" * 40})
+    source_path = tmp_path / "source-receipt.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    history_review = write_devgpu_history_review(source_path)
+    recovery_path = tmp_path / "recovery" / "receipt.json"
+    _, commands, runner = cnb_runner_factory(target_present=True)
+    monkeypatch.setattr(
+        MODULE,
+        "_verify_build_gpu_platform_gate",
+        lambda *_args, **_kwargs: {"classification": "cnb_build_gpu_pre_freezing_quota", "builds": []},
+    )
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="requires --repository-root and --github-commit"):
+        MODULE.recover_campaign_with_devgpu(
+            policy_path=policy_path,
+            operations_path=OPERATIONS,
+            source_receipt_path=source_path,
+            recovery_receipt_path=recovery_path,
+            run_dir=tmp_path,
+            history_review_path=history_review,
+            execute=True,
+            wait=True,
             runner=runner,
             transport="git-objects",
         )
@@ -1377,6 +1455,12 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
             "path": str(tmp_path / "overlay"),
         },
     )
+    monkeypatch.setattr(MODULE, "_validate_commit", lambda _root, commit: commit)
+    monkeypatch.setattr(
+        MODULE,
+        "_prepare_devgpu_runner_refresh",
+        lambda **_kwargs: (tmp_path / "runtime-export", {"github_commit": "a" * 40, "files": []}),
+    )
     recover_calls: list[dict] = []
 
     def fake_recover_delivery(*_args, **kwargs):
@@ -1402,6 +1486,8 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
         timeout_seconds=2,
         runner=runner,
         transport="git-objects",
+        repository_root=tmp_path,
+        github_commit="a" * 40,
     )
     assert result["status"] == "completed"
     assert result["workspace"]["stopped"] is True

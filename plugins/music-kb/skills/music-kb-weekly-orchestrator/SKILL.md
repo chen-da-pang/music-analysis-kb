@@ -65,6 +65,10 @@ Use the previously verified operation for a recognized fingerprint:
   not change the batch, model, threshold, slug, or create a probe.
 - A prior shard still holding VRAM is the distinct post-shard release case:
   use the bounded same-threshold release gate before the next shard.
+- A recovery runner refresh must come from a full commit already on GitHub
+  `origin/main`, and may update only the explicitly allowed operational gate
+  files. Its commit and file hashes are recorded on the same recovery receipt;
+  never copy a local or CNB working tree into the campaign branch.
 - An outer CNB stage marked successful without supervisor/report/ledger/canonical
   evidence is the false-success case: fail closed and use the foreground
   supervisor plus durable evidence contract.
@@ -265,6 +269,8 @@ Dev GPU recovery atom is selected, keep the source receipt untouched:
 uv run python scripts/cnb_campaign_repository.py recover-devgpu \
   --policy references/cnb-storage-policy.json \
   --operations-file references/validated-operations.json \
+  --repository-root /path/to/music-analysis-kb \
+  --github-commit "$(git -C /path/to/music-analysis-kb rev-parse origin/main)" \
   --receipt /path/to/run/cnb/campaign-receipt.json \
   --recovery-receipt /path/to/run/cnb/devgpu-recovery/receipt.json \
   --history-review /path/to/run/cnb/devgpu-recovery/history-review.json \
