@@ -863,6 +863,10 @@ def test_devgpu_recovery_config_runs_all_shards_with_clean_gpu_gates() -> None:
     assert "--phase stable_before_hydrate" in config
     assert "for shard_index in $(seq 1 2)" in config
     assert "--phase \"pre_model_s${shard_index}\"" in config
+    assert "wait_for_clean_gpu()" in config
+    assert 'while [ "$release_attempt" -le 20 ]; do' in config
+    assert '--phase "${release_phase}_attempt_${release_attempt}"' in config
+    assert 'wait_for_clean_gpu "post_shard_s${shard_index}_release"' in config
     marker = "    - name: Run receipt-bound Dev GPU full resume\n      timeout: 4h\n      script: |\n"
     stage = config.split(marker, 1)[1].split("\n    lock:\n", 1)[0]
     assert "bash scripts/devgpu_run_batch.sh" in stage
@@ -873,6 +877,9 @@ def test_devgpu_recovery_config_runs_all_shards_with_clean_gpu_gates() -> None:
     assert "campaign report does not prove full zero-error shard coverage" in stage
     assert "build_kugou_canonical_delivery.py --source-manifest" in stage
     assert "canonical_delivery.jsonl" in stage
+    release_wait = stage.index('wait_for_clean_gpu "post_shard_s${shard_index}_release"')
+    shard_loop_end = stage.index("        done\n        ledger_verify_dir=", release_wait)
+    assert stage.index("campaign report does not prove full zero-error shard coverage") < release_wait < shard_loop_end
 
 
 def test_devgpu_recovery_stage_script_is_valid_posix_sh(tmp_path: Path) -> None:
