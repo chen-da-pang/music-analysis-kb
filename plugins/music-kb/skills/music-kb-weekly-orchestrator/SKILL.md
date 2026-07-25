@@ -166,10 +166,14 @@ be purged, so inventory—not file presence alone—is the dedupe record.
     failed at a CNB build-GPU platform gate, keep that source receipt immutable
     and write a separate recovery receipt. Reuse its exact repository, main
     commit, manifest, runtime and durable ledger; choose an explicit configured
-    Dev GPU profile (default L40; H20 only through its versioned profile), then
+    Dev GPU profile (default L40; H20 and non-default L40-35G-VALIDATION only
+    through their versioned profiles), then
     run every configured shard serially after two profile-specific
     clean-allocation gates and a pre-model gate for each shard. This is a full
-    resume, never a probe. Stop the workspace before recovering an external
+    resume, never a probe. L40-35G-VALIDATION remains bound to a real L40
+    runner/execution profile and requires the receipt-bound history review's
+    exact `user_authorized_l40_35g_full_serial_recovery` action; it cannot
+    lower the default L40 gate. Stop the workspace before recovering an external
     canonical delivery, then continue through `--delivery` and external-delivery
     reconciliation.
 11. **`cnb_analysis`** — validate the canonical delivery and expected count.
