@@ -1059,18 +1059,36 @@ def _write_gitattributes(checkout: Path, campaign_id: str, transport: str) -> No
 
 def _git_push_environment() -> tuple[dict[str, str], Path | None]:
     token = os.environ.get("MUSIC_KB_CNB_GIT_TOKEN", "") or os.environ.get("CNB_TOKEN", "")
-    if not token:
-        raise CampaignRepositoryError(
-            "MUSIC_KB_CNB_GIT_TOKEN is required for an executable campaign repository push"
-        )
-    encoded = base64.b64encode(f"cnb:{token}".encode("utf-8")).decode("ascii")
     env = os.environ.copy()
+    if token:
+        encoded = base64.b64encode(f"cnb:{token}".encode("utf-8")).decode("ascii")
+        env.update(
+            {
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.extraHeader",
+                "GIT_CONFIG_VALUE_0": f"Authorization: Basic {encoded}",
+            }
+        )
+        return env, None
+
+    # A publisher authenticated through CNB's administrator OAuth already has
+    # an official Git credential helper.  Keep it inside the Git subprocess:
+    # an empty first helper removes any stale inherited helper, then the CNB
+    # helper supplies the scoped credential on demand.  No token is extracted,
+    # stored, or passed to the workspace/OpenAPI subprocesses.
+    if shutil.which("cnb") is None:
+        raise CampaignRepositoryError(
+            "MUSIC_KB_CNB_GIT_TOKEN is unset and the cnb git-credential helper is unavailable"
+        )
     env.update(
         {
             "GIT_TERMINAL_PROMPT": "0",
-            "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "http.extraHeader",
-            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {encoded}",
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "",
+            "GIT_CONFIG_KEY_1": "credential.helper",
+            "GIT_CONFIG_VALUE_1": "!cnb git-credential",
         }
     )
     return env, None

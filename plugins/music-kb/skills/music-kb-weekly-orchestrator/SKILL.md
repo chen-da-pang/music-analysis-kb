@@ -238,11 +238,14 @@ uv run python scripts/cnb_campaign_repository.py recover-devgpu \
   --execute --wait
 ```
 
-On the publisher, load the existing repository credential only as
-`MUSIC_KB_CNB_GIT_TOKEN`. The adapter strips both Git-token variables from CNB
-CLI subprocesses so workspace start/stop uses the already logged-in
-administrator OAuth. Do not export the repository credential as `CNB_TOKEN`
-for the whole recovery process.
+On the publisher, prefer an existing repository credential only as
+`MUSIC_KB_CNB_GIT_TOKEN`. If it is not configured but `cnb status` confirms
+the administrator OAuth login, the adapter confines the official
+`cnb git-credential` helper to Git/LFS subprocesses after clearing inherited
+helpers; it does not extract, persist, or export an OAuth token. The adapter
+always strips both Git-token variables from CNB CLI subprocesses so workspace
+start/stop keeps using the logged-in administrator OAuth. Do not export a
+repository credential as `CNB_TOKEN` for the whole recovery process.
 
 After the recovery receipt proves a complete canonical delivery, invoke the
 weekly publisher with that delivery path. The existing post-analysis resume

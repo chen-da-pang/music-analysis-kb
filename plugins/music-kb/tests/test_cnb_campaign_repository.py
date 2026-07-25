@@ -909,6 +909,35 @@ def test_git_push_environment_uses_preemptive_basic_header_without_askpass(
     assert "GIT_ASKPASS" not in env or env["GIT_ASKPASS"] == os.environ.get("GIT_ASKPASS")
 
 
+def test_git_push_environment_uses_logged_in_cnb_credential_helper_without_a_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CNB_TOKEN", raising=False)
+    monkeypatch.delenv("MUSIC_KB_CNB_GIT_TOKEN", raising=False)
+    monkeypatch.setattr(MODULE.shutil, "which", lambda value: "/usr/local/bin/cnb" if value == "cnb" else None)
+
+    env, askpass = MODULE._git_push_environment()
+
+    assert askpass is None
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_CONFIG_COUNT"] == "2"
+    assert env["GIT_CONFIG_KEY_0"] == "credential.helper"
+    assert env["GIT_CONFIG_VALUE_0"] == ""
+    assert env["GIT_CONFIG_KEY_1"] == "credential.helper"
+    assert env["GIT_CONFIG_VALUE_1"] == "!cnb git-credential"
+
+
+def test_git_push_environment_rejects_missing_token_and_cnb_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CNB_TOKEN", raising=False)
+    monkeypatch.delenv("MUSIC_KB_CNB_GIT_TOKEN", raising=False)
+    monkeypatch.setattr(MODULE.shutil, "which", lambda _value: None)
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="git-credential helper is unavailable"):
+        MODULE._git_push_environment()
+
+
 def test_run_cnb_strips_git_tokens_and_preserves_cli_oauth_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
