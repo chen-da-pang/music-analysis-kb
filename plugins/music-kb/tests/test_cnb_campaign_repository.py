@@ -70,6 +70,20 @@ def policy() -> dict:
             "max_git_object_bytes": 5_000,
             "max_git_object_file_bytes": 2_000,
         },
+        "devgpu_recovery_profiles": {
+            "L40": {
+                "runner_tag": "cnb:arch:amd64:gpu:L40",
+                "expected_gpu": "L40",
+                "minimum_free_mib": 40_000,
+                "execution_profile": "nvidia-l40/full_precision/bfloat16",
+            },
+            "H20": {
+                "runner_tag": "cnb:arch:amd64:gpu:H20",
+                "expected_gpu": "H20",
+                "minimum_free_mib": 87_000,
+                "execution_profile": "nvidia-h20/full_precision/bfloat16",
+            },
+        },
     }
 
 
@@ -912,6 +926,68 @@ def test_devgpu_recovery_config_runs_all_shards_with_clean_gpu_gates() -> None:
     release_wait = stage.index('wait_for_clean_gpu "post_shard_s${shard_index}_release"')
     shard_loop_end = stage.index("        done\n        ledger_verify_dir=", release_wait)
     assert stage.index("campaign report does not prove full zero-error shard coverage") < release_wait < shard_loop_end
+
+
+def test_devgpu_recovery_h20_profile_is_rendered_consistently() -> None:
+    config = MODULE.generate_campaign_devgpu_config(
+        policy(),
+        campaign_id="run-1",
+        repository_slug="org/music-flamingo-campaign-run-1",
+        item_count=48,
+        source_manifest_sha256="b" * 64,
+        devgpu_profile="H20",
+    )
+    assert "      tags: cnb:arch:amd64:gpu:H20" in config
+    assert "      MUSIC_FLAMINGO_EXECUTION_PROFILE: nvidia-h20/full_precision/bfloat16" in config
+    assert "      MUSIC_FLAMINGO_DEVGPU_RECOVERY_PROFILE: H20" in config
+    assert config.count("--expected-gpu H20 --minimum-free-mib 87000") == 4
+    assert "--expected-gpu L40" not in config
+
+
+def test_devgpu_recovery_rejects_unknown_or_malformed_gpu_profiles() -> None:
+    with pytest.raises(MODULE.CampaignRepositoryError, match="unknown Dev GPU recovery profile"):
+        MODULE.generate_campaign_devgpu_config(
+            policy(),
+            campaign_id="run-1",
+            repository_slug="org/music-flamingo-campaign-run-1",
+            item_count=48,
+            source_manifest_sha256="b" * 64,
+            devgpu_profile="A100",
+        )
+    malformed = policy()
+    malformed["devgpu_recovery_profiles"]["H20"]["minimum_free_mib"] = 0
+    with pytest.raises(MODULE.CampaignRepositoryError, match="minimum_free_mib"):
+        MODULE.resolve_devgpu_recovery_profile(malformed, "H20")
+    malformed = policy()
+    malformed["devgpu_recovery_profiles"]["H20"]["runner_tag"] = "cnb:arch:amd64:gpu:L40"
+    with pytest.raises(MODULE.CampaignRepositoryError, match="runner_tag"):
+        MODULE.resolve_devgpu_recovery_profile(malformed, "H20")
+
+
+def test_recover_devgpu_cli_passes_the_selected_profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict = {}
+
+    def fake_recovery(**kwargs):
+        captured.update(kwargs)
+        return {"status": "planned"}
+
+    monkeypatch.setattr(MODULE, "recover_campaign_with_devgpu", fake_recovery)
+    assert MODULE.main(
+        [
+            "recover-devgpu",
+            "--policy",
+            str(tmp_path / "policy.json"),
+            "--receipt",
+            str(tmp_path / "source-receipt.json"),
+            "--recovery-receipt",
+            str(tmp_path / "recovery-receipt.json"),
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--devgpu-profile",
+            "H20",
+        ]
+    ) == 0
+    assert captured["devgpu_profile"] == "H20"
 
 
 def test_devgpu_recovery_stage_script_is_valid_posix_sh(tmp_path: Path) -> None:
