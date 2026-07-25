@@ -58,9 +58,11 @@ Use the previously verified operation for a recognized fingerprint:
 - A large image pull in `Prepare` is preparation time, not a model failure.
 - `initial_dirty_l40_allocation` fails before hydrate under the existing
   40,000 MiB / 0% gate. Confirm the stopped workspace is absent, preserve the
-  same receipt, and wait for external allocation state to change before a
-  deliberately reviewed same-receipt retry; do not change the batch, model,
-  threshold, slug, or create a probe.
+  same receipt, and inspect that failed gate receipt's measured GPU snapshot
+  plus visible compute-process evidence. An empty or unavailable process table
+  does not prove another tenant: record it as an attribution limit. Only then
+  decide whether a deliberately reviewed same-receipt retry is justified; do
+  not change the batch, model, threshold, slug, or create a probe.
 - A prior shard still holding VRAM is the distinct post-shard release case:
   use the bounded same-threshold release gate before the next shard.
 - An outer CNB stage marked successful without supervisor/report/ledger/canonical
