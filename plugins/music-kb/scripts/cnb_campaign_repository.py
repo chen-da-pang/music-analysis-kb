@@ -70,11 +70,10 @@ REQUIRED_CAMPAIGN_RUNTIME_FILES = (
     "scripts/devgpu_batch_supervisor.py",
 )
 
-# The recovery overlay is intentionally config-only and must therefore prove
-# that the pinned campaign export already contains every foreground execution
-# entry point it will invoke.  Keeping this explicit prevents a workspace
-# stage from silently falling back to a generic wrapper that is not part of
-# the durable Dev GPU execution boundary.
+# The recovery overlay is deliberately narrow.  A recovery normally reuses the
+# pinned campaign runner, but an operational gate repair must be able to reach
+# a fresh GitHub-main export without changing the model or analysis code.  Any
+# broader runner change remains an immutable-campaign boundary and is rejected.
 REQUIRED_DEVGPU_RECOVERY_RUNTIME_FILES = (
     "scripts/check_manual_gpu_gate.py",
     "scripts/campaign_ledger_git.sh",
@@ -85,6 +84,10 @@ REQUIRED_DEVGPU_RECOVERY_RUNTIME_FILES = (
     "scripts/devgpu_batch_supervisor.py",
     "scripts/build_kugou_canonical_delivery.py",
 )
+DEVGPU_RECOVERY_REFRESHABLE_RUNTIME_FILES = (
+    "scripts/check_manual_gpu_gate.py",
+)
+DEVGPU_RECOVERY_REFRESH_METADATA = "devgpu-runner-refresh.json"
 
 JsonRunner = Callable[[Sequence[str]], dict[str, Any]]
 
@@ -1172,6 +1175,110 @@ def _validate_exported_runtime(output: Path, provenance: Mapping[str, Any], gith
     return {"validated": True, "required_files": verified}
 
 
+def _prepare_devgpu_runner_refresh(
+    *,
+    repository_root: Path,
+    github_commit: str,
+    recovery_dir: Path,
+) -> tuple[Path, dict[str, Any]]:
+    """Export the tiny GitHub-owned operational refresh allowed during recovery."""
+
+    export_dir = recovery_dir / "runtime-export"
+    if export_dir.exists():
+        shutil.rmtree(export_dir)
+    provenance = _export_runtime(repository_root, github_commit, export_dir)
+    _validate_exported_runtime(export_dir, provenance, github_commit)
+    files: list[dict[str, Any]] = []
+    for relative in DEVGPU_RECOVERY_REFRESHABLE_RUNTIME_FILES:
+        path = export_dir / Path(*PurePosixPath(relative).parts)
+        if not path.is_file() or path.is_symlink():
+            raise CampaignRepositoryError(f"Dev GPU runner refresh is missing regular file: {relative}")
+        files.append(
+            {
+                "path": relative,
+                "bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+        )
+    return export_dir, {
+        "schema_version": 1,
+        "github_repository": "chen-da-pang/music-analysis-kb",
+        "github_commit": github_commit,
+        "files": files,
+    }
+
+
+def _refresh_metadata_text(runner_refresh: Mapping[str, Any]) -> str:
+    return json.dumps(runner_refresh, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _overlay_has_runner_refresh(
+    overlay: Path,
+    *,
+    runtime_export_dir: Path,
+    runner_refresh: Mapping[str, Any],
+) -> bool:
+    metadata = overlay / DEVGPU_RECOVERY_REFRESH_METADATA
+    if not metadata.is_file() or metadata.read_text(encoding="utf-8") != _refresh_metadata_text(runner_refresh):
+        return False
+    raw_files = runner_refresh.get("files")
+    if not isinstance(raw_files, list):
+        return False
+    for raw in raw_files:
+        if not isinstance(raw, Mapping):
+            return False
+        relative = str(raw.get("path", ""))
+        if relative not in DEVGPU_RECOVERY_REFRESHABLE_RUNTIME_FILES:
+            return False
+        relative_path = Path(*PurePosixPath(relative).parts)
+        expected = runtime_export_dir / relative_path
+        actual = overlay / relative_path
+        if not expected.is_file() or not actual.is_file() or actual.is_symlink():
+            return False
+        if sha256_file(actual) != sha256_file(expected) or actual.stat().st_size != expected.stat().st_size:
+            return False
+    return True
+
+
+def _apply_devgpu_runner_refresh(
+    overlay: Path,
+    *,
+    runtime_export_dir: Path,
+    runner_refresh: Mapping[str, Any],
+) -> None:
+    raw_files = runner_refresh.get("files")
+    if not isinstance(raw_files, list):
+        raise CampaignRepositoryError("Dev GPU runner refresh has no file inventory")
+    for raw in raw_files:
+        if not isinstance(raw, Mapping):
+            raise CampaignRepositoryError("Dev GPU runner refresh has a malformed file record")
+        relative = str(raw.get("path", ""))
+        if relative not in DEVGPU_RECOVERY_REFRESHABLE_RUNTIME_FILES:
+            raise CampaignRepositoryError(f"Dev GPU runner refresh has forbidden path: {relative!r}")
+        relative_path = Path(*PurePosixPath(relative).parts)
+        source = runtime_export_dir / relative_path
+        destination = overlay / relative_path
+        if not source.is_file() or source.is_symlink():
+            raise CampaignRepositoryError(f"Dev GPU runner refresh source is invalid: {relative}")
+        expected_sha = str(raw.get("sha256", "")).lower()
+        expected_bytes = raw.get("bytes")
+        if (
+            not SHA256.fullmatch(expected_sha)
+            or isinstance(expected_bytes, bool)
+            or not isinstance(expected_bytes, int)
+            or expected_bytes < 1
+            or sha256_file(source) != expected_sha
+            or source.stat().st_size != expected_bytes
+        ):
+            raise CampaignRepositoryError(f"Dev GPU runner refresh provenance is invalid: {relative}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    (overlay / DEVGPU_RECOVERY_REFRESH_METADATA).write_text(
+        _refresh_metadata_text(runner_refresh),
+        encoding="utf-8",
+    )
+
+
 def _workspace_stage_complete(
     workspace: Path,
     *,
@@ -1800,6 +1907,8 @@ def _prepare_devgpu_overlay(
     policy: Mapping[str, Any],
     source_receipt: Mapping[str, Any],
     recovery_dir: Path,
+    runtime_export_dir: Path,
+    runner_refresh: Mapping[str, Any],
 ) -> dict[str, Any]:
     checkout = Path(str(source_receipt["checkout"])).expanduser().resolve()
     campaign_commit = str(source_receipt.get("campaign_commit", ""))
@@ -1852,26 +1961,50 @@ def _prepare_devgpu_overlay(
                 ).stdout.splitlines()
                 if line.strip()
             }
-            if changed != {".cnb.yml"}:
+            allowed_changed_paths = {
+                ".cnb.yml",
+                DEVGPU_RECOVERY_REFRESH_METADATA,
+                *DEVGPU_RECOVERY_REFRESHABLE_RUNTIME_FILES,
+            }
+            if not changed <= allowed_changed_paths:
                 raise CampaignRepositoryError(
-                    "existing Dev GPU overlay history is not a config-only descendant of campaign main"
+                    "existing Dev GPU overlay history contains a non-refresh runner change"
                 )
-            if sha256_file(overlay / ".cnb.yml") == expected_config_sha256:
+            if (
+                sha256_file(overlay / ".cnb.yml") == expected_config_sha256
+                and _overlay_has_runner_refresh(
+                    overlay,
+                    runtime_export_dir=runtime_export_dir,
+                    runner_refresh=runner_refresh,
+                )
+            ):
                 return {
                     "branch": branch,
                     "commit": previous_overlay_commit,
                     "parent_campaign_commit": campaign_commit,
                     "config_sha256": expected_config_sha256,
+                    "runner_refresh": copy.deepcopy(dict(runner_refresh)),
                     "path": str(overlay),
                     "reused": True,
                 }
             _run(["git", "checkout", "-B", branch], cwd=overlay)
+            _apply_devgpu_runner_refresh(
+                overlay,
+                runtime_export_dir=runtime_export_dir,
+                runner_refresh=runner_refresh,
+            )
             (overlay / ".cnb.yml").write_text(config, encoding="utf-8")
             _run(["git", "config", "user.name", "Music KB Dev GPU Recovery"], cwd=overlay)
             _run(["git", "config", "user.email", "music-kb-devgpu@wuyoumusic.invalid"], cwd=overlay)
             _run(["git", "config", "commit.gpgSign", "false"], cwd=overlay)
-            _run(["git", "add", ".cnb.yml"], cwd=overlay)
-            _run(["git", "commit", "-qm", f"Repair Dev GPU recovery {source_receipt['run_id']}"], cwd=overlay)
+            _run(
+                [
+                    "git", "add", ".cnb.yml", DEVGPU_RECOVERY_REFRESH_METADATA,
+                    *DEVGPU_RECOVERY_REFRESHABLE_RUNTIME_FILES,
+                ],
+                cwd=overlay,
+            )
+            _run(["git", "commit", "-qm", f"Refresh Dev GPU recovery {source_receipt['run_id']}"], cwd=overlay)
             overlay_commit = _run(["git", "rev-parse", "HEAD"], cwd=overlay).stdout.strip()
             _run_git_authenticated(
                 ["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=overlay, env=env
@@ -1887,17 +2020,29 @@ def _prepare_devgpu_overlay(
                 "previous_commit": previous_overlay_commit,
                 "parent_campaign_commit": campaign_commit,
                 "config_sha256": expected_config_sha256,
+                "runner_refresh": copy.deepcopy(dict(runner_refresh)),
                 "path": str(overlay),
                 "reused": False,
                 "updated": True,
             }
         _run(["git", "-C", str(checkout), "worktree", "add", "--force", "--detach", str(overlay), campaign_commit])
         _run(["git", "checkout", "-B", branch], cwd=overlay)
+        _apply_devgpu_runner_refresh(
+            overlay,
+            runtime_export_dir=runtime_export_dir,
+            runner_refresh=runner_refresh,
+        )
         (overlay / ".cnb.yml").write_text(config, encoding="utf-8")
         _run(["git", "config", "user.name", "Music KB Dev GPU Recovery"], cwd=overlay)
         _run(["git", "config", "user.email", "music-kb-devgpu@wuyoumusic.invalid"], cwd=overlay)
         _run(["git", "config", "commit.gpgSign", "false"], cwd=overlay)
-        _run(["git", "add", ".cnb.yml"], cwd=overlay)
+        _run(
+            [
+                "git", "add", ".cnb.yml", DEVGPU_RECOVERY_REFRESH_METADATA,
+                *DEVGPU_RECOVERY_REFRESHABLE_RUNTIME_FILES,
+            ],
+            cwd=overlay,
+        )
         _run(["git", "commit", "-qm", f"Dev GPU recovery {source_receipt['run_id']}"], cwd=overlay)
         overlay_commit = _run(["git", "rev-parse", "HEAD"], cwd=overlay).stdout.strip()
         _run_git_authenticated(
@@ -1913,6 +2058,7 @@ def _prepare_devgpu_overlay(
             "commit": overlay_commit,
             "parent_campaign_commit": campaign_commit,
             "config_sha256": expected_config_sha256,
+            "runner_refresh": copy.deepcopy(dict(runner_refresh)),
             "path": str(overlay),
             "reused": False,
         }
@@ -2102,6 +2248,8 @@ def recover_campaign_with_devgpu(
     poll_seconds: float = 10.0,
     runner: JsonRunner = run_cnb,
     transport: str | None = None,
+    repository_root: str | Path | None = None,
+    github_commit: str | None = None,
 ) -> dict[str, Any]:
     """Recover a failed build-GPU campaign through one full Dev GPU workspace."""
 
@@ -2171,6 +2319,12 @@ def recover_campaign_with_devgpu(
         raise CampaignRepositoryError(
             "executable Dev GPU recovery requires --history-review bound to the current receipt"
         )
+    if repository_root is None or github_commit is None:
+        raise CampaignRepositoryError(
+            "executable Dev GPU recovery requires --repository-root and --github-commit for the GitHub runner refresh"
+        )
+    root = Path(repository_root).expanduser().resolve()
+    refresh_commit = _validate_commit(root, github_commit)
     receipt["history_review"] = _validated_devgpu_history_review(
         history_review_path,
         source_receipt_path=source_file,
@@ -2181,7 +2335,19 @@ def recover_campaign_with_devgpu(
 
     workspace_sn = ""
     try:
-        overlay = _prepare_devgpu_overlay(policy=policy, source_receipt=source, recovery_dir=recovery_dir)
+        runtime_export_dir, runner_refresh = _prepare_devgpu_runner_refresh(
+            repository_root=root,
+            github_commit=refresh_commit,
+            recovery_dir=recovery_dir,
+        )
+        receipt["runner_refresh"] = runner_refresh
+        overlay = _prepare_devgpu_overlay(
+            policy=policy,
+            source_receipt=source,
+            recovery_dir=recovery_dir,
+            runtime_export_dir=runtime_export_dir,
+            runner_refresh=runner_refresh,
+        )
         receipt["overlay"] = overlay
         receipt["status"] = "starting_workspace"
         receipt["updated_at"] = now_iso()
@@ -3055,6 +3221,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_seconds=args.timeout_seconds,
                 poll_seconds=args.poll_seconds,
                 transport=args.transport,
+                repository_root=args.repository_root,
+                github_commit=args.github_commit,
             )
         elif args.action == "cleanup":
             if not args.receipt:
