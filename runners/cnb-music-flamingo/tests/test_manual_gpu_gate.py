@@ -89,6 +89,14 @@ class ManualGpuGateTests(unittest.TestCase):
         self.assertEqual(evidence["status"], "unavailable")
         self.assertIn("exit 13", str(evidence["error"]))
 
+        with patch(
+            "check_manual_gpu_gate.subprocess.run",
+            side_effect=FileNotFoundError(),
+        ):
+            evidence = query_compute_processes()
+        self.assertEqual(evidence["status"], "unavailable")
+        self.assertIn("FileNotFoundError", str(evidence["error"]))
+
     def test_busy_gate_receipt_keeps_snapshot_and_visible_processes(self) -> None:
         from check_manual_gpu_gate import main
 

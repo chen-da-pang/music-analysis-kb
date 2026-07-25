@@ -108,16 +108,22 @@ def query_compute_processes() -> dict[str, object]:
     silently treated as an empty process table.  It never changes admission:
     ``query_gpu`` remains the fail-closed gate.
     """
-    result = subprocess.run(
-        [
-            "nvidia-smi",
-            f"--query-compute-apps={_COMPUTE_PROCESS_QUERY}",
-            "--format=csv,noheader,nounits",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                f"--query-compute-apps={_COMPUTE_PROCESS_QUERY}",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        return {
+            "status": "unavailable",
+            "error": f"nvidia-smi compute-process query unavailable: {type(exc).__name__}",
+        }
     if result.returncode != 0:
         return {
             "status": "unavailable",
