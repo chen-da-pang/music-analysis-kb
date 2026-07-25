@@ -114,22 +114,33 @@ def resolve_devgpu_recovery_profile(policy: Mapping[str, Any], profile_name: str
     runner_tag = str(raw.get("runner_tag", "")).strip()
     expected_gpu = str(raw.get("expected_gpu", "")).strip()
     execution_profile = str(raw.get("execution_profile", "")).strip()
+    required_history_review_action = raw.get("required_history_review_action")
     minimum_free_mib = raw.get("minimum_free_mib")
-    if runner_tag != f"cnb:arch:amd64:gpu:{name}":
-        raise CampaignRepositoryError(f"Dev GPU profile {name} runner_tag must select that exact GPU")
-    if expected_gpu != name:
-        raise CampaignRepositoryError(f"Dev GPU profile {name} expected_gpu must equal its profile name")
-    if execution_profile != f"nvidia-{name.lower()}/full_precision/bfloat16":
+    if not re.fullmatch(r"[A-Z][A-Z0-9-]{0,31}", expected_gpu):
+        raise CampaignRepositoryError(f"Dev GPU profile {name} has an unsafe expected_gpu")
+    if runner_tag != f"cnb:arch:amd64:gpu:{expected_gpu}":
+        raise CampaignRepositoryError(f"Dev GPU profile {name} runner_tag must select expected_gpu")
+    if execution_profile != f"nvidia-{expected_gpu.lower()}/full_precision/bfloat16":
         raise CampaignRepositoryError(f"Dev GPU profile {name} has an invalid execution_profile")
     if isinstance(minimum_free_mib, bool) or not isinstance(minimum_free_mib, int) or minimum_free_mib <= 0:
         raise CampaignRepositoryError(f"Dev GPU profile {name} minimum_free_mib must be a positive integer")
-    return {
+    if required_history_review_action is not None:
+        if not isinstance(required_history_review_action, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{2,127}", required_history_review_action
+        ):
+            raise CampaignRepositoryError(
+                f"Dev GPU profile {name} required_history_review_action must be a safe action name"
+            )
+    resolved = {
         "name": name,
         "runner_tag": runner_tag,
         "expected_gpu": expected_gpu,
         "minimum_free_mib": minimum_free_mib,
         "execution_profile": execution_profile,
     }
+    if required_history_review_action is not None:
+        resolved["required_history_review_action"] = required_history_review_action
+    return resolved
 
 
 def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -314,7 +325,12 @@ def load_campaign_policy(path: str | Path) -> dict[str, Any]:
             raise CampaignRepositoryError(f"campaign_repository.{key} must be a positive integer")
     if float(campaign.get("audio_clip_seconds", 0)) <= 0:
         raise CampaignRepositoryError("campaign_repository.audio_clip_seconds must be positive")
-    for profile_name in ("L40", "H20"):
+    profiles = policy.get("devgpu_recovery_profiles")
+    if not isinstance(profiles, Mapping) or not profiles:
+        raise CampaignRepositoryError("CNB policy must define at least one Dev GPU recovery profile")
+    for profile_name in profiles:
+        if not isinstance(profile_name, str):
+            raise CampaignRepositoryError("Dev GPU recovery profile names must be strings")
         resolve_devgpu_recovery_profile(policy, profile_name)
     return policy
 
@@ -2223,6 +2239,7 @@ def _validated_devgpu_history_review(
     source_receipt_path: Path,
     source_receipt: Mapping[str, Any],
     operations_sha256: str,
+    required_action: str | None = None,
 ) -> dict[str, Any]:
     """Bind an operator's history review to the exact recovery attempt.
 
@@ -2271,6 +2288,10 @@ def _validated_devgpu_history_review(
         for key in ("action", "rationale"):
             if not isinstance(decision.get(key), str) or not str(decision[key]).strip():
                 errors.append(f"history review decision lacks {key}")
+        if required_action is not None and decision.get("action") != required_action:
+            errors.append(
+                f"history review decision.action must equal profile-required action {required_action!r}"
+            )
     if errors:
         raise CampaignRepositoryError("Dev GPU history review is invalid: " + "; ".join(errors))
     return {
@@ -2380,6 +2401,7 @@ def recover_campaign_with_devgpu(
         source_receipt_path=source_file,
         source_receipt=source,
         operations_sha256=operations_sha256,
+        required_action=selected_profile.get("required_history_review_action"),
     )
     _atomic_write_json(recovery_file, receipt)
 

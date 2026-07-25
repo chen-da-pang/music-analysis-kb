@@ -33,6 +33,13 @@
       "minimum_free_mib": 40000,
       "execution_profile": "nvidia-l40/full_precision/bfloat16"
     },
+    "L40-35G-VALIDATION": {
+      "runner_tag": "cnb:arch:amd64:gpu:L40",
+      "expected_gpu": "L40",
+      "minimum_free_mib": 35000,
+      "execution_profile": "nvidia-l40/full_precision/bfloat16",
+      "required_history_review_action": "user_authorized_l40_35g_full_serial_recovery"
+    },
     "H20": {
       "runner_tag": "cnb:arch:amd64:gpu:H20",
       "expected_gpu": "H20",

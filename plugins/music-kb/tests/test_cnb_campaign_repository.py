@@ -77,6 +77,13 @@ def policy() -> dict:
                 "minimum_free_mib": 40_000,
                 "execution_profile": "nvidia-l40/full_precision/bfloat16",
             },
+            "L40-35G-VALIDATION": {
+                "runner_tag": "cnb:arch:amd64:gpu:L40",
+                "expected_gpu": "L40",
+                "minimum_free_mib": 35_000,
+                "execution_profile": "nvidia-l40/full_precision/bfloat16",
+                "required_history_review_action": "user_authorized_l40_35g_full_serial_recovery",
+            },
             "H20": {
                 "runner_tag": "cnb:arch:amd64:gpu:H20",
                 "expected_gpu": "H20",
@@ -213,7 +220,12 @@ def receipt_identity(tmp_path: Path, *, run_id: str = "run-1", count: int = 1) -
     }
 
 
-def write_devgpu_history_review(source_path: Path, *, path: Path | None = None) -> Path:
+def write_devgpu_history_review(
+    source_path: Path,
+    *,
+    path: Path | None = None,
+    action: str = "retry_same_receipt",
+) -> Path:
     source = json.loads(source_path.read_text(encoding="utf-8"))
     review_path = path or source_path.with_name("history-review.json")
     review_path.write_text(
@@ -235,7 +247,7 @@ def write_devgpu_history_review(source_path: Path, *, path: Path | None = None) 
                     }
                 ],
                 "decision": {
-                    "action": "retry_same_receipt",
+                    "action": action,
                     "rationale": "The immutable campaign identity and GPU gate remain valid.",
                 },
             }
@@ -944,6 +956,22 @@ def test_devgpu_recovery_h20_profile_is_rendered_consistently() -> None:
     assert "--expected-gpu L40" not in config
 
 
+def test_devgpu_recovery_l40_35g_validation_profile_keeps_the_l40_binding() -> None:
+    config = MODULE.generate_campaign_devgpu_config(
+        policy(),
+        campaign_id="run-1",
+        repository_slug="org/music-flamingo-campaign-run-1",
+        item_count=48,
+        source_manifest_sha256="b" * 64,
+        devgpu_profile="L40-35G-VALIDATION",
+    )
+    assert "      tags: cnb:arch:amd64:gpu:L40" in config
+    assert "      MUSIC_FLAMINGO_EXECUTION_PROFILE: nvidia-l40/full_precision/bfloat16" in config
+    assert "      MUSIC_FLAMINGO_DEVGPU_RECOVERY_PROFILE: L40-35G-VALIDATION" in config
+    assert config.count("--expected-gpu L40 --minimum-free-mib 35000") == 4
+    assert "--minimum-free-mib 40000" not in config
+
+
 def test_devgpu_recovery_rejects_unknown_or_malformed_gpu_profiles() -> None:
     with pytest.raises(MODULE.CampaignRepositoryError, match="unknown Dev GPU recovery profile"):
         MODULE.generate_campaign_devgpu_config(
@@ -962,6 +990,10 @@ def test_devgpu_recovery_rejects_unknown_or_malformed_gpu_profiles() -> None:
     malformed["devgpu_recovery_profiles"]["H20"]["runner_tag"] = "cnb:arch:amd64:gpu:L40"
     with pytest.raises(MODULE.CampaignRepositoryError, match="runner_tag"):
         MODULE.resolve_devgpu_recovery_profile(malformed, "H20")
+    malformed = policy()
+    malformed["devgpu_recovery_profiles"]["L40-35G-VALIDATION"]["expected_gpu"] = "H20"
+    with pytest.raises(MODULE.CampaignRepositoryError, match="runner_tag"):
+        MODULE.resolve_devgpu_recovery_profile(malformed, "L40-35G-VALIDATION")
 
 
 def test_recover_devgpu_cli_passes_the_selected_profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1413,6 +1445,22 @@ def test_devgpu_history_review_rejects_a_different_source_receipt(tmp_path: Path
         )
 
 
+def test_devgpu_history_review_requires_the_l40_35g_authorization_action(tmp_path: Path) -> None:
+    source = receipt_identity(tmp_path, count=2)
+    source_path = tmp_path / "source-receipt.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    history_review = write_devgpu_history_review(source_path)
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="profile-required action"):
+        MODULE._validated_devgpu_history_review(
+            history_review,
+            source_receipt_path=source_path,
+            source_receipt=source,
+            operations_sha256=MODULE.sha256_file(OPERATIONS),
+            required_action="user_authorized_l40_35g_full_serial_recovery",
+        )
+
+
 def test_devgpu_workspace_success_requires_the_full_resume_stage() -> None:
     def runner(_command):
         return {"status": 200, "data": {"status": "success", "pipelinesStatus": {}}}
@@ -1489,7 +1537,10 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
     source_path = tmp_path / "source-receipt.json"
     source_path.write_text(json.dumps(source, sort_keys=True), encoding="utf-8")
     source_sha = MODULE.sha256_file(source_path)
-    history_review = write_devgpu_history_review(source_path)
+    history_review = write_devgpu_history_review(
+        source_path,
+        action="user_authorized_l40_35g_full_serial_recovery",
+    )
     recovery_path = tmp_path / "devgpu-recovery.json"
     _, commands, base_runner = cnb_runner_factory(target_present=True)
 
@@ -1564,10 +1615,13 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
         transport="git-objects",
         repository_root=tmp_path,
         github_commit="a" * 40,
+        devgpu_profile="L40-35G-VALIDATION",
     )
     assert result["status"] == "completed"
     assert result["workspace"]["stopped"] is True
     assert result["history_review"]["sha256"] == MODULE.sha256_file(history_review)
+    assert result["devgpu_profile"]["expected_gpu"] == "L40"
+    assert result["devgpu_profile"]["minimum_free_mib"] == 35_000
     assert [item["index"] for item in result["logical_shards"]] == [1, 2]
     assert MODULE.sha256_file(source_path) == source_sha
     assert sum("start-workspace" in " ".join(command) for command in commands) == 1
