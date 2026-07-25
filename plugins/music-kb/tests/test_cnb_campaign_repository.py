@@ -863,7 +863,16 @@ def test_devgpu_recovery_config_runs_all_shards_with_clean_gpu_gates() -> None:
     assert "--phase stable_before_hydrate" in config
     assert "for shard_index in $(seq 1 2)" in config
     assert "--phase \"pre_model_s${shard_index}\"" in config
-    assert "run_music_flamingo_campaign.sh" in config
+    marker = "    - name: Run receipt-bound Dev GPU full resume\n      timeout: 4h\n      script: |\n"
+    stage = config.split(marker, 1)[1].split("\n    lock:\n", 1)[0]
+    assert "bash scripts/devgpu_run_batch.sh" in stage
+    assert "run_music_flamingo_campaign.sh" not in stage
+    assert 'MUSIC_FLAMINGO_RUN_ID="${CNB_BUILD_ID}-s${shard_index}-hydrate"' not in stage
+    assert "campaign_runner_exit_code.txt" in stage
+    assert "campaign batch status is not success" in stage
+    assert "campaign report does not prove full zero-error shard coverage" in stage
+    assert "build_kugou_canonical_delivery.py --source-manifest" in stage
+    assert "canonical_delivery.jsonl" in stage
 
 
 def test_devgpu_recovery_stage_script_is_valid_posix_sh(tmp_path: Path) -> None:
@@ -928,7 +937,7 @@ def test_prepare_devgpu_overlay_reuses_exact_remote_branch(
     subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=checkout, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=checkout, check=True)
-    for relative in ("scripts/check_manual_gpu_gate.py", "scripts/run_music_flamingo_campaign.sh"):
+    for relative in MODULE.REQUIRED_DEVGPU_RECOVERY_RUNTIME_FILES:
         path = checkout / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("# fixture\n", encoding="utf-8")
@@ -1244,16 +1253,18 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
             "path": str(tmp_path / "overlay"),
         },
     )
-    monkeypatch.setattr(
-        MODULE,
-        "_recover_delivery",
-        lambda *_args, **_kwargs: {
+    recover_calls: list[dict] = []
+
+    def fake_recover_delivery(*_args, **kwargs):
+        recover_calls.append(kwargs)
+        return {
             "path": str(tmp_path / "canonical.jsonl"),
             "count": 2,
             "sha256": "f" * 64,
             "ledger_branch": "campaign-results/run-1",
-        },
-    )
+        }
+
+    monkeypatch.setattr(MODULE, "_recover_delivery", fake_recover_delivery)
     result = MODULE.recover_campaign_with_devgpu(
         policy_path=policy_path,
         operations_path=OPERATIONS,
@@ -1273,6 +1284,7 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
     assert MODULE.sha256_file(source_path) == source_sha
     assert sum("start-workspace" in " ".join(command) for command in commands) == 1
     assert sum("workspace-stop" in " ".join(command) for command in commands) == 1
+    assert recover_calls == [{"run_dir": tmp_path, "require_source_url": True, "fresh_ledger": True}]
 
 
 def test_recover_delivery_reuses_receipt_bound_ledger_clone(
