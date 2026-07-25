@@ -165,11 +165,13 @@ be purged, so inventory—not file presence alone—is the dedupe record.
 10b. **`cnb_campaign_devgpu_recovery`** — only after the same receipt has
     failed at a CNB build-GPU platform gate, keep that source receipt immutable
     and write a separate recovery receipt. Reuse its exact repository, main
-    commit, manifest, runtime and durable ledger; run every configured shard
-    serially in one L40 Dev GPU workspace after two clean-allocation gates and
-    a pre-model gate for each shard. This is a full resume, never a probe. Stop
-    the workspace before recovering an external canonical delivery, then
-    continue through `--delivery` and external-delivery reconciliation.
+    commit, manifest, runtime and durable ledger; choose an explicit configured
+    Dev GPU profile (default L40; H20 only through its versioned profile), then
+    run every configured shard serially after two profile-specific
+    clean-allocation gates and a pre-model gate for each shard. This is a full
+    resume, never a probe. Stop the workspace before recovering an external
+    canonical delivery, then continue through `--delivery` and external-delivery
+    reconciliation.
 11. **`cnb_analysis`** — validate the canonical delivery and expected count.
 12. **`knowledge_import`** — import idempotently, backfill song links, enrich
     retrieval tags, and verify the source-link completeness gate.
@@ -274,6 +276,7 @@ uv run python scripts/cnb_campaign_repository.py recover-devgpu \
   --receipt /path/to/run/cnb/campaign-receipt.json \
   --recovery-receipt /path/to/run/cnb/devgpu-recovery/receipt.json \
   --history-review /path/to/run/cnb/devgpu-recovery/history-review.json \
+  --devgpu-profile H20 \
   --run-dir /path/to/run \
   --transport lfs \
   --execute --wait

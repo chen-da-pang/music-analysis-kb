@@ -26,6 +26,20 @@
     "max_git_object_file_bytes": 268435456,
     "delete_after_release": true
   },
+  "devgpu_recovery_profiles": {
+    "L40": {
+      "runner_tag": "cnb:arch:amd64:gpu:L40",
+      "expected_gpu": "L40",
+      "minimum_free_mib": 40000,
+      "execution_profile": "nvidia-l40/full_precision/bfloat16"
+    },
+    "H20": {
+      "runner_tag": "cnb:arch:amd64:gpu:H20",
+      "expected_gpu": "H20",
+      "minimum_free_mib": 87000,
+      "execution_profile": "nvidia-h20/full_precision/bfloat16"
+    }
+  },
   "clean_repo_object_bytes_max": 25000000000,
   "clean_repo_git_bytes_max": 500000000,
   "minimum_group_object_free_bytes": 10000000000,

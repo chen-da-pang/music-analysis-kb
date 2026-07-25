@@ -96,6 +96,42 @@ class CampaignRepositoryError(RuntimeError):
     """Raised when a campaign repository safety or lifecycle check fails."""
 
 
+def resolve_devgpu_recovery_profile(policy: Mapping[str, Any], profile_name: str = "L40") -> dict[str, Any]:
+    """Return one explicit, fail-closed Dev GPU recovery profile."""
+
+    profiles = policy.get("devgpu_recovery_profiles")
+    if not isinstance(profiles, Mapping):
+        raise CampaignRepositoryError("CNB policy must define devgpu_recovery_profiles")
+    name = str(profile_name).strip()
+    if not re.fullmatch(r"[A-Z][A-Z0-9-]{0,31}", name):
+        raise CampaignRepositoryError(f"unsafe Dev GPU recovery profile: {profile_name!r}")
+    raw = profiles.get(name)
+    if not isinstance(raw, Mapping):
+        available = ", ".join(sorted(str(key) for key in profiles))
+        raise CampaignRepositoryError(
+            f"unknown Dev GPU recovery profile {name!r}; configured profiles: {available or '(none)'}"
+        )
+    runner_tag = str(raw.get("runner_tag", "")).strip()
+    expected_gpu = str(raw.get("expected_gpu", "")).strip()
+    execution_profile = str(raw.get("execution_profile", "")).strip()
+    minimum_free_mib = raw.get("minimum_free_mib")
+    if not runner_tag.startswith("cnb:arch:amd64:gpu:"):
+        raise CampaignRepositoryError(f"Dev GPU profile {name} has an unsafe runner_tag")
+    if expected_gpu != name:
+        raise CampaignRepositoryError(f"Dev GPU profile {name} expected_gpu must equal its profile name")
+    if execution_profile != f"nvidia-{name.lower()}/full_precision/bfloat16":
+        raise CampaignRepositoryError(f"Dev GPU profile {name} has an invalid execution_profile")
+    if isinstance(minimum_free_mib, bool) or not isinstance(minimum_free_mib, int) or minimum_free_mib <= 0:
+        raise CampaignRepositoryError(f"Dev GPU profile {name} minimum_free_mib must be a positive integer")
+    return {
+        "name": name,
+        "runner_tag": runner_tag,
+        "expected_gpu": expected_gpu,
+        "minimum_free_mib": minimum_free_mib,
+        "execution_profile": execution_profile,
+    }
+
+
 def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -242,6 +278,7 @@ def load_campaign_policy(path: str | Path) -> dict[str, Any]:
         "campaign_repository_prefix",
         "verified_runtime_image_digest",
         "campaign_repository",
+        "devgpu_recovery_profiles",
     }
     missing = sorted(required - set(policy))
     if missing:
@@ -277,6 +314,8 @@ def load_campaign_policy(path: str | Path) -> dict[str, Any]:
             raise CampaignRepositoryError(f"campaign_repository.{key} must be a positive integer")
     if float(campaign.get("audio_clip_seconds", 0)) <= 0:
         raise CampaignRepositoryError("campaign_repository.audio_clip_seconds must be positive")
+    for profile_name in ("L40", "H20"):
+        resolve_devgpu_recovery_profile(policy, profile_name)
     return policy
 
 
@@ -902,6 +941,7 @@ def generate_campaign_devgpu_config(
     repository_slug: str,
     item_count: int,
     source_manifest_sha256: str,
+    devgpu_profile: str = "L40",
 ) -> str:
     """Add one receipt-bound full-resume workspace to the generated config."""
 
@@ -913,6 +953,7 @@ def generate_campaign_devgpu_config(
         source_manifest_sha256=source_manifest_sha256,
     ).rstrip()
     campaign = policy["campaign_repository"]
+    profile = resolve_devgpu_recovery_profile(policy, devgpu_profile)
     image = str(policy["verified_runtime_image_digest"])
     shard_count = int(campaign["shard_count"])
     input_root = f"data/input/{campaign_id}"
@@ -930,7 +971,7 @@ def generate_campaign_devgpu_config(
         "    services:",
         "    - vscode",
         "    runner:",
-        f"      tags: {campaign['runner_tag']}",
+        f"      tags: {profile['runner_tag']}",
         "    env:",
         "      PYTHONUNBUFFERED: '1'",
         "      HF_HUB_ENABLE_HF_TRANSFER: '1'",
@@ -951,7 +992,8 @@ def generate_campaign_devgpu_config(
         f"      MUSIC_FLAMINGO_CAMPAIGN_SHARD_COUNT: '{shard_count}'",
         "      MUSIC_FLAMINGO_CAMPAIGN_MAX_PENDING_ITEMS: '0'",
         "      MUSIC_FLAMINGO_CONTINUE_ON_ERROR: '1'",
-        "      MUSIC_FLAMINGO_EXECUTION_PROFILE: nvidia-l40/full_precision/bfloat16",
+        f"      MUSIC_FLAMINGO_EXECUTION_PROFILE: {profile['execution_profile']}",
+        f"      MUSIC_FLAMINGO_DEVGPU_RECOVERY_PROFILE: {profile['name']}",
         "      MUSIC_FLAMINGO_DURABLE_LEDGER_REQUIRED: '1'",
         "      MUSIC_FLAMINGO_LEDGER_CHECKPOINT_EVERY: '5'",
         f"      MUSIC_FLAMINGO_LEDGER_REPO_URL: {_yaml_string('https://cnb.cool/' + repository_slug + '.git')}",
@@ -967,14 +1009,14 @@ def generate_campaign_devgpu_config(
         "        set -eu",
         "        gate_root=\"/workspace/cache/output/music_flamingo_pipeline/devgpu-recovery-${CNB_BUILD_ID}\"",
         "        mkdir -p \"$gate_root\"",
-        "        python scripts/check_manual_gpu_gate.py --phase before_hydrate --expected-gpu L40 --minimum-free-mib 40000 --max-utilization-percent 0 --receipt \"$gate_root/gpu-before-hydrate.json\"",
+        f"        python scripts/check_manual_gpu_gate.py --phase before_hydrate --expected-gpu {profile['expected_gpu']} --minimum-free-mib {profile['minimum_free_mib']} --max-utilization-percent 0 --receipt \"$gate_root/gpu-before-hydrate.json\"",
         "        sleep 60",
-        "        python scripts/check_manual_gpu_gate.py --phase stable_before_hydrate --expected-gpu L40 --minimum-free-mib 40000 --max-utilization-percent 0 --receipt \"$gate_root/gpu-stable-before-hydrate.json\"",
+        f"        python scripts/check_manual_gpu_gate.py --phase stable_before_hydrate --expected-gpu {profile['expected_gpu']} --minimum-free-mib {profile['minimum_free_mib']} --max-utilization-percent 0 --receipt \"$gate_root/gpu-stable-before-hydrate.json\"",
         "        wait_for_clean_gpu() {",
         "          release_phase=\"$1\"",
         "          release_attempt=1",
         "          while [ \"$release_attempt\" -le 20 ]; do",
-        "            if python scripts/check_manual_gpu_gate.py --phase \"${release_phase}_attempt_${release_attempt}\" --expected-gpu L40 --minimum-free-mib 40000 --max-utilization-percent 0 --receipt \"$gate_root/gpu-${release_phase}-${release_attempt}.json\"; then",
+        f"            if python scripts/check_manual_gpu_gate.py --phase \"${{release_phase}}_attempt_${{release_attempt}}\" --expected-gpu {profile['expected_gpu']} --minimum-free-mib {profile['minimum_free_mib']} --max-utilization-percent 0 --receipt \"$gate_root/gpu-${{release_phase}}-${{release_attempt}}.json\"; then",
         "              return 0",
         "            fi",
         "            if [ \"$release_attempt\" -eq 20 ]; then",
@@ -994,7 +1036,7 @@ def generate_campaign_devgpu_config(
         "          mkdir -p \"$run_dir\"",
         "          bash scripts/campaign_ledger_git.sh restore \"$run_dir/campaign_ledger.jsonl\"",
         "          bash scripts/prepare_kugou_campaign_shard.sh",
-        "          python scripts/check_manual_gpu_gate.py --phase \"pre_model_s${shard_index}\" --expected-gpu L40 --minimum-free-mib 40000 --max-utilization-percent 0 --receipt \"$gate_root/gpu-pre-model-s${shard_index}.json\"",
+        f"          python scripts/check_manual_gpu_gate.py --phase \"pre_model_s${{shard_index}}\" --expected-gpu {profile['expected_gpu']} --minimum-free-mib {profile['minimum_free_mib']} --max-utilization-percent 0 --receipt \"$gate_root/gpu-pre-model-s${{shard_index}}.json\"",
         "          pending_count=\"$(python - \"$run_dir/campaign_shard_plan.json\" <<'PYTHON'",
         "        import json",
         "        import sys",
@@ -1909,6 +1951,7 @@ def _prepare_devgpu_overlay(
     recovery_dir: Path,
     runtime_export_dir: Path,
     runner_refresh: Mapping[str, Any],
+    devgpu_profile: str = "L40",
 ) -> dict[str, Any]:
     checkout = Path(str(source_receipt["checkout"])).expanduser().resolve()
     campaign_commit = str(source_receipt.get("campaign_commit", ""))
@@ -1936,6 +1979,7 @@ def _prepare_devgpu_overlay(
             repository_slug=str(source_receipt["repository"]),
             item_count=int(source_receipt["manifest"]["item_count"]),
             source_manifest_sha256=str(source_receipt["manifest"]["sha256"]),
+            devgpu_profile=devgpu_profile,
         )
         expected_config_sha256 = hashlib.sha256(config.encode("utf-8")).hexdigest()
         remote_overlay = _authenticated_git_output(
@@ -1984,6 +2028,7 @@ def _prepare_devgpu_overlay(
                     "parent_campaign_commit": campaign_commit,
                     "config_sha256": expected_config_sha256,
                     "runner_refresh": copy.deepcopy(dict(runner_refresh)),
+                    "devgpu_profile": resolve_devgpu_recovery_profile(policy, devgpu_profile),
                     "path": str(overlay),
                     "reused": True,
                 }
@@ -2021,6 +2066,7 @@ def _prepare_devgpu_overlay(
                 "parent_campaign_commit": campaign_commit,
                 "config_sha256": expected_config_sha256,
                 "runner_refresh": copy.deepcopy(dict(runner_refresh)),
+                "devgpu_profile": resolve_devgpu_recovery_profile(policy, devgpu_profile),
                 "path": str(overlay),
                 "reused": False,
                 "updated": True,
@@ -2059,6 +2105,7 @@ def _prepare_devgpu_overlay(
             "parent_campaign_commit": campaign_commit,
             "config_sha256": expected_config_sha256,
             "runner_refresh": copy.deepcopy(dict(runner_refresh)),
+            "devgpu_profile": resolve_devgpu_recovery_profile(policy, devgpu_profile),
             "path": str(overlay),
             "reused": False,
         }
@@ -2250,6 +2297,7 @@ def recover_campaign_with_devgpu(
     transport: str | None = None,
     repository_root: str | Path | None = None,
     github_commit: str | None = None,
+    devgpu_profile: str = "L40",
 ) -> dict[str, Any]:
     """Recover a failed build-GPU campaign through one full Dev GPU workspace."""
 
@@ -2257,6 +2305,7 @@ def recover_campaign_with_devgpu(
     load_validated_operations(operations, required_atom="cnb_campaign_devgpu_recovery")
     operations_sha256 = sha256_file(operations)
     policy = _policy_with_transport(load_campaign_policy(policy_path), transport)
+    selected_profile = resolve_devgpu_recovery_profile(policy, devgpu_profile)
     source_file = Path(source_receipt_path).expanduser().resolve()
     source = _read_json(source_file)
     binding = validate_campaign_receipt_binding(policy, source)
@@ -2303,6 +2352,7 @@ def recover_campaign_with_devgpu(
         "manifest": copy.deepcopy(source["manifest"]),
         "runtime_image": source["runtime_image"],
         "campaign_commit": source["campaign_commit"],
+        "devgpu_profile": copy.deepcopy(selected_profile),
         "build_gpu_platform_gate": platform_gate,
         "attempts": attempts,
         "created_at": existing.get("created_at") or now_iso(),
@@ -2347,6 +2397,7 @@ def recover_campaign_with_devgpu(
             recovery_dir=recovery_dir,
             runtime_export_dir=runtime_export_dir,
             runner_refresh=runner_refresh,
+            devgpu_profile=selected_profile["name"],
         )
         receipt["overlay"] = overlay
         receipt["status"] = "starting_workspace"
@@ -3138,6 +3189,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--release-manifest", type=Path)
     parser.add_argument("--reconciliation-receipt", type=Path)
     parser.add_argument("--github-commit")
+    parser.add_argument(
+        "--devgpu-profile",
+        default="L40",
+        help="Explicit configured Dev GPU recovery profile (default: L40)",
+    )
     parser.add_argument("--expected-count", type=int)
     parser.add_argument("--transport", choices=("lfs", "git-objects"))
     parser.add_argument("--resume-repository", help="Exact receipt-bound campaign repository allowed during resume")
@@ -3223,6 +3279,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 transport=args.transport,
                 repository_root=args.repository_root,
                 github_commit=args.github_commit,
+                devgpu_profile=args.devgpu_profile,
             )
         elif args.action == "cleanup":
             if not args.receipt:
