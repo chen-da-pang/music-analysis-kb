@@ -65,6 +65,25 @@ REQUIRED_CAMPAIGN_RUNTIME_FILES = (
     "scripts/run_music_flamingo_batch.py",
     "scripts/package_music_flamingo_run.sh",
     "scripts/build_kugou_canonical_delivery.py",
+    "scripts/check_manual_gpu_gate.py",
+    "scripts/devgpu_run_batch.sh",
+    "scripts/devgpu_batch_supervisor.py",
+)
+
+# The recovery overlay is intentionally config-only and must therefore prove
+# that the pinned campaign export already contains every foreground execution
+# entry point it will invoke.  Keeping this explicit prevents a workspace
+# stage from silently falling back to a generic wrapper that is not part of
+# the durable Dev GPU execution boundary.
+REQUIRED_DEVGPU_RECOVERY_RUNTIME_FILES = (
+    "scripts/check_manual_gpu_gate.py",
+    "scripts/campaign_ledger_git.sh",
+    "scripts/music_flamingo_run_context.py",
+    "scripts/prepare_kugou_campaign_shard.sh",
+    "scripts/run_music_flamingo_batch.py",
+    "scripts/devgpu_run_batch.sh",
+    "scripts/devgpu_batch_supervisor.py",
+    "scripts/build_kugou_canonical_delivery.py",
 )
 
 JsonRunner = Callable[[Sequence[str]], dict[str, Any]]
@@ -951,16 +970,61 @@ def generate_campaign_devgpu_config(
         f"        for shard_index in $(seq 1 {shard_count}); do",
         "          export MUSIC_FLAMINGO_CAMPAIGN_SHARD_INDEX=\"$shard_index\"",
         "          export MUSIC_FLAMINGO_CAMPAIGN_SHARD_ID=\"${MUSIC_FLAMINGO_CAMPAIGN_ID}-s${shard_index}\"",
-        "          export MUSIC_FLAMINGO_RUN_ID=\"${CNB_BUILD_ID}-s${shard_index}-hydrate\"",
-        "          hydrate_dir=\"$(python scripts/music_flamingo_run_context.py print-dir)\"",
-        "          mkdir -p \"$hydrate_dir\"",
-        "          bash scripts/campaign_ledger_git.sh restore \"$hydrate_dir/campaign_ledger.jsonl\"",
-        "          bash scripts/prepare_kugou_campaign_shard.sh",
-        "          python scripts/check_manual_gpu_gate.py --phase \"pre_model_s${shard_index}\" --expected-gpu L40 --minimum-free-mib 40000 --max-utilization-percent 0 --receipt \"$gate_root/gpu-pre-model-s${shard_index}.json\"",
         "          export MUSIC_FLAMINGO_RUN_ID=\"${CNB_BUILD_ID}-s${shard_index}\"",
         "          export MUSIC_FLAMINGO_OUTPUT_NAME=\"campaign_${MUSIC_FLAMINGO_CAMPAIGN_ID}_devgpu_s${shard_index}\"",
-        "          bash scripts/run_music_flamingo_campaign.sh",
+        "          run_dir=\"$(python scripts/music_flamingo_run_context.py print-dir)\"",
+        "          mkdir -p \"$run_dir\"",
+        "          bash scripts/campaign_ledger_git.sh restore \"$run_dir/campaign_ledger.jsonl\"",
+        "          bash scripts/prepare_kugou_campaign_shard.sh",
+        "          python scripts/check_manual_gpu_gate.py --phase \"pre_model_s${shard_index}\" --expected-gpu L40 --minimum-free-mib 40000 --max-utilization-percent 0 --receipt \"$gate_root/gpu-pre-model-s${shard_index}.json\"",
+        "          pending_count=\"$(python - \"$run_dir/campaign_shard_plan.json\" <<'PYTHON'",
+        "        import json",
+        "        import sys",
+        "        print(json.load(open(sys.argv[1], encoding=\"utf-8\"))[\"pending_item_count\"])",
+        "        PYTHON",
+        "          )\"",
+        "          export MUSIC_FLAMINGO_INPUT_MANIFEST=\"$run_dir/campaign_shard_manifest.jsonl\"",
+        "          export MUSIC_FLAMINGO_INPUT_AUDIO_ROOT=\"$PWD/${MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT}\"",
+        "          export MUSIC_FLAMINGO_EXPECTED_ITEM_COUNT=\"$pending_count\"",
+        "          set +e",
+        "          bash scripts/devgpu_run_batch.sh",
+        "          runner_rc=$?",
+        "          set -e",
+        "          printf '%s\\n' \"$runner_rc\" > \"$run_dir/campaign_runner_exit_code.txt\"",
+        "          test \"$runner_rc\" -eq 0",
+        "          test -s \"$run_dir/batch_report.json\"",
+        "          if [ ! -s \"$run_dir/campaign_report.json\" ]; then cp \"$run_dir/batch_report.json\" \"$run_dir/campaign_report.json\"; fi",
+        "          test -s \"$run_dir/campaign_ledger.jsonl\"",
+        "          python - \"$run_dir\" \"$pending_count\" <<'PYTHON'",
+        "        import json",
+        "        import sys",
+        "        from pathlib import Path",
+        "        run_dir = Path(sys.argv[1])",
+        "        expected_selected = int(sys.argv[2])",
+        "        report = json.loads((run_dir / \"campaign_report.json\").read_text(encoding=\"utf-8\"))",
+        "        if report.get(\"status\") != \"success\":",
+        "            raise SystemExit(f\"campaign batch status is not success: {report.get('status')!r}\")",
+        "        campaign = report.get(\"campaign\")",
+        "        if not isinstance(campaign, dict):",
+        "            raise SystemExit(\"campaign report has no campaign accounting\")",
+        "        campaign_status = campaign.get(\"campaign_status\", report.get(\"campaign_status\"))",
+        "        if campaign_status not in {\"success\", \"already_complete_for_selected_shard\"}:",
+        "            raise SystemExit(f\"campaign status is not complete: {campaign_status!r}\")",
+        "        selected = int(campaign.get(\"selected_item_count\", -1))",
+        "        new_success = int(campaign.get(\"new_success_count\", sum(item.get(\"status\") == \"success\" for item in report.get(\"items\", []))))",
+        "        reused_success = int(campaign.get(\"reused_success_count\", 0))",
+        "        errors = int(campaign.get(\"error_item_count\", 0))",
+        "        deferred = int(campaign.get(\"deferred_item_count\", 0))",
+        "        if selected != expected_selected or new_success + reused_success != selected or errors or deferred:",
+        "            raise SystemExit(\"campaign report does not prove full zero-error shard coverage\")",
+        "        PYTHON",
         "        done",
+        "        ledger_verify_dir=\"$gate_root/durable-ledger\"",
+        "        mkdir -p \"$ledger_verify_dir\"",
+        "        bash scripts/campaign_ledger_git.sh restore \"$ledger_verify_dir/campaign_ledger.jsonl\"",
+        "        python scripts/build_kugou_canonical_delivery.py --source-manifest \"$MUSIC_FLAMINGO_CAMPAIGN_SOURCE_MANIFEST\" --campaign-ledger \"$ledger_verify_dir/campaign_ledger.jsonl\" --output-manifest \"$ledger_verify_dir/canonical_delivery.jsonl\" --output-state \"$ledger_verify_dir/canonical_delivery_state.json\" --expected-count \"$MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT\" --expected-campaign-id \"$MUSIC_FLAMINGO_CAMPAIGN_ID\" --require-source-url",
+        "        test -s \"$ledger_verify_dir/canonical_delivery.jsonl\"",
+        "        test -s \"$ledger_verify_dir/canonical_delivery_state.json\"",
         "    lock:",
         f"      key: {_yaml_string('music-flamingo-' + campaign_id + '-ledger-writer')}",
         "      wait: true",
@@ -1479,11 +1543,22 @@ def _ledger_clone_is_bound(ledger_dir: Path, repository: str) -> bool:
     return remote.returncode == 0 and remote.stdout.strip() == expected
 
 
-def _recover_delivery(receipt: dict[str, Any], *, run_dir: Path, require_source_url: bool = False) -> dict[str, Any]:
+def _recover_delivery(
+    receipt: dict[str, Any],
+    *,
+    run_dir: Path,
+    require_source_url: bool = False,
+    fresh_ledger: bool = False,
+) -> dict[str, Any]:
     checkout = Path(str(receipt["checkout"])).resolve()
     campaign_id = str(receipt["run_id"])
     ledger_branch = str(receipt["ledger_branch"])
     ledger_dir = run_dir / "cnb" / "ledger-recovery"
+    if fresh_ledger and ledger_dir.exists():
+        # A Dev GPU recovery has just passed its in-workspace canonical
+        # verification.  Re-clone the durable branch instead of accepting a
+        # ledger clone left by an earlier failed recovery attempt.
+        shutil.rmtree(ledger_dir)
     if ledger_dir.exists():
         # A previous builder attempt may have failed after cloning.  Reuse the
         # receipt-bound clone when it still contains the expected ledger; never
@@ -1698,7 +1773,7 @@ def _prepare_devgpu_overlay(
         raise CampaignRepositoryError("source receipt has no valid campaign_commit")
     if _run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).stdout.strip() != campaign_commit:
         raise CampaignRepositoryError("source checkout HEAD no longer matches campaign_commit")
-    for relative in ("scripts/check_manual_gpu_gate.py", "scripts/run_music_flamingo_campaign.sh"):
+    for relative in REQUIRED_DEVGPU_RECOVERY_RUNTIME_FILES:
         if not (checkout / relative).is_file():
             raise CampaignRepositoryError(f"Dev GPU recovery runtime file is missing: {relative}")
 
@@ -2036,7 +2111,12 @@ def recover_campaign_with_devgpu(
         delivery_source["ledger_branch"] = str(policy["campaign_repository"]["ledger_branch_template"]).format(
             campaign_id=source["run_id"]
         )
-        delivery = _recover_delivery(delivery_source, run_dir=run_dir_path, require_source_url=True)
+        delivery = _recover_delivery(
+            delivery_source,
+            run_dir=run_dir_path,
+            require_source_url=True,
+            fresh_ledger=True,
+        )
         receipt["logical_shards"] = [
             {"index": index, "id": f"{source['run_id']}-s{index}", "status": "success", "workspace_sn": workspace_sn}
             for index in range(1, int(policy["campaign_repository"]["shard_count"]) + 1)
