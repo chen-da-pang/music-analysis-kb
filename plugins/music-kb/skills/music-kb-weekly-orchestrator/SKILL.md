@@ -38,6 +38,38 @@ The weekly cadence is an invocation concern, not a polling job. Do not create a
 daily CNB monitor for the preflight gate. CNB is queried only when this skill is
 actually run.
 
+## CNB history gate
+
+Before responding to a CNB failure or allocating another CNB workspace, first
+read the current run's receipt and attempts, the linked GitHub Issue, and the
+relevant prior rollout/thread evidence. Classify the failure before choosing an
+operation. Do not treat a familiar error as a new code defect, and do not use
+an immediate retry as a substitute for that review.
+
+For executable `cnb_campaign_devgpu_recovery`, write a receipt-bound history
+review JSON and pass it through `--history-review`. It must bind the current
+source-receipt SHA-256 and operation-record SHA-256, name the failure
+fingerprint, cite at least one prior evidence source and the operation being
+reused, and record the chosen action/rationale. The recovery receipt stores its
+path and hash before a workspace can be allocated.
+
+Use the previously verified operation for a recognized fingerprint:
+
+- A large image pull in `Prepare` is preparation time, not a model failure.
+- `initial_dirty_l40_allocation` fails before hydrate under the existing
+  40,000 MiB / 0% gate. Confirm the stopped workspace is absent, preserve the
+  same receipt, and wait for external allocation state to change before a
+  deliberately reviewed same-receipt retry; do not change the batch, model,
+  threshold, slug, or create a probe.
+- A prior shard still holding VRAM is the distinct post-shard release case:
+  use the bounded same-threshold release gate before the next shard.
+- An outer CNB stage marked successful without supervisor/report/ledger/canonical
+  evidence is the false-success case: fail closed and use the foreground
+  supervisor plus durable evidence contract.
+
+If the history review does not yield a known safe operation, stop before
+allocating compute and record the unresolved decision in the owning Issue.
+
 ## Fresh versus delivery-resume
 
 With `--delivery`, validate the supplied canonical Music Flamingo JSONL and its
@@ -233,6 +265,7 @@ uv run python scripts/cnb_campaign_repository.py recover-devgpu \
   --operations-file references/validated-operations.json \
   --receipt /path/to/run/cnb/campaign-receipt.json \
   --recovery-receipt /path/to/run/cnb/devgpu-recovery/receipt.json \
+  --history-review /path/to/run/cnb/devgpu-recovery/history-review.json \
   --run-dir /path/to/run \
   --transport lfs \
   --execute --wait

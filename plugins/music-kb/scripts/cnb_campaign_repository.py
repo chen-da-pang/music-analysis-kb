@@ -2024,6 +2024,70 @@ def _verify_build_gpu_platform_gate(source_receipt: Mapping[str, Any], runner: J
     }
 
 
+def _validated_devgpu_history_review(
+    history_review_path: str | Path,
+    *,
+    source_receipt_path: Path,
+    source_receipt: Mapping[str, Any],
+    operations_sha256: str,
+) -> dict[str, Any]:
+    """Bind an operator's history review to the exact recovery attempt.
+
+    CNB host-state failures can look like runner failures in a short status
+    response.  An executable recovery therefore needs a small, receipt-bound
+    review that proves the operator looked at prior evidence and selected an
+    existing operation before allocating another Dev GPU workspace.
+    """
+
+    review_file = Path(history_review_path).expanduser().resolve()
+    review = _read_json(review_file)
+    errors: list[str] = []
+    expected = {
+        "schema_version": 1,
+        "atom": "cnb_campaign_devgpu_recovery",
+        "run_id": source_receipt.get("run_id"),
+        "repository": source_receipt.get("repository"),
+        "source_receipt_sha256": sha256_file(source_receipt_path),
+        "operations_sha256": operations_sha256,
+    }
+    for key, value in expected.items():
+        if review.get(key) != value:
+            errors.append(f"history review {key} does not bind the current recovery")
+    if not isinstance(review.get("reviewed_at"), str) or not str(review["reviewed_at"]).strip():
+        errors.append("history review lacks reviewed_at")
+    fingerprint = review.get("failure_fingerprint")
+    if not isinstance(fingerprint, Mapping):
+        errors.append("history review lacks a failure_fingerprint object")
+    elif not isinstance(fingerprint.get("classification"), str) or not str(fingerprint["classification"]).strip():
+        errors.append("history review failure_fingerprint lacks classification")
+    evidence = review.get("history_evidence")
+    if not isinstance(evidence, list) or not evidence:
+        errors.append("history review needs at least one historical evidence record")
+    else:
+        for index, item in enumerate(evidence, start=1):
+            if not isinstance(item, Mapping):
+                errors.append(f"history review evidence {index} is not an object")
+                continue
+            for key in ("source", "finding", "reused_operation"):
+                if not isinstance(item.get(key), str) or not str(item[key]).strip():
+                    errors.append(f"history review evidence {index} lacks {key}")
+    decision = review.get("decision")
+    if not isinstance(decision, Mapping):
+        errors.append("history review lacks a decision object")
+    else:
+        for key in ("action", "rationale"):
+            if not isinstance(decision.get(key), str) or not str(decision[key]).strip():
+                errors.append(f"history review decision lacks {key}")
+    if errors:
+        raise CampaignRepositoryError("Dev GPU history review is invalid: " + "; ".join(errors))
+    return {
+        "path": str(review_file),
+        "sha256": sha256_file(review_file),
+        "failure_fingerprint": copy.deepcopy(dict(fingerprint)),
+        "decision": copy.deepcopy(dict(decision)),
+    }
+
+
 def recover_campaign_with_devgpu(
     *,
     policy_path: str | Path,
@@ -2031,6 +2095,7 @@ def recover_campaign_with_devgpu(
     source_receipt_path: str | Path,
     recovery_receipt_path: str | Path,
     run_dir: str | Path,
+    history_review_path: str | Path | None = None,
     execute: bool = False,
     wait: bool = True,
     timeout_seconds: float = 14_400,
@@ -2096,12 +2161,23 @@ def recover_campaign_with_devgpu(
         "updated_at": now_iso(),
         "failure": None,
     }
-    _atomic_write_json(recovery_file, receipt)
     if not execute:
+        _atomic_write_json(recovery_file, receipt)
         receipt["receipt"] = str(recovery_file)
         return receipt
     if not wait:
         raise CampaignRepositoryError("executable Dev GPU recovery must wait for the full workspace stage")
+    if history_review_path is None:
+        raise CampaignRepositoryError(
+            "executable Dev GPU recovery requires --history-review bound to the current receipt"
+        )
+    receipt["history_review"] = _validated_devgpu_history_review(
+        history_review_path,
+        source_receipt_path=source_file,
+        source_receipt=source,
+        operations_sha256=operations_sha256,
+    )
+    _atomic_write_json(recovery_file, receipt)
 
     workspace_sn = ""
     try:
@@ -2887,6 +2963,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--recovery-receipt", type=Path)
+    parser.add_argument(
+        "--history-review",
+        type=Path,
+        help="Required before executable Dev GPU recovery; receipt-bound history review JSON",
+    )
     parser.add_argument("--delivery", type=Path)
     parser.add_argument("--release-manifest", type=Path)
     parser.add_argument("--reconciliation-receipt", type=Path)
@@ -2968,6 +3049,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 source_receipt_path=args.receipt,
                 recovery_receipt_path=args.recovery_receipt,
                 run_dir=args.run_dir,
+                history_review_path=args.history_review,
                 execute=args.execute,
                 wait=args.wait,
                 timeout_seconds=args.timeout_seconds,
