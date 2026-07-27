@@ -13,16 +13,33 @@ import pytest
 
 def test_plugin_manifest_and_mcp_config_are_present() -> None:
     root = Path(__file__).resolve().parents[1]
-    manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    codex_manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    grok_manifest = json.loads((root / ".grok-plugin" / "plugin.json").read_text(encoding="utf-8"))
     mcp = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
-    assert manifest["name"] == "music-kb"
-    assert manifest["version"] == "0.8.5"
-    assert _current_plugin_version() == manifest["version"]
+    assert codex_manifest["name"] == "music-kb"
+    assert codex_manifest["version"] == "0.8.6"
+    assert grok_manifest["name"] == codex_manifest["name"]
+    assert grok_manifest["version"] == codex_manifest["version"]
+    assert grok_manifest["skills"] == "./skills/"
+    assert grok_manifest["mcpServers"] == "./.mcp.json"
+    assert _current_plugin_version() == codex_manifest["version"]
     assert SCHEMA_VERSION == 7
-    assert "suno" not in json.dumps(manifest, ensure_ascii=False).casefold()
-    assert manifest["mcpServers"] == "./.mcp.json"
+    assert "suno" not in json.dumps(codex_manifest, ensure_ascii=False).casefold()
+    assert codex_manifest["mcpServers"] == "./.mcp.json"
     assert mcp["mcpServers"]["music-kb"]["command"] == "uv"
     assert (root / "skills" / "music-kb" / "SKILL.md").is_file()
+
+
+def test_repo_grok_marketplace_lists_music_kb() -> None:
+    repo = Path(__file__).resolve().parents[3]
+    marketplace = json.loads((repo / ".grok-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+    assert marketplace["name"] == "music-analysis-kb"
+    plugins = {entry["name"]: entry for entry in marketplace["plugins"]}
+    assert "music-kb" in plugins
+    source = plugins["music-kb"]["source"]
+    assert source.get("type") == "local" or source.get("source") == "local"
+    path = source.get("path") or ""
+    assert path.endswith("plugins/music-kb") or path == "./plugins/music-kb"
 
 
 def test_conversation_ux_onboarding_and_contract_are_present() -> None:
@@ -647,6 +664,6 @@ def test_plugin_version_is_kept_in_sync() -> None:
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     lockfile = (root / "uv.lock").read_text(encoding="utf-8")
     version = manifest["version"]
-    assert version == "0.8.5"
+    assert version == "0.8.6"
     assert f'version = "{version}"' in pyproject
     assert f'name = "music-kb"\nversion = "{version}"' in lockfile

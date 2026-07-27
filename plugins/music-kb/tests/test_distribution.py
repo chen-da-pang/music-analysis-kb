@@ -29,7 +29,7 @@ def test_current_plugin_version_uses_the_shipped_default_when_metadata_is_unavai
 
     monkeypatch.setattr(distribution, "package_version", no_package)
 
-    assert distribution._current_plugin_version() == "0.8.5"
+    assert distribution._current_plugin_version() == "0.8.6"
 
 
 def _write_peers(

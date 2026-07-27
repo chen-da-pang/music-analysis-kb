@@ -24,7 +24,7 @@ music-kb-YYYYwNN.sqlite + manifest.json + SHA-256
 colleague: ~/.music-kb/current.sqlite (read-only)
         │
         ▼
-  music-kb-mcp → Codex / other MCP-capable agents
+  music-kb-mcp → Grok Build / Codex / other MCP-capable agents
 ```
 
 The database holds one public canonical analysis per **recording**, not merely
@@ -38,8 +38,8 @@ audit but are removed from client snapshots and never appear in MCP search.
 | `music-kb` CLI | Publisher lifecycle: initialize, import, validate, create/verify/install snapshots, SSH/rsync fan-out, and local search. |
 | `music-kb-mcp` | Bounded, read-only local MCP interface for agents. |
 | `plugins/music-kb/skills/music-kb` | Retrieval workflow for canonical analyses and granular tags. |
-| `plugins/music-kb/skills/music-kb-audio-downloader` | Publisher-only upstream queue, inventory, and Claude Code/musicdl download workflow. |
-| Codex plugin | Packaging layer that ships the CLI/MCP/Skill together. It does not contain the database. |
+| `plugins/music-kb/skills/music-kb-audio-downloader` | Publisher-only upstream queue, inventory, and musicdl download workflow (direct executor). |
+| Grok / Codex plugin | Dual packaging (`.grok-plugin` + `.codex-plugin`) that ships CLI/MCP/Skills. It does not contain the database. |
 
 The retrieval Skill accepts ordinary-language requests, so a user can ask for
 “一些 R&B、温暖的、关于爱情的歌” without learning canonical tag names or MCP
@@ -100,7 +100,25 @@ uv run music-kb --json publish push \
 
 ## Quick start (colleague)
 
-1. Install the public plugin from GitHub (one time):
+1. Install the public plugin (one time):
+
+   **Grok Build (primary on this branch):**
+
+   ```bash
+   # Local checkout while dual packaging lands on main:
+   grok plugin marketplace add /absolute/path/to/music-analysis-kb
+   grok plugin install music-kb --trust
+   grok plugin enable music-kb
+
+   # After merge to main you can also use:
+   # grok plugin marketplace add chen-da-pang/music-analysis-kb
+   # grok plugin install music-kb --trust
+   ```
+
+   See [docs/grok-plugin.md](docs/grok-plugin.md). Reload plugins (`r` in the
+   Plugins tab) or start a new session so skills and MCP attach.
+
+   **Codex (compatibility):**
 
    ```bash
    codex plugin marketplace add chen-da-pang/music-analysis-kb --ref main
@@ -108,8 +126,8 @@ uv run music-kb --json publish push \
    ```
 
    For a checked-out local copy during development, use its absolute repository
-   path in the first command instead. If its MCP tools do not appear in an
-   already-open Codex task, reopen that task so its tool metadata is refreshed.
+   path when adding the marketplace. If MCP tools do not appear in an
+   already-open session, reopen that session so tool metadata is refreshed.
 
 2. Enable macOS Remote Login and keep the machine reachable on the company
    network/VPN. The publisher's SSH installer uses the configured remote
@@ -156,7 +174,8 @@ conversion: all of these tags exist to improve local retrieval.
 - [Import contract](docs/import-contract.md)
 - [Schema and retrieval design](docs/schema.md)
 - [Snapshot publishing and SSH operations](docs/operations.md)
-- [Weekly audio download through Claude Code](docs/download-via-claude-code.md)
+- [Grok Build plugin install](docs/grok-plugin.md)
+- [Weekly audio download through Claude Code](docs/download-via-claude-code.md) (historical provenance; default executor is direct)
 - [Architecture decision](docs/architecture/2026-07-13-music-analysis-knowledge-base.md)
 - [Synthetic 100k benchmark](docs/benchmarks/2026-07-13-generic-100k.md)
 

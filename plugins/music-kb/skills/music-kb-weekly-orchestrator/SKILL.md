@@ -8,6 +8,11 @@ description: Orchestrate a complete weekly Music KB update from the configured K
 Run this skill on the publisher machine only. Colleague machines are read-only
 retrieval clients and receive immutable snapshots, never the writable master.
 
+**Grok Build:** use this skill as the publisher-side orchestration contract.
+Default download/fallback executors are `direct`. Historical atom names
+(`claude_download`, `run_claude_*.py`) remain for receipt compatibility; they
+do not mean Claude must run the workers.
+
 ## Non-negotiable run contract
 
 Before every atom, read and validate:

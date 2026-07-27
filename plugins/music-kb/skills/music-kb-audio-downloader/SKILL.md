@@ -7,7 +7,18 @@ description: Prepare a deduplicated Kugou audio queue from a new chart export an
 
 This is the upstream audio-download atom for the weekly publisher workflow.
 It is intentionally separate from `music-kb-weekly-publisher`, which starts
-from a completed CNB canonical delivery. The atom has four bounded stages:
+from a completed CNB canonical delivery.
+
+## Agent host (Grok Build)
+
+On **Grok Build**, run the fixed scripts with `--executor direct` (default).
+The Grok agent starts the wrapper, waits for terminal receipts, and must not
+hand-edit inventory, progress, or audio. Script names such as
+`run_claude_download.py` / `run_claude_fallback.py` are historical atom entry
+points; they are not a requirement to invoke Claude. `--executor claude` is a
+legacy Codex/Claude Code compatibility path only.
+
+The atom has four bounded stages:
 
 1. Rebuild `data/song_inventory.json` from the Kugou SQLite source, the legacy
    July 6 progress file, and the actual audio files on disk.

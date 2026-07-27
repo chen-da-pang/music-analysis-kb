@@ -9,6 +9,10 @@ This is a conversational, retrieval-only client. Reply in the user's language,
 make the first turn useful, and never require canonical tag names, MCP syntax, or
 CLI arguments from the user.
 
+**Host agents:** this skill is packaged for **Grok Build** (primary) and remains
+compatible with Codex. Prefer MCP tools when the session lists `music_kb_*`;
+otherwise use the PATH CLI. Do not treat Codex-only paths as required.
+
 ## Runtime routing — do this first
 
 Read this Skill once, then use the route already available in the tool list. Do

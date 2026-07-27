@@ -23,7 +23,7 @@ DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 DEFAULT_PLUGIN_CACHE_ROOT = "~/.codex/plugins/cache/music-analysis-kb/music-kb"
 MAX_OUTPUT_CHARS = 2_000
-DEFAULT_PLUGIN_VERSION = "0.8.5"
+DEFAULT_PLUGIN_VERSION = "0.8.6"
 PLUGIN_MANIFEST_PATH = Path(__file__).resolve().parents[2] / ".codex-plugin" / "plugin.json"
 
 CommandRunner = Callable[[Sequence[str], int], subprocess.CompletedProcess[str]]

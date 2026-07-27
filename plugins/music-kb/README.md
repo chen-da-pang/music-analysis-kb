@@ -1,6 +1,6 @@
-# music-kb Codex plugin
+# music-kb plugin (Grok Build + Codex)
 
-This directory is the installable Codex plugin and Python package for the
+This directory is the installable **Grok Build** / Codex plugin and Python package for the
 local-first Music Flamingo analysis knowledge base.
 
 It intentionally contains **code, fixtures, and documentation only**. Do not
@@ -182,3 +182,13 @@ local current snapshot unchanged unless `--install-local` is supplied;
 
 Read the repository-level [README](../../README.md) for the publisher/client
 workflow and deployment rules.
+
+
+## Dual harness packaging
+
+| Manifest | Harness |
+| --- | --- |
+| `.grok-plugin/plugin.json` | Grok Build |
+| `.codex-plugin/plugin.json` | Codex |
+
+See [docs/grok-plugin.md](../../docs/grok-plugin.md) for install and validation.

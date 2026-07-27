@@ -9,6 +9,10 @@ This is the publisher-side workflow. It is not a colleague-side retrieval
 skill and it must never be installed as a write-capable workflow on client
 machines.
 
+**Grok Build / Codex:** packaging is dual-harness; publish only from the
+publisher machine. Client agents (including Grok) use the read-only
+`music-kb` skill and MCP against `~/.music-kb/current.sqlite`.
+
 ## Non-negotiable boundaries
 
 - The writable database is only `~/.music-kb/music-master.sqlite`.

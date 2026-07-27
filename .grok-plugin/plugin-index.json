@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "plugins": {
+    "music-kb": {
+      "version": "0.8.6",
+      "components": {
+        "skills": [
+          {
+            "name": "music-kb",
+            "description": "Retrieve real songs from the local read-only Music Flamingo analysis KB by natural language."
+          },
+          {
+            "name": "music-kb-audio-downloader",
+            "description": "Publisher-only Kugou queue, inventory, direct musicdl download, and cross-platform fallback."
+          },
+          {
+            "name": "music-kb-weekly-orchestrator",
+            "description": "Publisher-only weekly pipeline from charts through download, CNB, import, snapshot, and cleanup."
+          },
+          {
+            "name": "music-kb-weekly-publisher",
+            "description": "Publisher-only import of CNB delivery, snapshot create, and SSH fan-out to colleague Macs."
+          }
+        ],
+        "mcpServers": [
+          {
+            "name": "music-kb",
+            "description": "Read-only local Music KB MCP tools (discover, recommend, lyrics, status)."
+          }
+        ]
+      }
+    }
+  }
+}
