@@ -57,6 +57,29 @@ Publisher skills default to **direct** executors. Script names such as
 `run_claude_download.py` are historical atom entry points and do not require
 Claude.
 
+### Plugin root vs workspace (required)
+
+Publisher skills use **two** roots. Do not hardcode a checkout folder name.
+
+```bash
+# Data workspace (charts, inventory, audio, weekly receipts)
+export MUSIC_WORKSPACE="/Users/wycm/Documents/网易云热榜抓取"
+
+# Plugin package root (scripts/, references/, pyproject.toml)
+export MUSIC_KB_PLUGIN="$(ls -d "$HOME"/.grok/installed-plugins/music-kb-* | head -1)"
+# or: export MUSIC_KB_PLUGIN="/path/to/repo/plugins/music-kb"
+
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_download.py" \
+  --workspace "$MUSIC_WORKSPACE" \
+  ...
+```
+
+CLI entry:
+
+```bash
+uv run --project "$MUSIC_KB_PLUGIN" music-kb --json doctor
+```
+
 ## MCP
 
 After trust + enable, Grok attaches `music-kb` from `.mcp.json`:

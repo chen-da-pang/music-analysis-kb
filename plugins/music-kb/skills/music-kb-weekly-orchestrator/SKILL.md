@@ -13,12 +13,31 @@ Default download/fallback executors are `direct`. Historical atom names
 (`claude_download`, `run_claude_*.py`) remain for receipt compatibility; they
 do not mean Claude must run the workers.
 
+## Paths: plugin root vs workspace
+
+| Variable | Meaning |
+| --- | --- |
+| `MUSIC_WORKSPACE` | Publisher data workspace (`data/`, `music_downloads/`, weekly receipts) |
+| `MUSIC_KB_PLUGIN` | Absolute path to the plugin package root (contains `scripts/`, `references/`, `pyproject.toml`) |
+
+Resolve once:
+
+```bash
+export MUSIC_KB_PLUGIN="$(ls -d "$HOME"/.grok/installed-plugins/music-kb-* 2>/dev/null | head -1)"
+# or: export MUSIC_KB_PLUGIN="/absolute/path/to/…/plugins/music-kb"
+export MUSIC_WORKSPACE="/absolute/path/to/music-workspace"
+test -f "$MUSIC_KB_PLUGIN/references/validated-operations.json"
+```
+
+Prefer `uv run --project "$MUSIC_KB_PLUGIN" music-kb …` so the CLI comes from
+the plugin package, not a guessed relative checkout name.
+
 ## Non-negotiable run contract
 
 Before every atom, read and validate:
 
 ```text
-plugins/music-kb/references/validated-operations.json
+$MUSIC_KB_PLUGIN/references/validated-operations.json
 ```
 
 Require the current atom's entry and record the operation-record hash in its
@@ -237,7 +256,7 @@ status stops the atom before it can claim a repository was created, deleted, or
 cleaned.
 
 The campaign policy is
-`plugins/music-kb/references/cnb-storage-policy.json`. A campaign repository is
+`$MUSIC_KB_PLUGIN/references/cnb-storage-policy.json`. A campaign repository is
 temporary; GitHub is the only source of runner code. A failed build, ledger
 recovery error, incomplete receipt, release failure, or peer failure leaves the
 same repository and receipt in place. A retry may reuse the receipt-bound work
@@ -262,11 +281,13 @@ Use the executable entry point; do not bypass run state or call the old full
 database downloader:
 
 ```bash
-uv run music-kb --json weekly-run \
-  --workspace /path/to/music-workspace \
+export MUSIC_KB_PLUGIN=/absolute/path/to/plugins/music-kb
+export MUSIC_WORKSPACE=/absolute/path/to/music-workspace
+uv run --project "$MUSIC_KB_PLUGIN" music-kb --json weekly-run \
+  --workspace "$MUSIC_WORKSPACE" \
   --run-id kugou-2026w30 \
   --db "$HOME/.music-kb/music-master.sqlite" \
-  --chart-database /path/to/music_trends.sqlite \
+  --chart-database "$MUSIC_WORKSPACE/data/music_trends.sqlite" \
   --peers-file "$HOME/.config/music-kb/peers.toml" \
   --proxy http://127.0.0.1:7890 \
   --cnb-transport lfs \
@@ -274,14 +295,19 @@ uv run music-kb --json weekly-run \
 ```
 
 When a receipt has the recorded build-GPU platform failure and the explicit
-Dev GPU recovery atom is selected, keep the source receipt untouched:
+Dev GPU recovery atom is selected, keep the source receipt untouched.
+`--repository-root` is the **git repo root** that contains this plugin (not the
+data workspace):
 
 ```bash
-uv run python scripts/cnb_campaign_repository.py recover-devgpu \
-  --policy references/cnb-storage-policy.json \
-  --operations-file references/validated-operations.json \
-  --repository-root /path/to/music-analysis-kb \
-  --github-commit "$(git -C /path/to/music-analysis-kb rev-parse origin/main)" \
+export MUSIC_KB_PLUGIN=/absolute/path/to/plugins/music-kb
+export MUSIC_KB_REPO="$(cd "$MUSIC_KB_PLUGIN/../.." && pwd)"   # repo root
+uv run --project "$MUSIC_KB_PLUGIN" python \
+  "$MUSIC_KB_PLUGIN/scripts/cnb_campaign_repository.py" recover-devgpu \
+  --policy "$MUSIC_KB_PLUGIN/references/cnb-storage-policy.json" \
+  --operations-file "$MUSIC_KB_PLUGIN/references/validated-operations.json" \
+  --repository-root "$MUSIC_KB_REPO" \
+  --github-commit "$(git -C "$MUSIC_KB_REPO" rev-parse origin/main)" \
   --receipt /path/to/run/cnb/campaign-receipt.json \
   --recovery-receipt /path/to/run/cnb/devgpu-recovery/receipt.json \
   --history-review /path/to/run/cnb/devgpu-recovery/history-review.json \

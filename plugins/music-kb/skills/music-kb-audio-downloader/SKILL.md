@@ -18,6 +18,39 @@ hand-edit inventory, progress, or audio. Script names such as
 points; they are not a requirement to invoke Claude. `--executor claude` is a
 legacy Codex/Claude Code compatibility path only.
 
+## Paths: plugin root vs workspace
+
+Never invent a checkout folder name such as `music-analysis-kb/plugins/...`.
+There are two distinct roots:
+
+| Variable | Meaning | Examples |
+| --- | --- | --- |
+| `MUSIC_WORKSPACE` | Publisher **data** workspace (inventory, charts, audio, run receipts) | `/Users/wycm/Documents/网易云热榜抓取` |
+| `MUSIC_KB_PLUGIN` | Absolute path to the **plugin package root** (`plugins/music-kb`) | repo checkout `…/music-analysis-kb-production-main/plugins/music-kb`, or Grok install `~/.grok/installed-plugins/music-kb-*/` |
+
+Resolve `MUSIC_KB_PLUGIN` once per session:
+
+```bash
+# Preferred: installed Grok plugin (pick the music-kb-* directory that contains scripts/)
+export MUSIC_KB_PLUGIN="$(ls -d "$HOME"/.grok/installed-plugins/music-kb-* 2>/dev/null | head -1)"
+
+# Or: local repo checkout of this plugin package
+# export MUSIC_KB_PLUGIN="/absolute/path/to/music-analysis-kb/plugins/music-kb"
+
+test -f "$MUSIC_KB_PLUGIN/scripts/run_claude_download.py"
+export MUSIC_WORKSPACE="/absolute/path/to/music-workspace"   # has data/, music_downloads/
+```
+
+All script invocations below use:
+
+```bash
+python3 "$MUSIC_KB_PLUGIN/scripts/<script>.py" ...
+```
+
+Run them with `cwd` = `$MUSIC_WORKSPACE` when the command takes relative
+`--workspace` / `data/...` paths, unless the flag already receives an absolute
+path. Do not `cd` into the plugin install tree to find workspace data.
+
 The atom has four bounded stages:
 
 1. Rebuild `data/song_inventory.json` from the Kugou SQLite source, the legacy
@@ -64,12 +97,13 @@ capture atom; this atom consumes its processed songs JSON/JSONL/CSV export.
 
 ## Canonical invocation
 
-From the workspace containing `data/music_trends.sqlite`:
+From the workspace containing `data/music_trends.sqlite` (set both roots first):
 
 ```bash
 export MUSIC_WORKSPACE=/path/to/music-workspace
+export MUSIC_KB_PLUGIN=/absolute/path/to/plugins/music-kb
 cd "$MUSIC_WORKSPACE"
-python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_download.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_download.py" \
   --workspace "$MUSIC_WORKSPACE" \
   --source data/processed/kugou/kugou-charts-full-20260706-105721-songs-dedup.json \
   --run-id kugou-download-2026w29 \
@@ -87,13 +121,14 @@ the wrapper must not hand-edit inventory, progress, queue, or retention state.
 The wrapper performs these local commands before starting the fixed worker:
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/build_song_inventory.py \
+cd "$MUSIC_WORKSPACE"
+python3 "$MUSIC_KB_PLUGIN/scripts/build_song_inventory.py" \
   --db data/music_trends.sqlite \
   --progress download_progress.json \
   --inventory data/song_inventory.json \
   --audio-root music_downloads/KugouMusicClient
 
-python3 music-analysis-kb/plugins/music-kb/scripts/prepare_download_queue.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/prepare_download_queue.py" \
   --source data/processed/kugou/<new-songs-export>.json \
   --inventory data/song_inventory.json \
   --output data/download_runs/<run-id>/download_queue.jsonl \
@@ -104,7 +139,7 @@ It then materializes one filtered execution queue and invokes the worker once
 (the wrapper supplies absolute paths and captures the result):
 
 ```bash
-python3 .../download_music_queue.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/download_music_queue.py" \
   --queue data/download_runs/<run-id>/download-queue-direct.jsonl \
   --inventory data/song_inventory.json \
   --work-dir music_downloads \
@@ -153,7 +188,7 @@ For the historical library, do **not** re-download audio. Run the dedicated
 wrapper against the publisher master:
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_lyrics_backfill.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_lyrics_backfill.py" \
   --workspace "$MUSIC_WORKSPACE" \
   --db "$HOME/.music-kb/music-master.sqlite" \
   --chart-db "$MUSIC_WORKSPACE/data/music_trends.sqlite" \
@@ -183,7 +218,7 @@ compatibility way to start the same short launcher:
 
 ```bash
 export MUSICDL_PYTHON=/absolute/path/to/python-that-imports-musicdl
-python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_fallback.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_fallback.py" \
   --workspace "$MUSIC_WORKSPACE" \
   --run-id <run-id> \
   --worker-python "$MUSICDL_PYTHON" \
@@ -195,8 +230,8 @@ proves `--worker-python` can import `musicdl`, then starts the short detached
 launcher. The supervisor runs the actual P=2 isolated shards and its serial
 merger is the only code allowed to touch real inventory/progress and the
 configured music directory. `--executor claude` may start that launcher for
-compatibility, but Claude must not wait, kill, wrap, restart, or directly run
-`download_music_fallback.py`.
+compatibility, but the **agent host** (Grok Build or Claude) must not wait,
+kill, wrap, restart, or directly run `download_music_fallback.py`.
 
 Accept a fallback file only after it exists, exceeds 1 MB, and has an ffprobe
 duration of at least 60 seconds. Each child may write only its run-local shard
@@ -230,7 +265,8 @@ present, and lyric coverage is terminal for every canonical recording, the
 local audio tree can be removed without breaking deduplication:
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/prune_audio_library.py \
+cd "$MUSIC_WORKSPACE"
+python3 "$MUSIC_KB_PLUGIN/scripts/prune_audio_library.py" \
   --inventory data/song_inventory.json \
   --audio-root music_downloads/KugouMusicClient \
   --knowledge-db "$HOME/.music-kb/music-master.sqlite" \
@@ -242,7 +278,7 @@ count, source-track count, non-empty source-link count, and full lyric coverage
 before deleting anything. Execute the deletion only with the explicit flag:
 
 ```bash
-.../prune_audio_library.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/prune_audio_library.py" \
   --inventory data/song_inventory.json \
   --audio-root music_downloads/KugouMusicClient \
   --knowledge-db "$HOME/.music-kb/music-master.sqlite" \
@@ -255,17 +291,16 @@ historical relative path. It changes only the retention state to
 `purged_after_analysis`, so the next weekly queue still skips all previously
 acquired songs even though their audio files are gone.
 
-## Provenance from the original Claude Code run
+## Provenance (historical)
 
-The original July 6 Claude Code conversation is retained locally at:
+The July 6 2026 publisher session that first validated the download method is
+archived outside this plugin (Claude Code session history on the publisher
+Mac). It is **not** required to run this atom under Grok Build.
 
-```text
-~/.claude/projects/-Users-wycm-Documents--------/aa501171-fbfe-408b-9724-d2a2071038e4.jsonl
-```
-
-It records the validated method: install `musicdl`, test a Kugou search and a
-single download, write `batch_download.py`, then run the batch in the
-background. The final report was 927/927 successful, 0 failed, 0 no-result,
-about 37GB, with FLAC/MP3 output and LRC files. This atom preserves the
-effective `MusicClient` + `KugouMusicClient` method but adds queue-level
-deduplication and per-run inventory updates.
+That session recorded: install `musicdl`, test a Kugou search and a single
+download, write `batch_download.py`, then run the batch in the background.
+The final report was 927/927 successful, 0 failed, 0 no-result, about 37GB,
+with FLAC/MP3 output and LRC files. This atom preserves the effective
+`MusicClient` + `KugouMusicClient` method but adds queue-level deduplication
+and per-run inventory updates. Default executor today is **direct**, not a
+Claude-hosted worker.
