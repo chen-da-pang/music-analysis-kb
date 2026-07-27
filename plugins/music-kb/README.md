@@ -192,3 +192,7 @@ workflow and deployment rules.
 | `.codex-plugin/plugin.json` | Codex |
 
 See [docs/grok-plugin.md](../../docs/grok-plugin.md) for install and validation.
+
+## Grok host
+
+Publisher download/weekly: Grok orchestrates with `--executor direct` only. See [docs/grok-plugin.md](../../docs/grok-plugin.md) and skills under `skills/`.

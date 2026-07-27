@@ -13,6 +13,10 @@ machines.
 publisher machine. Client agents (including Grok) use the read-only
 `music-kb` skill and MCP against `~/.music-kb/current.sqlite`.
 
+Grok 在本 skill 中同样只编排：启动
+`uv run --project "$MUSIC_KB_PLUGIN" music-kb weekly-update …`，盯校验/发布
+输出；不手改 master/release 状态。
+
 ## Paths: plugin root
 
 Publisher CLI commands run from the **plugin package**, not the data workspace:
@@ -159,7 +163,7 @@ the import command returned zero.
 
 ## Client-side boundary
 
-Colleagues install the retrieval plugin themselves. The publisher skill only
-pushes database releases over SSH; it does not install or modify Codex
-plugins on colleague machines. Client MCP tools remain read-only and query
-the local `current.sqlite`.
+Colleagues install the retrieval plugin themselves (Grok or Codex). The
+publisher skill only pushes database releases over SSH; it does not install
+or modify agent plugins on colleague machines. Client MCP tools remain
+read-only and query the local `current.sqlite`.

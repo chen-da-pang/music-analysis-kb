@@ -8,10 +8,40 @@ description: Orchestrate a complete weekly Music KB update from the configured K
 Run this skill on the publisher machine only. Colleague machines are read-only
 retrieval clients and receive immutable snapshots, never the writable master.
 
-**Grok Build:** use this skill as the publisher-side orchestration contract.
-Default download/fallback executors are `direct`. Historical atom names
-(`claude_download`, `run_claude_*.py`) remain for receipt compatibility; they
-do not mean Claude must run the workers.
+## Grok 宿主合同（必读）
+
+| 角色 | 职责 |
+| --- | --- |
+| **Grok** | 编排员：设路径、启动 **一条** `weekly-run`（或单原子排障）、等进程、读 `run-state.json` / `atoms/*.json` |
+| **`music-kb weekly-run` + workers** | 唯一写库存/进度/音频/周常收据的进程 |
+
+- 下载/fallback 在编排器内已固定 **`--executor direct`**。Grok **禁止** 改成 `--executor claude` 或再套 Claude/Codex。
+- 历史 atom/脚本名 `claude_download`、`run_claude_*.py` **仅** 为收据兼容，**不**表示要跑 Claude。
+- 默认 **不要** 手搓每个 atom；除非单步 debug。
+- 成功/失败只认收据，不手改 `run-state` / inventory。
+- 恢复必须同一 `--run-id`，禁止换新 id 掩盖失败。
+
+### Grok 周常剧本
+
+1. 设 `MUSIC_WORKSPACE` / `MUSIC_KB_PLUGIN`（CNB 再加 `MUSIC_KB_REPO`）。
+2. 优先：
+
+```bash
+uv run --project "$MUSIC_KB_PLUGIN" music-kb --json weekly-run \
+  --workspace "$MUSIC_WORKSPACE" \
+  --run-id <run-id> \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --chart-database "$MUSIC_WORKSPACE/data/music_trends.sqlite" \
+  --peers-file "$HOME/.config/music-kb/peers.toml" \
+  --proxy http://127.0.0.1:7890 \
+  --cnb-transport lfs \
+  --download-dry-run
+```
+
+3. 长任务：background / 等进程退出；盯  
+   `$MUSIC_WORKSPACE/data/weekly_runs/<run-id>/run-state.json` 与 `atoms/`。
+4. 用户要求停在 CNB 前时，使用既有 dry-run / 不进入 campaign 的标志组合，不要半截手改状态。
+5. 主下载系统性取链失败时：读 `atoms/claude_download.json` 与 download progress，再决定是否单独跑 fallback（见 audio-downloader skill），**不要**空跑整队酷狗搜索。
 
 ## Paths: plugin root vs workspace vs git repo
 
@@ -164,23 +194,15 @@ be purged, so inventory—not file presence alone—is the dedupe record.
    failed, or `no_results` items. `abandoned` is a durable terminal download
    state and requires an explicit `--retry-abandoned` recovery. Do not
    interpret a new download as an analysis result.
-6. **`claude_download`** — retain this historical atom name but default to one
-   fixed direct worker. It must use `musicdl`'s `MusicClient` plus
-   `KugouMusicClient`; it first resolves the queue's exact mix-song page and
-   verified audio hash, then falls back to title/artist search only when needed.
-   It must not call `kugou-cli` or the legacy full-database downloader. Keep one
-   song-level inventory row per platform identity and do not run concurrent
-   workers against shared state. `--executor claude` is only a bounded
-   compatibility retry.
-7. **`fallback_download`** — directly process only the primary worker's
-   recorded `no_results` or `failed` states in the configured fallback order,
-   with duration/size checks. `run_claude_fallback.py` validates a Python that
-   imports `musicdl` and starts a short detached supervisor. Its default two
-   isolated staging shards never touch real inventory, progress, or audio; one
-   serial merger is the sole formal-state writer. `--executor claude` is a
-   compatibility launcher only. Preserve `retry_from_status` and fallback
-   attempt history; after the second unsuccessful fallback round, write
-   `abandoned` and do not requeue it automatically.
+6. **主下载 / primary download**（收据 atom 名仍为 `claude_download`）—
+   编排器固定 `--executor direct` 的一个串行 musicdl worker。使用
+   `MusicClient` + `KugouMusicClient`，先精确 mix-song 页再必要时 title/artist
+   搜索。不得调用 `kugou-cli` 或旧全库下载器；禁止多 worker 共享库存。
+   **Grok 禁止** `--executor claude`。
+7. **`fallback_download`** — 只处理主下载留下的库存 `no_results` / `failed`
+  （未尝试且未入库的歌不在此队列）。`run_claude_fallback.py --executor direct`：
+   P=2 隔离 staging + 串行 merger 写正式状态。**Grok 禁止** claude launcher。
+   两轮失败后 `abandoned`，需显式 recovery 才再入队。
 8. **`cnb_input_materialization`** — consume only newly downloaded queue rows;
    verify file existence, identity, SHA-256, byte count, and `source_url`; use
    hardlinks into an isolated staging directory and write the LF JSONL manifest.

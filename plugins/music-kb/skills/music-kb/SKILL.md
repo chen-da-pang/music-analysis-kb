@@ -9,42 +9,42 @@ This is a conversational, retrieval-only client. Reply in the user's language,
 make the first turn useful, and never require canonical tag names, MCP syntax, or
 CLI arguments from the user.
 
-**Host agents:** this skill is packaged for **Grok Build** (primary) and remains
-compatible with Codex. Prefer MCP tools when the session lists `music_kb_*`;
-otherwise use the PATH CLI. Do not treat Codex-only paths as required.
+**Host:** **Grok Build** primary（Codex 仍兼容）。检索只读；不要走发布机下载 skill。
 
 ## Runtime routing — do this first
 
-Read this Skill once, then use the route already available in the tool list. Do
-not investigate the plugin installation before retrieving.
+Read this Skill once, then use the first available route. Do not archaeology the
+whole home directory.
 
-1. If `music_kb_status` appears in the provided tool list, call it directly.
-   Named `music_kb_*` entries are MCP functions, not resources.
-2. Otherwise immediately run the PATH command `music-kb --json doctor`, then use
-   the known forms below, repeating `--tag` for every condition:
+1. If `music_kb_status` appears in the tool list, call it directly.
+   Named `music_kb_*` entries are MCP tools, not resources.
+2. Otherwise resolve `MUSIC_KB_PLUGIN` (checkout `…/plugins/music-kb` **or** the
+   enabled path from `grok plugin details music-kb` — never `ls | head -1`), then:
 
    ```bash
-   music-kb --json discover --tag 'r&b' --tag 'warm' --tag 'love'
-   music-kb --json recommend --tag 'r&b' --tag 'warm' --tag 'love'
+   uv run --project "$MUSIC_KB_PLUGIN" music-kb --json doctor
+   uv run --project "$MUSIC_KB_PLUGIN" music-kb --json discover --tag 'r&b' --tag 'warm' --tag 'love'
+   uv run --project "$MUSIC_KB_PLUGIN" music-kb --json recommend --tag 'r&b' --tag 'warm' --tag 'love'
    ```
 
-   Omit `--limit` when the user gave no exact quantity; use `--offset` only for
-   continuation. Run each branch recommendation as its own call, not one
-   combined shell command.
+   If `music-kb` is already on PATH and works, that is fine; prefer
+   `uv run --project` when PATH is missing after a Grok plugin install.
+
+3. If MCP and CLI both fail: report enable/trust/reload (`grok plugin enable
+   music-kb`, Plugins 里 `r`，新 session)。Do not invent APIs by reading source.
+
+Omit `--limit` when the user gave no exact quantity; use `--offset` only for
+continuation. Run each branch recommendation as its own call.
 
 For an ordinary successful retrieval:
 
-- Do not call `list_mcp_resources`, `list_mcp_resource_templates`, or another
-  discovery probe to find the named functions.
-- Do not scan plugin directories or inspect source files, README text, `.venv`,
-  executable locations, or implementation details.
-- Do not bypass PATH with an absolute or `.venv/bin/music-kb` executable. If the
-  PATH command is unavailable, report the install/reload boundary.
-- Do not inspect `--help` unless a direct CLI call actually fails with an
-  argument-usage error.
-- Do not reread this Skill after the complete first read. A complete first read is sufficient; do not use sed, cat, or another file read to recover it.
-- Do not repeat a successful discovery or recommendation with identical
-  arguments, and do not `jq`-filter a successful branch to trigger a rerun.
+- Do not call `list_mcp_resources` / resource templates to “find” tools.
+- Do not browse plugin trees for implementation details. Resolving
+  `MUSIC_KB_PLUGIN` only is allowed.
+- Do not inspect `--help` unless a CLI call fails with an argument-usage error.
+- Do not reread this Skill after the complete first read.
+- Do not repeat a successful discovery/recommendation with identical arguments,
+  and do not `jq`-filter a successful branch to force a rerun.
 
 ## Safety and data boundary
 

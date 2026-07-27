@@ -21,6 +21,8 @@ change is large (orchestration code, distribution, schema).
 - Run full ECC multi-workflow / DevFleet for a SKILL.md edit
 - Assume `music-kb` CLI is on PATH; prefer  
   `uv run --project plugins/music-kb music-kb …` or `$MUSIC_KB_PLUGIN`
+- Recommend `--executor claude` under Grok — publisher download/weekly are
+  **Grok + `--executor direct` only** (Grok orchestrates; workers write state)
 
 ## When to pull a heavier ECC skill (from user install, not vendored)
 

@@ -90,6 +90,32 @@ CLI entry:
 uv run --project "$MUSIC_KB_PLUGIN" music-kb --json doctor
 ```
 
+## Grok 宿主运行合同
+
+代码默认下载执行器已是 **`direct`**（musicdl worker）。Grok 的角色是**编排**，不是再套一层 Claude。
+
+| 角色 | 做什么 |
+| --- | --- |
+| Grok | 设路径、启动 fixed 命令、等进程、读 progress / atom / run-state 收据 |
+| Python worker | 唯一写 inventory、progress、音频、歌词收据 |
+
+**禁止（Grok 会话）：**
+
+- `--executor claude` 或 spawn Claude/Codex 去下载
+- 手改库存 / 伪造成功
+- 多 worker 同时写正式库存
+
+**长任务：** background 或等进程退出；成功 = exit 0 + 收据终端态。  
+不要使用 Claude Code 的 Monitor/`dontAsk` 话术。
+
+**Skill 入口：**
+
+- 检索：`music-kb` skill → MCP `music_kb_*`，否则 `uv run --project $MUSIC_KB_PLUGIN music-kb …`
+- 下载：`music-kb-audio-downloader`（主下载 + fallback，均 direct）
+- 周常：`music-kb-weekly-orchestrator`（优先一条 `weekly-run`）
+
+历史脚本名 `run_claude_*.py`、atom `claude_download` 仅为收据兼容。
+
 ## MCP
 
 After trust + enable, Grok attaches `music-kb` from `.mcp.json`:
