@@ -1,5 +1,8 @@
 # Music Analysis Knowledge Base
 
+
+> **Experiment branch notice:** `feat/grok-plugin-migration` must **never** be merged into `main`. See [DO-NOT-MERGE-TO-MAIN.md](DO-NOT-MERGE-TO-MAIN.md) and [docs/dev/ECC-BRANCH-POLICY.md](docs/dev/ECC-BRANCH-POLICY.md).
+
 Private, local-first knowledge base for **Music Flamingo** analysis results.
 It is designed for a publisher machine to maintain a canonical SQLite library,
 then distribute verified, read-only snapshots to colleagues over SSH/rsync.
