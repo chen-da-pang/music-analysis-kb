@@ -1,7 +1,7 @@
 {
   "name": "music-kb",
   "version": "0.8.6",
-  "description": "Local SQLite music-analysis search with natural-language discovery, selected-song lyrics, publisher download/orchestration skills, and read-only MCP tools for Grok Build (and Codex-compatible packaging).",
+  "description": "Local SQLite music-analysis search with natural-language discovery, selected-song lyrics, publisher download/orchestration skills, and read-only MCP tools.",
   "author": {
     "name": "Wuyou Music",
     "url": "https://github.com/chen-da-pang"

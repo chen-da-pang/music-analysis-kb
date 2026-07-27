@@ -31,14 +31,16 @@ There are two distinct roots:
 Resolve `MUSIC_KB_PLUGIN` once per session:
 
 ```bash
-# Preferred: installed Grok plugin (pick the music-kb-* directory that contains scripts/)
-export MUSIC_KB_PLUGIN="$(ls -d "$HOME"/.grok/installed-plugins/music-kb-* 2>/dev/null | head -1)"
+export MUSIC_WORKSPACE="/absolute/path/to/music-workspace"   # has data/, music_downloads/
 
-# Or: local repo checkout of this plugin package
-# export MUSIC_KB_PLUGIN="/absolute/path/to/music-analysis-kb/plugins/music-kb"
+# Preferred for publisher work: monorepo checkout of this plugin package
+export MUSIC_KB_PLUGIN="/absolute/path/to/music-analysis-kb/plugins/music-kb"
+
+# Or: the enabled Grok install path from `grok plugin details music-kb`
+# (do not use `ls | head -1` when multiple music-kb-* installs exist)
+# export MUSIC_KB_PLUGIN="$HOME/.grok/installed-plugins/music-kb-<id>"
 
 test -f "$MUSIC_KB_PLUGIN/scripts/run_claude_download.py"
-export MUSIC_WORKSPACE="/absolute/path/to/music-workspace"   # has data/, music_downloads/
 ```
 
 All script invocations below use:

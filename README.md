@@ -102,10 +102,10 @@ uv run music-kb --json publish push \
 
 1. Install the public plugin (one time):
 
-   **Grok Build (primary on this branch):**
+   **Grok Build:**
 
    ```bash
-   # Local checkout while dual packaging lands on main:
+   # Local checkout (or after merge, the GitHub repo path):
    grok plugin marketplace add /absolute/path/to/music-analysis-kb
    grok plugin install music-kb --trust
    grok plugin enable music-kb

@@ -13,6 +13,31 @@ machines.
 publisher machine. Client agents (including Grok) use the read-only
 `music-kb` skill and MCP against `~/.music-kb/current.sqlite`.
 
+## Paths: plugin root
+
+Publisher CLI commands run from the **plugin package**, not the data workspace:
+
+| Variable | Meaning |
+| --- | --- |
+| `MUSIC_KB_PLUGIN` | Absolute path to `plugins/music-kb` (checkout or enabled install) |
+
+```bash
+export MUSIC_KB_PLUGIN="/absolute/path/to/music-analysis-kb/plugins/music-kb"
+# or the enabled install path from `grok plugin details music-kb`
+test -f "$MUSIC_KB_PLUGIN/pyproject.toml"
+```
+
+Invoke the CLI with:
+
+```bash
+uv run --project "$MUSIC_KB_PLUGIN" music-kb …
+# equivalent if PATH already has music-kb from that project:
+# music-kb …
+```
+
+Do not assume the shell cwd is the monorepo root or a folder named
+`music-analysis-kb`.
+
 ## Non-negotiable boundaries
 
 - The writable database is only `~/.music-kb/music-master.sqlite`.
@@ -50,10 +75,11 @@ elsewhere.
 
 ## Canonical workflow
 
-Run the CLI workflow from the installed plugin project:
+Run the CLI workflow from the plugin package:
 
 ```bash
-music-kb weekly-update \
+export MUSIC_KB_PLUGIN="/absolute/path/to/music-analysis-kb/plugins/music-kb"
+uv run --project "$MUSIC_KB_PLUGIN" music-kb weekly-update \
   --db "$HOME/.music-kb/music-master.sqlite" \
   --input /secure/path/canonical-delivery.jsonl \
   --input-kind campaign \
@@ -69,7 +95,7 @@ After the output has been reviewed, use the exact same inputs with
 `--publish`:
 
 ```bash
-music-kb weekly-update \
+uv run --project "$MUSIC_KB_PLUGIN" music-kb weekly-update \
   --db "$HOME/.music-kb/music-master.sqlite" \
   --input /secure/path/canonical-delivery.jsonl \
   --input-kind campaign \

@@ -57,17 +57,27 @@ Publisher skills default to **direct** executors. Script names such as
 `run_claude_download.py` are historical atom entry points and do not require
 Claude.
 
-### Plugin root vs workspace (required)
+### Plugin root vs workspace vs git repo (required)
 
-Publisher skills use **two** roots. Do not hardcode a checkout folder name.
+Publisher skills use **three** roots. Do not hardcode a checkout folder name
+or pick an install dir with `ls | head -1`.
+
+| Variable | Meaning |
+| --- | --- |
+| `MUSIC_WORKSPACE` | Data workspace (charts, inventory, audio, weekly receipts) |
+| `MUSIC_KB_PLUGIN` | Plugin package root (`scripts/`, `references/`, `pyproject.toml`) |
+| `MUSIC_KB_REPO` | Git monorepo root (CNB prepare/recover only; must contain `.git`) |
 
 ```bash
-# Data workspace (charts, inventory, audio, weekly receipts)
-export MUSIC_WORKSPACE="/Users/wycm/Documents/网易云热榜抓取"
+export MUSIC_WORKSPACE="/absolute/path/to/music-workspace"
 
-# Plugin package root (scripts/, references/, pyproject.toml)
-export MUSIC_KB_PLUGIN="$(ls -d "$HOME"/.grok/installed-plugins/music-kb-* | head -1)"
-# or: export MUSIC_KB_PLUGIN="/path/to/repo/plugins/music-kb"
+# Prefer monorepo checkout for publisher work:
+export MUSIC_KB_PLUGIN="/absolute/path/to/music-analysis-kb/plugins/music-kb"
+export MUSIC_KB_REPO="/absolute/path/to/music-analysis-kb"
+
+# Or set MUSIC_KB_PLUGIN to the enabled install path from:
+#   grok plugin details music-kb
+# Install copies are fine for CLI/MCP/most scripts, but not as MUSIC_KB_REPO.
 
 python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_download.py" \
   --workspace "$MUSIC_WORKSPACE" \
@@ -103,5 +113,16 @@ path has a working environment) before relying on MCP tools.
 ## Version
 
 Plugin version **0.8.6** introduces dual Grok/Codex packaging. Runtime
-behavior of CLI/MCP remains the same as 0.8.5 unless otherwise noted in the
-changelog.
+behavior of CLI/MCP remains the same as 0.8.5 unless otherwise noted.
+
+Keep these in sync on every release:
+
+- `plugins/music-kb/.grok-plugin/plugin.json`
+- `plugins/music-kb/.codex-plugin/plugin.json`
+- `plugins/music-kb/pyproject.toml`
+- `plugins/music-kb/uv.lock` (`name = "music-kb"` package entry)
+- `.grok-plugin/marketplace.json` / `plugin-index.json` version fields
+- `.agents/plugins/marketplace.json` version field
+
+`music_kb.distribution` currently reads the version from `.codex-plugin/plugin.json`
+first; keep both manifests identical.

@@ -13,24 +13,37 @@ Default download/fallback executors are `direct`. Historical atom names
 (`claude_download`, `run_claude_*.py`) remain for receipt compatibility; they
 do not mean Claude must run the workers.
 
-## Paths: plugin root vs workspace
+## Paths: plugin root vs workspace vs git repo
 
 | Variable | Meaning |
 | --- | --- |
 | `MUSIC_WORKSPACE` | Publisher data workspace (`data/`, `music_downloads/`, weekly receipts) |
-| `MUSIC_KB_PLUGIN` | Absolute path to the plugin package root (contains `scripts/`, `references/`, `pyproject.toml`) |
+| `MUSIC_KB_PLUGIN` | Absolute path to the plugin package root (`scripts/`, `references/`, `pyproject.toml`) |
+| `MUSIC_KB_REPO` | Absolute path to the **git repository root** that contains this plugin (needed for CNB recover/export) |
 
 Resolve once:
 
 ```bash
-export MUSIC_KB_PLUGIN="$(ls -d "$HOME"/.grok/installed-plugins/music-kb-* 2>/dev/null | head -1)"
-# or: export MUSIC_KB_PLUGIN="/absolute/path/to/…/plugins/music-kb"
 export MUSIC_WORKSPACE="/absolute/path/to/music-workspace"
+# Prefer a monorepo checkout for publisher work (git + scripts + references):
+export MUSIC_KB_PLUGIN="/absolute/path/to/music-analysis-kb/plugins/music-kb"
+export MUSIC_KB_REPO="/absolute/path/to/music-analysis-kb"
 test -f "$MUSIC_KB_PLUGIN/references/validated-operations.json"
+test -d "$MUSIC_KB_REPO/.git"
 ```
 
-Prefer `uv run --project "$MUSIC_KB_PLUGIN" music-kb …` so the CLI comes from
-the plugin package, not a guessed relative checkout name.
+Notes:
+
+- A Grok **installed-plugin** copy under `~/.grok/installed-plugins/music-kb-*`
+  is fine for CLI/MCP and most script atoms, but it is **not** a git checkout.
+  Do **not** derive `MUSIC_KB_REPO` as `$MUSIC_KB_PLUGIN/../..` from an install
+  tree; set `MUSIC_KB_REPO` to the real monorepo root, or run CNB
+  prepare/recover only from a checkout-based `MUSIC_KB_PLUGIN`.
+- If multiple install dirs exist, do not use `ls | head -1`. Point
+  `MUSIC_KB_PLUGIN` at the enabled install path from `grok plugin details music-kb`,
+  or at the monorepo `plugins/music-kb` path.
+- Prefer `uv run --project "$MUSIC_KB_PLUGIN" music-kb …` so the CLI comes from
+  the plugin package, not a guessed relative checkout name.
 
 ## Non-negotiable run contract
 
@@ -300,8 +313,10 @@ Dev GPU recovery atom is selected, keep the source receipt untouched.
 data workspace):
 
 ```bash
-export MUSIC_KB_PLUGIN=/absolute/path/to/plugins/music-kb
-export MUSIC_KB_REPO="$(cd "$MUSIC_KB_PLUGIN/../.." && pwd)"   # repo root
+export MUSIC_KB_PLUGIN=/absolute/path/to/music-analysis-kb/plugins/music-kb
+export MUSIC_KB_REPO=/absolute/path/to/music-analysis-kb   # must be a real git root
+# Only if MUSIC_KB_PLUGIN is inside that monorepo (not an install copy):
+# export MUSIC_KB_REPO="$(cd "$MUSIC_KB_PLUGIN/../.." && pwd)"
 uv run --project "$MUSIC_KB_PLUGIN" python \
   "$MUSIC_KB_PLUGIN/scripts/cnb_campaign_repository.py" recover-devgpu \
   --policy "$MUSIC_KB_PLUGIN/references/cnb-storage-policy.json" \
