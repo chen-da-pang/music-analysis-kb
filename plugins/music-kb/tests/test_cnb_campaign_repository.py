@@ -257,6 +257,39 @@ def write_devgpu_history_review(
     return review_path
 
 
+def devgpu_pending_preflight(*, pending_counts: list[int]) -> dict:
+    """Return a minimal receipt-shaped local pending plan for recovery tests."""
+
+    total = sum(pending_counts)
+    return {
+        "schema_version": 1,
+        "status": "completed",
+        "checkout": "/receipt-bound/checkout",
+        "campaign_commit": "c" * 40,
+        "source_config": "/receipt-bound/checkout/.cnb.yml",
+        "source_config_sha256": "a" * 64,
+        "planner": "/receipt-bound/checkout/scripts/prepare_kugou_campaign_shard.py",
+        "ledger_branch": "campaign-results/run-1",
+        "ledger": "/receipt-bound/ledger/campaign_ledger.jsonl",
+        "ledger_sha256": "b" * 64,
+        "execution_profile": "nvidia-l40/full_precision/bfloat16",
+        "contract": "d" * 64,
+        "global_pending_item_count": total,
+        "global_pending_item_ids": [f"song-{index}" for index in range(1, total + 1)],
+        "shards": [
+            {
+                "index": index,
+                "id": f"run-1-s{index}",
+                "pending_item_count": count,
+                "pending_item_ids": [f"song-{item}" for item in range(1, count + 1)],
+                "static_shard_pending_item_count": count,
+                "source_range": {"start_index": index, "end_index": index},
+            }
+            for index, count in enumerate(pending_counts, start=1)
+        ],
+    }
+
+
 def completed_receipt(tmp_path: Path, *, count: int = 2) -> dict:
     receipt = receipt_identity(tmp_path, count=count)
     receipt["status"] = "completed"
@@ -933,11 +966,89 @@ def test_devgpu_recovery_config_runs_all_shards_with_clean_gpu_gates() -> None:
     assert "campaign_runner_exit_code.txt" in stage
     assert "campaign batch status is not success" in stage
     assert "campaign report does not prove full zero-error shard coverage" in stage
+    assert 'if [ "$pending_count" -eq 0 ]; then' in stage
+    assert '"campaign_status": "already_complete_for_selected_shard"' in stage
+    assert '"reason": "static_shard_has_no_pending_items"' in stage
+    empty_shard_start = stage.index('if [ "$pending_count" -eq 0 ]; then')
+    pre_model_gate = stage.index('--phase "pre_model_s${shard_index}"')
+    runner_start = stage.index("bash scripts/devgpu_run_batch.sh")
+    assert empty_shard_start < pre_model_gate < runner_start
+    assert '          else\n            python scripts/check_manual_gpu_gate.py' in stage
     assert "build_kugou_canonical_delivery.py --source-manifest" in stage
     assert "canonical_delivery.jsonl" in stage
     release_wait = stage.index('wait_for_clean_gpu "post_shard_s${shard_index}_release"')
     shard_loop_end = stage.index("        done\n        ledger_verify_dir=", release_wait)
     assert stage.index("campaign report does not prove full zero-error shard coverage") < release_wait < shard_loop_end
+
+
+def test_devgpu_recovery_config_skips_zero_pending_shard_without_running_model(tmp_path: Path) -> None:
+    value = policy()
+    value["campaign_repository"]["shard_count"] = 1
+    config = MODULE.generate_campaign_devgpu_config(
+        value,
+        campaign_id="run-1",
+        repository_slug="org/music-flamingo-campaign-run-1",
+        item_count=1,
+        source_manifest_sha256="b" * 64,
+    )
+    marker = "    - name: Run receipt-bound Dev GPU full resume\n      timeout: 4h\n      script: |\n"
+    stage = config.split(marker, 1)[1].split("\n    lock:\n", 1)[0]
+    shell_script = "\n".join(
+        line.removeprefix("        ") for line in stage.splitlines()
+    ).replace("sleep 60", ":").replace(
+        "/workspace/cache/output/music_flamingo_pipeline", str(tmp_path / "output")
+    )
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+
+    def executable(name: str, content: str) -> None:
+        path = scripts / name
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+
+    executable("check_manual_gpu_gate.py", "#!/usr/bin/env python3\n")
+    executable(
+        "music_flamingo_run_context.py",
+        "#!/usr/bin/env python3\nimport os\nprint(os.path.join(os.getcwd(), 'runs', os.environ['MUSIC_FLAMINGO_RUN_ID']))\n",
+    )
+    executable(
+        "campaign_ledger_git.sh",
+        "#!/usr/bin/env bash\nset -eu\nmkdir -p \"$(dirname \"$2\")\"\nprintf '{}\\n' > \"$2\"\n",
+    )
+    executable(
+        "prepare_kugou_campaign_shard.sh",
+        "#!/usr/bin/env bash\nset -eu\nrun_dir=\"$PWD/runs/${MUSIC_FLAMINGO_RUN_ID}\"\nmkdir -p \"$run_dir\"\nprintf '{\"pending_item_count\": 0}\\n' > \"$run_dir/campaign_shard_plan.json\"\n",
+    )
+    executable("devgpu_run_batch.sh", "#!/usr/bin/env bash\nexit 99\n")
+    executable(
+        "build_kugou_canonical_delivery.py",
+        "#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\nfor flag in ('--output-manifest', '--output-state'):\n    path = Path(sys.argv[sys.argv.index(flag) + 1])\n    path.parent.mkdir(parents=True, exist_ok=True)\n    path.write_text('{}\\n', encoding='utf-8')\n",
+    )
+    environment = os.environ | {
+        "CNB_BUILD_ID": "fake-build",
+        "MUSIC_FLAMINGO_CAMPAIGN_ID": "run-1",
+        "MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT": "data/input/run-1",
+        "MUSIC_FLAMINGO_CAMPAIGN_SOURCE_MANIFEST": "data/input/run-1/manifest.jsonl",
+        "MUSIC_FLAMINGO_CAMPAIGN_EXPECTED_COUNT": "1",
+    }
+    result = subprocess.run(
+        ["bash", "-euc", shell_script],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    run_dir = tmp_path / "runs" / "fake-build-s1"
+    assert (run_dir / "campaign_runner_exit_code.txt").read_text(encoding="utf-8").strip() == "0"
+    for name in ("batch_report.json", "campaign_report.json"):
+        report = json.loads((run_dir / name).read_text(encoding="utf-8"))
+        assert report["status"] == "success"
+        assert report["campaign"]["campaign_status"] == "already_complete_for_selected_shard"
+        assert report["campaign"]["selected_item_count"] == 0
+        assert report["campaign"]["new_success_count"] == 0
+        assert report["campaign"]["error_item_count"] == 0
 
 
 def test_devgpu_recovery_h20_profile_is_rendered_consistently() -> None:
@@ -1039,6 +1150,107 @@ def test_devgpu_recovery_stage_script_is_valid_posix_sh(tmp_path: Path) -> None:
     assert script.startswith("set -eu\n")
     completed = subprocess.run(["sh", "-n", str(script_path)], text=True, capture_output=True, check=False)
     assert completed.returncode == 0, completed.stderr
+
+
+def test_devgpu_pending_preflight_uses_receipt_bound_planner_for_every_static_shard(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkout = tmp_path / "receipt-bound-checkout"
+    planner = checkout / "scripts" / "prepare_kugou_campaign_shard.py"
+    planner.parent.mkdir(parents=True)
+    planner.write_text("# planner fixture\n", encoding="utf-8")
+    config = checkout / ".cnb.yml"
+    config.write_text("# receipt-bound config\n", encoding="utf-8")
+    source_manifest = checkout / "data" / "input" / "run-1" / "manifest.jsonl"
+    source_manifest.parent.mkdir(parents=True)
+    source_manifest.write_text("{}\n{}\n", encoding="utf-8")
+    inputs = {
+        "checkout": checkout,
+        "campaign_id": "run-1",
+        "campaign_commit": "c" * 40,
+        "source_manifest": source_manifest,
+        "input_root": source_manifest.parent,
+        "expected_count": 2,
+        "source_manifest_sha256": "a" * 64,
+        "planner": planner,
+        "config_path": config,
+        "runtime_image": RUNTIME,
+        "prompt": "receipt-bound prompt",
+        "max_new_tokens": "2048",
+        "audio_clip_seconds": "240",
+        "model_id": "nvidia/music-flamingo-think-2601-hf",
+        "model_revision": "1ea2109",
+        "model_dir": "/opt/models/music-flamingo-think-2601-hf",
+        "execution_profile": "nvidia-l40/full_precision/bfloat16",
+    }
+    planner_commands: list[list[str]] = []
+
+    def fake_clone(_repository: str, _branch: str, destination: Path) -> None:
+        destination.mkdir(parents=True)
+        (destination / "campaign_ledger.jsonl").write_text("", encoding="utf-8")
+
+    def fake_run(command, *, cwd=None, timeout=None, env=None):
+        del timeout, env
+        planner_commands.append(list(command))
+        assert cwd == checkout
+        assert command[1] == str(planner)
+        shard_index = int(command[command.index("--shard-index") + 1])
+        assert command[command.index("--execution-profile") + 1] == inputs["execution_profile"]
+        plan = {
+            "campaign_id": "run-1",
+            "shard_index": shard_index,
+            "shard_count": 2,
+            "source_manifest_sha256": "a" * 64,
+            "pending_item_count": 0,
+            "pending_item_ids": [],
+            "global_pending_item_count": 0,
+            "global_pending_item_ids": [],
+            "contract": "d" * 64,
+            "static_shard_pending_item_count": 0,
+            "source_range": {"start_index": shard_index, "end_index": shard_index},
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(plan), "")
+
+    monkeypatch.setattr(MODULE, "_receipt_bound_devgpu_preflight_inputs", lambda *_args, **_kwargs: inputs)
+    monkeypatch.setattr(MODULE, "_authenticated_clone", fake_clone)
+    monkeypatch.setattr(MODULE, "_ledger_clone_is_bound", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(MODULE, "_run", fake_run)
+    result = MODULE._plan_devgpu_pending_preflight(
+        {"repository": "org/music-flamingo-campaign-run-1"},
+        recovery_dir=tmp_path / "recovery",
+        ledger_branch="campaign-results/run-1",
+        execution_profile=inputs["execution_profile"],
+        shard_count=2,
+    )
+    assert result["global_pending_item_count"] == 0
+    assert result["ledger_branch"] == "campaign-results/run-1"
+    assert [item["index"] for item in result["shards"]] == [1, 2]
+    assert len(planner_commands) == 2
+    assert not any(command and command[0] == "cnb" for command in planner_commands)
+
+
+def test_authenticated_ledger_clone_skips_lfs_smudge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(
+        MODULE,
+        "_git_push_environment",
+        lambda: ({"GIT_LFS_SKIP_SMUDGE": "0", "AUTH": "fixture"}, None),
+    )
+
+    def fake_clone(command, *, cwd, env):
+        captured["command"] = list(command)
+        captured["cwd"] = cwd
+        captured["env"] = dict(env)
+
+    monkeypatch.setattr(MODULE, "_run_git_authenticated", fake_clone)
+    destination = tmp_path / "ledger"
+    MODULE._authenticated_clone("org/music-flamingo-campaign-run-1", "campaign-results/run-1", destination)
+    assert captured["command"][:5] == ["git", "clone", "--quiet", "--depth", "1"]
+    assert captured["cwd"] == destination.parent
+    assert captured["env"]["GIT_LFS_SKIP_SMUDGE"] == "1"
+    assert captured["env"]["AUTH"] == "fixture"
 
 
 def test_git_push_environment_uses_preemptive_basic_header_without_askpass(
@@ -1292,6 +1504,82 @@ def test_devgpu_recovery_dry_run_creates_no_overlay_or_workspace(
     assert not any("start-workspace" in " ".join(command) for command in commands)
 
 
+def test_devgpu_recovery_global_zero_pending_skips_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    value = policy()
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(value), encoding="utf-8")
+    source = receipt_identity(tmp_path, count=2)
+    source.update({"status": "failed", "campaign_commit": "c" * 40})
+    source_path = tmp_path / "source-receipt.json"
+    source_path.write_text(json.dumps(source, sort_keys=True), encoding="utf-8")
+    source_sha = MODULE.sha256_file(source_path)
+    history_review = write_devgpu_history_review(source_path)
+    recovery_path = tmp_path / "recovery" / "receipt.json"
+    _, commands, runner = cnb_runner_factory(target_present=True)
+    monkeypatch.setattr(
+        MODULE,
+        "_verify_build_gpu_platform_gate",
+        lambda *_args, **_kwargs: {"classification": "cnb_build_gpu_pre_freezing_quota", "builds": []},
+    )
+    monkeypatch.setattr(MODULE, "_validate_commit", lambda _root, commit: commit)
+    monkeypatch.setattr(
+        MODULE,
+        "_plan_devgpu_pending_preflight",
+        lambda *_args, **_kwargs: devgpu_pending_preflight(pending_counts=[0, 0]),
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_prepare_devgpu_runner_refresh",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("zero pending must not refresh the workspace runner")),
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_prepare_devgpu_overlay",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("zero pending must not prepare an overlay")),
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_recover_delivery",
+        lambda *_args, **_kwargs: {
+            "path": str(tmp_path / "canonical.jsonl"),
+            "count": 2,
+            "sha256": "f" * 64,
+            "ledger_branch": "campaign-results/run-1",
+        },
+    )
+    result = MODULE.recover_campaign_with_devgpu(
+        policy_path=policy_path,
+        operations_path=OPERATIONS,
+        source_receipt_path=source_path,
+        recovery_receipt_path=recovery_path,
+        run_dir=tmp_path,
+        history_review_path=history_review,
+        execute=True,
+        wait=True,
+        poll_seconds=0,
+        timeout_seconds=2,
+        runner=runner,
+        transport="git-objects",
+        repository_root=tmp_path,
+        github_commit="a" * 40,
+    )
+    assert result["status"] == "completed"
+    assert result["workspace"] == {
+        "status": "not_started",
+        "reason": "zero_pending_items_confirmed_locally",
+    }
+    assert result["pending_preflight"]["global_pending_item_count"] == 0
+    assert [item["status"] for item in result["logical_shards"]] == [
+        "already_complete_for_selected_shard",
+        "already_complete_for_selected_shard",
+    ]
+    assert MODULE.sha256_file(source_path) == source_sha
+    assert not any("start-workspace" in " ".join(command) for command in commands)
+    assert not any("workspace-stop" in " ".join(command) for command in commands)
+
+
 def test_devgpu_recovery_stops_workspace_after_stage_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1333,6 +1621,11 @@ def test_devgpu_recovery_stops_workspace_after_stage_failure(
         MODULE,
         "_prepare_devgpu_runner_refresh",
         lambda **_kwargs: (tmp_path / "runtime-export", {"github_commit": "a" * 40, "files": []}),
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_plan_devgpu_pending_preflight",
+        lambda *_args, **_kwargs: devgpu_pending_preflight(pending_counts=[1, 1]),
     )
     with pytest.raises(MODULE.CampaignRepositoryError, match="terminal status failed"):
         MODULE.recover_campaign_with_devgpu(
@@ -1587,6 +1880,11 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
         MODULE,
         "_prepare_devgpu_runner_refresh",
         lambda **_kwargs: (tmp_path / "runtime-export", {"github_commit": "a" * 40, "files": []}),
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_plan_devgpu_pending_preflight",
+        lambda *_args, **_kwargs: devgpu_pending_preflight(pending_counts=[1, 1]),
     )
     recover_calls: list[dict] = []
 
