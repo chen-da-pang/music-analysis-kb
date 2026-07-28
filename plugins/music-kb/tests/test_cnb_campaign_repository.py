@@ -1768,18 +1768,16 @@ def test_devgpu_recovery_records_capacity_failure_before_workspace_start(
     monkeypatch.setattr(
         MODULE,
         "_prepare_devgpu_runner_refresh",
-        lambda **_kwargs: (tmp_path / "runtime-export", {"github_commit": "a" * 40, "files": []}),
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("capacity failure must not refresh the Dev GPU runner")
+        ),
     )
     monkeypatch.setattr(
         MODULE,
         "_prepare_devgpu_overlay",
-        lambda **_kwargs: {
-            "branch": "codex/devgpu-recovery-run-1",
-            "commit": "d" * 40,
-            "parent_campaign_commit": "c" * 40,
-            "config_sha256": "e" * 64,
-            "path": str(tmp_path / "overlay"),
-        },
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("capacity failure must not create a Dev GPU overlay")
+        ),
     )
 
     with pytest.raises(MODULE.CampaignRepositoryError, match="capacity preflight failed"):

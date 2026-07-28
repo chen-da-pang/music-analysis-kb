@@ -2958,6 +2958,18 @@ def recover_campaign_with_devgpu(
             receipt["updated_at"] = now_iso()
             _atomic_write_json(recovery_file, receipt)
             return {**receipt, "receipt": str(recovery_file)}
+        capacity_preflight = devgpu_capacity_preflight(
+            policy,
+            pending_item_count=int(pending_preflight["global_pending_item_count"]),
+            runner=runner,
+        )
+        receipt["devgpu_capacity_preflight"] = capacity_preflight
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(recovery_file, receipt)
+        if not capacity_preflight["clean"]:
+            raise CampaignRepositoryError(
+                "Dev GPU capacity preflight failed: " + "; ".join(capacity_preflight["errors"])
+            )
         runtime_export_dir, runner_refresh = _prepare_devgpu_runner_refresh(
             repository_root=root,
             github_commit=refresh_commit,
@@ -2973,18 +2985,6 @@ def recover_campaign_with_devgpu(
             devgpu_profile=selected_profile["name"],
         )
         receipt["overlay"] = overlay
-        capacity_preflight = devgpu_capacity_preflight(
-            policy,
-            pending_item_count=int(pending_preflight["global_pending_item_count"]),
-            runner=runner,
-        )
-        receipt["devgpu_capacity_preflight"] = capacity_preflight
-        receipt["updated_at"] = now_iso()
-        _atomic_write_json(recovery_file, receipt)
-        if not capacity_preflight["clean"]:
-            raise CampaignRepositoryError(
-                "Dev GPU capacity preflight failed: " + "; ".join(capacity_preflight["errors"])
-            )
         receipt["status"] = "starting_workspace"
         receipt["updated_at"] = now_iso()
         _atomic_write_json(recovery_file, receipt)
