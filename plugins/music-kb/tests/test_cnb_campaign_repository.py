@@ -523,6 +523,80 @@ def test_preflight_blocks_existing_campaign_repository_and_target() -> None:
         )
 
 
+def test_preflight_allows_only_one_explicit_receipt_bound_retained_campaign(tmp_path: Path) -> None:
+    value = policy()
+    retained = receipt_identity(tmp_path)
+    retained["status"] = "failed"
+    retained_repository = str(retained["repository"])
+    _, commands, runner = cnb_runner_factory(existing=[retained_repository])
+
+    result = MODULE.campaign_preflight(
+        value,
+        runner=runner,
+        estimated_bytes=10,
+        retained_campaign_receipt=retained,
+    )
+
+    assert result["clean"] is True
+    assert result["checks"]["retained_campaign_receipt_bound"] is True
+    assert result["checks"]["retained_campaign_repository_present"] is True
+    assert result["checks"]["retained_campaign_workspace_stopped"] is True
+    assert result["other_campaign_repositories"] == []
+    assert any("workspace list-workspaces" in " ".join(command) for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("status", "completed", "status is not failed or interrupted"),
+        ("repository_pushed", False, "does not prove repository push"),
+        ("delivery", {"path": "/completed.jsonl"}, "already has a canonical delivery"),
+        ("repository_name", "music-flamingo-campaign-other", "repository_name does not match"),
+    ],
+)
+def test_preflight_rejects_unbound_or_completed_retained_receipt(
+    tmp_path: Path, field: str, value: object, expected: str
+) -> None:
+    retained = receipt_identity(tmp_path)
+    retained["status"] = "failed"
+    retained[field] = value
+    _, _, runner = cnb_runner_factory(existing=[str(retained["repository"])])
+
+    result = MODULE.campaign_preflight(
+        policy(), runner=runner, retained_campaign_receipt=retained
+    )
+
+    assert result["clean"] is False
+    assert any(expected in error for error in result["retained_campaign_receipt_errors"])
+
+
+def test_preflight_rejects_extra_campaign_or_running_retained_workspace(tmp_path: Path) -> None:
+    retained = receipt_identity(tmp_path)
+    retained["status"] = "interrupted"
+    retained_repository = str(retained["repository"])
+    _, _, runner = cnb_runner_factory(
+        existing=[retained_repository, "org/music-flamingo-campaign-unbound"]
+    )
+    extra = MODULE.campaign_preflight(
+        policy(), runner=runner, retained_campaign_receipt=retained
+    )
+    assert extra["clean"] is False
+    assert extra["other_campaign_repositories"] == ["org/music-flamingo-campaign-unbound"]
+
+    _, _, base_runner = cnb_runner_factory(existing=[retained_repository])
+
+    def running_workspace_runner(command):
+        if "list-workspaces" in " ".join(command):
+            return {"status": 200, "data": {"list": [{"sn": "workspace-active"}]}}
+        return base_runner(command)
+
+    active = MODULE.campaign_preflight(
+        policy(), runner=running_workspace_runner, retained_campaign_receipt=retained
+    )
+    assert active["clean"] is False
+    assert active["checks"]["retained_campaign_workspace_stopped"] is False
+
+
 def test_git_objects_preflight_does_not_require_object_headroom() -> None:
     value = policy()
     state, _, runner = cnb_runner_factory()

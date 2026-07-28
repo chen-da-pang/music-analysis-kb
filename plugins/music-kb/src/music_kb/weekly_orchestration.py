@@ -494,6 +494,7 @@ def run_weekly_run(
     cnb_campaign_timeout_seconds: int | None = None,
     cnb_github_commit: str | None = None,
     cnb_campaign_work_dir: str | Path | None = None,
+    retained_campaign_receipt: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run all safe publisher stages and stop at the first failed atom."""
 
@@ -520,6 +521,11 @@ def run_weekly_run(
     chart_db_path = _resolve_workspace_path(chart_database, root) if chart_database else None
     campaign_repository_root = _resolve_campaign_repository_root(root, cnb_github_commit)
     cnb_storage_policy_path = Path(cnb_storage_policy).expanduser().resolve()
+    retained_campaign_receipt_path = (
+        _resolve_workspace_path(retained_campaign_receipt, root)
+        if retained_campaign_receipt is not None
+        else None
+    )
     if cnb_transport not in {"lfs", "git-objects"}:
         raise ValueError("cnb_transport must be lfs or git-objects")
     if cnb_campaign_poll_seconds <= 0:
@@ -674,7 +680,15 @@ def run_weekly_run(
         with atom(
             context,
             "cnb_storage_preflight",
-            inputs={"policy": str(cnb_storage_policy_path), "transport": cnb_transport},
+            inputs={
+                "policy": str(cnb_storage_policy_path),
+                "transport": cnb_transport,
+                "retained_campaign_receipt": (
+                    str(retained_campaign_receipt_path)
+                    if retained_campaign_receipt_path
+                    else None
+                ),
+            },
         ) as outputs:
             if delivery_supplied:
                 if delivery_path is None or not delivery_path.is_file():
@@ -748,6 +762,10 @@ def run_weekly_run(
                     "--transport",
                     cnb_transport,
                 ]
+                if retained_campaign_receipt_path is not None:
+                    command.extend(
+                        ["--retained-campaign-receipt", str(retained_campaign_receipt_path)]
+                    )
                 payload, completed = _json_command_allow_failure(
                     command, cwd=root, timeout_seconds=min(timeout_seconds, 300)
                 )
@@ -995,6 +1013,11 @@ def run_weekly_run(
                 "receipt": str(campaign_receipt_path),
                 "repository_root": str(campaign_repository_root),
                 "dry_run": cnb_campaign_dry_run or download_dry_run,
+                "retained_campaign_receipt": (
+                    str(retained_campaign_receipt_path)
+                    if retained_campaign_receipt_path
+                    else None
+                ),
             },
         ) as outputs:
             if delivery_supplied:
@@ -1040,6 +1063,10 @@ def run_weekly_run(
                     "--transport",
                     cnb_transport,
                 ]
+                if retained_campaign_receipt_path is not None:
+                    command.extend(
+                        ["--retained-campaign-receipt", str(retained_campaign_receipt_path)]
+                    )
                 if cnb_campaign_work_dir is not None:
                     command.extend(["--work-dir", str(_resolve_workspace_path(cnb_campaign_work_dir, root))])
                 if not cnb_campaign_dry_run:
