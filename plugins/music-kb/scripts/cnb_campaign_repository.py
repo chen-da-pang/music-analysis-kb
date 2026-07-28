@@ -1052,7 +1052,6 @@ def generate_campaign_devgpu_config(
         "          mkdir -p \"$run_dir\"",
         "          bash scripts/campaign_ledger_git.sh restore \"$run_dir/campaign_ledger.jsonl\"",
         "          bash scripts/prepare_kugou_campaign_shard.sh",
-        f"          python scripts/check_manual_gpu_gate.py --phase \"pre_model_s${{shard_index}}\" --expected-gpu {profile['expected_gpu']} --minimum-free-mib {profile['minimum_free_mib']} --max-utilization-percent 0 --receipt \"$gate_root/gpu-pre-model-s${{shard_index}}.json\"",
         "          pending_count=\"$(python - \"$run_dir/campaign_shard_plan.json\" <<'PYTHON'",
         "        import json",
         "        import sys",
@@ -1061,13 +1060,42 @@ def generate_campaign_devgpu_config(
         "          )\"",
         "          export MUSIC_FLAMINGO_INPUT_MANIFEST=\"$run_dir/campaign_shard_manifest.jsonl\"",
         "          export MUSIC_FLAMINGO_INPUT_AUDIO_ROOT=\"$PWD/${MUSIC_FLAMINGO_CAMPAIGN_INPUT_ROOT}\"",
-        "          export MUSIC_FLAMINGO_EXPECTED_ITEM_COUNT=\"$pending_count\"",
-        "          set +e",
-        "          bash scripts/devgpu_run_batch.sh",
-        "          runner_rc=$?",
-        "          set -e",
-        "          printf '%s\\n' \"$runner_rc\" > \"$run_dir/campaign_runner_exit_code.txt\"",
-        "          test \"$runner_rc\" -eq 0",
+        "          if [ \"$pending_count\" -eq 0 ]; then",
+        "            python - \"$run_dir\" <<'PYTHON'",
+        "        import json",
+        "        import sys",
+        "        from pathlib import Path",
+        "        run_dir = Path(sys.argv[1])",
+        "        report = {",
+        "            \"schema_version\": 1,",
+        "            \"status\": \"success\",",
+        "            \"campaign_status\": \"already_complete_for_selected_shard\",",
+        "            \"reason\": \"static_shard_has_no_pending_items\",",
+        "            \"items\": [],",
+        "            \"campaign\": {",
+        "                \"campaign_status\": \"already_complete_for_selected_shard\",",
+        "                \"selected_item_count\": 0,",
+        "                \"new_success_count\": 0,",
+        "                \"reused_success_count\": 0,",
+        "                \"error_item_count\": 0,",
+        "                \"deferred_item_count\": 0,",
+        "            },",
+        "        }",
+        "        payload = json.dumps(report, ensure_ascii=False, sort_keys=True) + \"\\n\"",
+        "        (run_dir / \"batch_report.json\").write_text(payload, encoding=\"utf-8\")",
+        "        (run_dir / \"campaign_report.json\").write_text(payload, encoding=\"utf-8\")",
+        "        PYTHON",
+        "            printf '%s\\n' 0 > \"$run_dir/campaign_runner_exit_code.txt\"",
+        "          else",
+        f"            python scripts/check_manual_gpu_gate.py --phase \"pre_model_s${{shard_index}}\" --expected-gpu {profile['expected_gpu']} --minimum-free-mib {profile['minimum_free_mib']} --max-utilization-percent 0 --receipt \"$gate_root/gpu-pre-model-s${{shard_index}}.json\"",
+        "            export MUSIC_FLAMINGO_EXPECTED_ITEM_COUNT=\"$pending_count\"",
+        "            set +e",
+        "            bash scripts/devgpu_run_batch.sh",
+        "            runner_rc=$?",
+        "            set -e",
+        "            printf '%s\\n' \"$runner_rc\" > \"$run_dir/campaign_runner_exit_code.txt\"",
+        "            test \"$runner_rc\" -eq 0",
+        "          fi",
         "          test -s \"$run_dir/batch_report.json\"",
         "          if [ ! -s \"$run_dir/campaign_report.json\" ]; then cp \"$run_dir/batch_report.json\" \"$run_dir/campaign_report.json\"; fi",
         "          test -s \"$run_dir/campaign_ledger.jsonl\"",
@@ -1720,6 +1748,12 @@ def _build_status(repository: str, sn: str, runner: JsonRunner) -> str:
 
 def _authenticated_clone(repository: str, branch: str, destination: Path) -> None:
     env, askpass = _git_push_environment()
+    # This helper only clones durable-ledger branches.  A campaign repository
+    # can still contain LFS audio pointers on that ref, but ledger planning and
+    # canonical-delivery recovery need only ordinary Git files.  Never let a
+    # local receipt check hydrate campaign audio as a side effect.
+    env = dict(env)
+    env["GIT_LFS_SKIP_SMUDGE"] = "1"
     try:
         _run_git_authenticated(
             ["git", "clone", "--quiet", "--depth", "1", "--branch", branch, f"https://cnb.cool/{repository}.git", str(destination)],
@@ -1729,6 +1763,267 @@ def _authenticated_clone(repository: str, branch: str, destination: Path) -> Non
     finally:
         if askpass is not None:
             askpass.unlink(missing_ok=True)
+
+
+def _campaign_config_env_value(config_path: Path, key: str) -> str:
+    """Read one JSON/YAML scalar from the receipt-bound campaign config."""
+
+    try:
+        config = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CampaignRepositoryError(f"receipt-bound campaign config is unreadable: {config_path}: {exc}") from exc
+    matches = re.findall(rf"^\s+{re.escape(key)}:\s*(.+?)\s*$", config, flags=re.MULTILINE)
+    if len(matches) != 1:
+        raise CampaignRepositoryError(
+            f"receipt-bound campaign config has {len(matches)} values for required env {key}"
+        )
+    raw = matches[0].strip()
+    if raw.startswith('"'):
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise CampaignRepositoryError(
+                f"receipt-bound campaign config has invalid JSON scalar for {key}"
+            ) from exc
+    elif len(raw) >= 2 and raw.startswith("'") and raw.endswith("'"):
+        value = raw[1:-1]
+    else:
+        value = raw
+    if not isinstance(value, str) or not value:
+        raise CampaignRepositoryError(f"receipt-bound campaign config has an invalid {key} value")
+    return value
+
+
+def _receipt_bound_devgpu_preflight_inputs(
+    source_receipt: Mapping[str, Any],
+    *,
+    execution_profile: str,
+) -> dict[str, Any]:
+    """Resolve the original runner and input required for a local pending plan."""
+
+    checkout = Path(str(source_receipt.get("checkout", ""))).expanduser().resolve()
+    campaign_id = str(source_receipt.get("run_id", ""))
+    campaign_commit = str(source_receipt.get("campaign_commit", ""))
+    if not checkout.is_dir():
+        raise CampaignRepositoryError(f"receipt-bound campaign checkout is missing: {checkout}")
+    if not re.fullmatch(r"[0-9a-f]{40}", campaign_commit):
+        raise CampaignRepositoryError("source receipt has no valid campaign_commit for local pending preflight")
+    actual_head = _run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).stdout.strip()
+    if actual_head != campaign_commit:
+        raise CampaignRepositoryError("receipt-bound checkout HEAD no longer matches campaign_commit for local pending preflight")
+
+    manifest = source_receipt.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise CampaignRepositoryError("source receipt has no manifest for local pending preflight")
+    expected_count = manifest.get("item_count")
+    expected_sha256 = str(manifest.get("sha256", "")).lower()
+    if isinstance(expected_count, bool) or not isinstance(expected_count, int) or expected_count <= 0:
+        raise CampaignRepositoryError("source receipt manifest has an invalid item_count for local pending preflight")
+    if not SHA256.fullmatch(expected_sha256):
+        raise CampaignRepositoryError("source receipt manifest has an invalid sha256 for local pending preflight")
+    if not SAFE_RUN_ID.fullmatch(campaign_id):
+        raise CampaignRepositoryError("source receipt has an unsafe run_id for local pending preflight")
+
+    source_manifest = checkout / "data" / "input" / campaign_id / "manifest.jsonl"
+    input_root = source_manifest.parent
+    if not source_manifest.is_file() or not input_root.is_dir():
+        raise CampaignRepositoryError("receipt-bound campaign input is missing for local pending preflight")
+    if sha256_file(source_manifest) != expected_sha256:
+        raise CampaignRepositoryError("receipt-bound campaign manifest no longer matches the source receipt")
+
+    planner = checkout / "scripts" / "prepare_kugou_campaign_shard.py"
+    required_scripts = (
+        planner,
+        checkout / "scripts" / "music_flamingo_campaign.py",
+        checkout / "scripts" / "run_music_flamingo_batch.py",
+        checkout / "scripts" / "run_one_music_flamingo_smoke.py",
+    )
+    missing = [str(path) for path in required_scripts if not path.is_file()]
+    if missing:
+        raise CampaignRepositoryError(
+            "receipt-bound runner is incomplete for local pending preflight: " + ", ".join(missing)
+        )
+
+    config_path = checkout / ".cnb.yml"
+    runtime_image = _campaign_config_env_value(config_path, "CNB_RUNTIME_IMAGE")
+    if runtime_image != str(source_receipt.get("runtime_image", "")):
+        raise CampaignRepositoryError("receipt-bound campaign config runtime image does not match the source receipt")
+    return {
+        "checkout": checkout,
+        "campaign_id": campaign_id,
+        "campaign_commit": campaign_commit,
+        "source_manifest": source_manifest,
+        "input_root": input_root,
+        "expected_count": expected_count,
+        "source_manifest_sha256": expected_sha256,
+        "planner": planner,
+        "config_path": config_path,
+        "runtime_image": runtime_image,
+        "prompt": _campaign_config_env_value(config_path, "MUSIC_FLAMINGO_PROMPT"),
+        "max_new_tokens": _campaign_config_env_value(config_path, "MUSIC_FLAMINGO_MAX_NEW_TOKENS"),
+        "audio_clip_seconds": _campaign_config_env_value(config_path, "MUSIC_FLAMINGO_AUDIO_CLIP_SECONDS"),
+        "model_id": _campaign_config_env_value(config_path, "MUSIC_FLAMINGO_MODEL"),
+        "model_revision": _campaign_config_env_value(config_path, "MUSIC_FLAMINGO_REVISION"),
+        "model_dir": _campaign_config_env_value(config_path, "MUSIC_FLAMINGO_MODEL_DIR"),
+        "execution_profile": execution_profile,
+    }
+
+
+def _plan_devgpu_pending_preflight(
+    source_receipt: Mapping[str, Any],
+    *,
+    recovery_dir: Path,
+    ledger_branch: str,
+    execution_profile: str,
+    shard_count: int,
+) -> dict[str, Any]:
+    """Plan every static shard locally before allocating a Dev GPU workspace.
+
+    The planner is the receipt-bound campaign copy of
+    ``prepare_kugou_campaign_shard.py``.  It reads only the ordinary-Git
+    manifest and durable ledger, so this guard neither hydrates audio nor
+    starts a CNB workspace.
+    """
+
+    inputs = _receipt_bound_devgpu_preflight_inputs(
+        source_receipt,
+        execution_profile=execution_profile,
+    )
+    if isinstance(shard_count, bool) or not isinstance(shard_count, int) or shard_count < 1:
+        raise CampaignRepositoryError("local pending preflight has an invalid configured static shard count")
+    if shard_count > int(inputs["expected_count"]):
+        raise CampaignRepositoryError("local pending preflight shard count exceeds the source manifest count")
+    preflight_root = recovery_dir / "pending-preflight"
+    if preflight_root.exists():
+        shutil.rmtree(preflight_root)
+    preflight_root.mkdir(parents=True, exist_ok=True)
+    ledger_dir = preflight_root / "ledger"
+    _authenticated_clone(str(source_receipt["repository"]), ledger_branch, ledger_dir)
+    if not _ledger_clone_is_bound(ledger_dir, str(source_receipt["repository"])):
+        raise CampaignRepositoryError("local pending preflight ledger clone is not bound to the campaign repository")
+    ledger = ledger_dir / "campaign_ledger.jsonl"
+    if not ledger.is_file():
+        raise CampaignRepositoryError(f"durable ledger branch has no campaign_ledger.jsonl: {ledger_branch}")
+
+    plans: list[dict[str, Any]] = []
+    expected_global_count: int | None = None
+    expected_global_ids: list[str] | None = None
+    expected_contract: str | None = None
+    for shard_index in range(1, shard_count + 1):
+        shard_dir = preflight_root / f"shard-{shard_index:02d}"
+        command = [
+            sys.executable,
+            str(inputs["planner"]),
+            "--source-manifest",
+            str(inputs["source_manifest"]),
+            "--input-root",
+            str(inputs["input_root"]),
+            "--repo-root",
+            str(inputs["checkout"]),
+            "--ledger",
+            str(ledger),
+            "--run-dir",
+            str(shard_dir),
+            "--expected-count",
+            str(inputs["expected_count"]),
+            "--campaign-id",
+            str(inputs["campaign_id"]),
+            "--shard-index",
+            str(shard_index),
+            "--shard-count",
+            str(shard_count),
+            "--runtime-image",
+            str(inputs["runtime_image"]),
+            "--prompt",
+            str(inputs["prompt"]),
+            "--max-new-tokens",
+            str(inputs["max_new_tokens"]),
+            "--audio-clip-seconds",
+            str(inputs["audio_clip_seconds"]),
+            "--model-id",
+            str(inputs["model_id"]),
+            "--model-revision",
+            str(inputs["model_revision"]),
+            "--model-dir",
+            str(inputs["model_dir"]),
+            "--execution-profile",
+            str(inputs["execution_profile"]),
+        ]
+        completed = _run(command, cwd=Path(inputs["checkout"]), timeout=300)
+        try:
+            plan = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise CampaignRepositoryError("receipt-bound local pending planner returned invalid JSON") from exc
+        if not isinstance(plan, dict):
+            raise CampaignRepositoryError("receipt-bound local pending planner did not return an object")
+        if plan.get("campaign_id") != inputs["campaign_id"] or plan.get("shard_index") != shard_index:
+            raise CampaignRepositoryError("receipt-bound local pending planner returned a mismatched shard plan")
+        if plan.get("shard_count") != shard_count:
+            raise CampaignRepositoryError("receipt-bound local pending planner returned a mismatched shard count")
+        if plan.get("source_manifest_sha256") != inputs["source_manifest_sha256"]:
+            raise CampaignRepositoryError("receipt-bound local pending planner returned a mismatched manifest hash")
+        pending_count = plan.get("pending_item_count")
+        global_count = plan.get("global_pending_item_count")
+        pending_ids = plan.get("pending_item_ids")
+        global_ids = plan.get("global_pending_item_ids")
+        contract = plan.get("contract")
+        if (
+            isinstance(pending_count, bool)
+            or not isinstance(pending_count, int)
+            or pending_count < 0
+            or isinstance(global_count, bool)
+            or not isinstance(global_count, int)
+            or global_count < 0
+            or not isinstance(pending_ids, list)
+            or not all(isinstance(item, str) and item for item in pending_ids)
+            or len(pending_ids) != pending_count
+            or not isinstance(global_ids, list)
+            or not all(isinstance(item, str) and item for item in global_ids)
+            or len(global_ids) != global_count
+            or not isinstance(contract, str)
+            or not contract
+        ):
+            raise CampaignRepositoryError("receipt-bound local pending planner returned an invalid plan")
+        if expected_global_count is None:
+            expected_global_count = global_count
+            expected_global_ids = list(global_ids)
+            expected_contract = contract
+        elif (
+            global_count != expected_global_count
+            or global_ids != expected_global_ids
+            or contract != expected_contract
+        ):
+            raise CampaignRepositoryError("receipt-bound local pending planner disagrees across static shards")
+        plans.append(
+            {
+                "index": shard_index,
+                "id": f"{inputs['campaign_id']}-s{shard_index}",
+                "pending_item_count": pending_count,
+                "pending_item_ids": list(pending_ids),
+                "static_shard_pending_item_count": plan.get("static_shard_pending_item_count"),
+                "source_range": copy.deepcopy(plan.get("source_range")),
+            }
+        )
+    assert expected_global_count is not None and expected_global_ids is not None and expected_contract is not None
+    if sum(int(plan["pending_item_count"]) for plan in plans) != expected_global_count:
+        raise CampaignRepositoryError("receipt-bound local pending planner has inconsistent global shard coverage")
+    return {
+        "schema_version": 1,
+        "status": "completed",
+        "checkout": str(Path(inputs["checkout"]).resolve()),
+        "campaign_commit": str(inputs["campaign_commit"]),
+        "source_config": str(Path(inputs["config_path"]).resolve()),
+        "source_config_sha256": sha256_file(Path(inputs["config_path"])),
+        "planner": str(Path(inputs["planner"]).resolve()),
+        "ledger_branch": ledger_branch,
+        "ledger": str(ledger.resolve()),
+        "ledger_sha256": sha256_file(ledger),
+        "execution_profile": execution_profile,
+        "contract": expected_contract,
+        "global_pending_item_count": expected_global_count,
+        "global_pending_item_ids": expected_global_ids,
+        "shards": plans,
+    }
 
 
 def _ledger_clone_is_bound(ledger_dir: Path, repository: str) -> bool:
@@ -2407,6 +2702,49 @@ def recover_campaign_with_devgpu(
 
     workspace_sn = ""
     try:
+        ledger_branch = str(policy["campaign_repository"]["ledger_branch_template"]).format(
+            campaign_id=source["run_id"]
+        )
+        pending_preflight = _plan_devgpu_pending_preflight(
+            source,
+            recovery_dir=recovery_dir,
+            ledger_branch=ledger_branch,
+            execution_profile=str(selected_profile["execution_profile"]),
+            shard_count=int(policy["campaign_repository"]["shard_count"]),
+        )
+        receipt["pending_preflight"] = pending_preflight
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(recovery_file, receipt)
+        delivery_source = dict(source)
+        delivery_source["ledger_branch"] = ledger_branch
+        if pending_preflight["global_pending_item_count"] == 0:
+            receipt["workspace"] = {
+                "status": "not_started",
+                "reason": "zero_pending_items_confirmed_locally",
+            }
+            receipt["status"] = "recovering_delivery_without_workspace"
+            receipt["updated_at"] = now_iso()
+            _atomic_write_json(recovery_file, receipt)
+            delivery = _recover_delivery(
+                delivery_source,
+                run_dir=run_dir_path,
+                require_source_url=True,
+                fresh_ledger=True,
+            )
+            receipt["logical_shards"] = [
+                {
+                    "index": item["index"],
+                    "id": item["id"],
+                    "status": "already_complete_for_selected_shard",
+                    "pending_item_count": 0,
+                }
+                for item in pending_preflight["shards"]
+            ]
+            receipt["delivery"] = delivery
+            receipt["status"] = "completed"
+            receipt["updated_at"] = now_iso()
+            _atomic_write_json(recovery_file, receipt)
+            return {**receipt, "receipt": str(recovery_file)}
         runtime_export_dir, runner_refresh = _prepare_devgpu_runner_refresh(
             repository_root=root,
             github_commit=refresh_commit,
@@ -2456,10 +2794,6 @@ def recover_campaign_with_devgpu(
         except Exception as exc:
             receipt["workspace"]["stop_error"] = str(exc)
             raise CampaignRepositoryError(f"Dev GPU recovery succeeded but workspace stop failed: {exc}") from exc
-        delivery_source = dict(source)
-        delivery_source["ledger_branch"] = str(policy["campaign_repository"]["ledger_branch_template"]).format(
-            campaign_id=source["run_id"]
-        )
         delivery = _recover_delivery(
             delivery_source,
             run_dir=run_dir_path,
