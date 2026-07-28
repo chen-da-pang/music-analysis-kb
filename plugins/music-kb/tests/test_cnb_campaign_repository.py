@@ -91,12 +91,22 @@ def policy() -> dict:
                 "execution_profile": "nvidia-h20/full_precision/bfloat16",
             },
         },
+        "devgpu_capacity_preflight": {
+            "per_pending_item_estimate_seconds": 900,
+            "fixed_headroom_seconds": 1_800,
+        },
     }
 
 
 def cnb_runner_factory(*, target_present: bool = False, existing: list[str] | None = None):
     commands: list[list[str]] = []
-    state = {"target_present": target_present, "group_object": 1_000}
+    state = {
+        "target_present": target_present,
+        "group_object": 1_000,
+        "dev_gpu_total": 10_000,
+        "dev_gpu_used": 100,
+        "dev_gpu_frozen": 50,
+    }
     existing = existing or []
 
     def run(command):
@@ -114,9 +124,24 @@ def cnb_runner_factory(*, target_present: bool = False, existing: list[str] | No
         if "get-package-tag-detail" in joined:
             return {"status": 200, "data": {"docker": {"image": {"digest": "sha256:" + "a" * 64}}}}
         if "get-volume" in joined:
-            return {"status": 200, "data": {"object_in_byte": state["group_object"], "git_in_byte": 1_000}}
+            return {
+                "status": 200,
+                "data": {
+                    "object_in_byte": state["group_object"],
+                    "git_in_byte": 1_000,
+                    "dev_gpu_in_sec": state["dev_gpu_used"],
+                    "freeze_dev_gpu_in_sec": state["dev_gpu_frozen"],
+                },
+            }
         if "get-quota" in joined:
-            return {"status": 200, "data": {"object_in_byte": {"total": 10_000}, "git_in_byte": {"total": 10_000}}}
+            return {
+                "status": 200,
+                "data": {
+                    "object_in_byte": {"total": 10_000},
+                    "git_in_byte": {"total": 10_000},
+                    "dev_gpu_in_sec": {"total": state["dev_gpu_total"]},
+                },
+            }
         if "get-repos-volume" in joined:
             return {"status": 200, "data": [{"slug": "org/music-flamingo-campaign-run-1", "volume": "0"}]}
         if "list-workspaces" in joined:
@@ -631,6 +656,60 @@ def test_lfs_preflight_keeps_object_headroom_gate() -> None:
     result = MODULE.campaign_preflight(value, runner=quota_runner, estimated_bytes=100)
     assert result["clean"] is False
     assert result["checks"]["object_headroom"] is False
+
+
+def test_devgpu_capacity_preflight_uses_official_total_used_and_frozen_fields() -> None:
+    state, commands, runner = cnb_runner_factory()
+
+    result = MODULE.devgpu_capacity_preflight(policy(), pending_item_count=2, runner=runner)
+
+    assert result["clean"] is True
+    assert result["quota_total_dev_gpu_seconds"] == state["dev_gpu_total"]
+    assert result["volume_used_dev_gpu_seconds"] == state["dev_gpu_used"]
+    assert result["volume_frozen_dev_gpu_seconds"] == state["dev_gpu_frozen"]
+    assert result["available_dev_gpu_seconds"] == 9_850
+    assert result["campaign_estimate_seconds"] == 1_800
+    assert result["required_dev_gpu_seconds"] == 3_600
+    assert [" ".join(command) for command in commands] == [
+        "cnb charge get-quota --slug org --verbose",
+        "cnb charge get-volume --slug org --verbose",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("quota_total", None, "dev_gpu_in_sec.total"),
+        ("used", -1, "dev_gpu_in_sec"),
+        ("frozen", "50", "freeze_dev_gpu_in_sec"),
+    ],
+)
+def test_devgpu_capacity_preflight_fails_closed_on_invalid_official_fields(
+    field: str, value: object, expected: str
+) -> None:
+    state, _, runner = cnb_runner_factory()
+    state[{"quota_total": "dev_gpu_total", "used": "dev_gpu_used", "frozen": "dev_gpu_frozen"}[field]] = value
+
+    result = MODULE.devgpu_capacity_preflight(policy(), pending_item_count=2, runner=runner)
+
+    assert result["clean"] is False
+    assert any(expected in error for error in result["errors"])
+
+
+def test_devgpu_capacity_preflight_normalizes_an_omitted_freeze_field_to_zero() -> None:
+    _, _, base_runner = cnb_runner_factory()
+
+    def runner(command):
+        response = base_runner(command)
+        if "get-volume" in " ".join(command):
+            response["data"].pop("freeze_dev_gpu_in_sec")
+        return response
+
+    result = MODULE.devgpu_capacity_preflight(policy(), pending_item_count=2, runner=runner)
+
+    assert result["clean"] is True
+    assert result["volume_frozen_dev_gpu_seconds"] == 0
+    assert result["freeze_dev_gpu_seconds_defaulted_to_zero"] is True
 
 
 def test_prepare_dry_run_writes_receipt_without_create_or_push(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1605,6 +1684,13 @@ def test_devgpu_recovery_global_zero_pending_skips_workspace(
     )
     monkeypatch.setattr(
         MODULE,
+        "devgpu_capacity_preflight",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("zero pending must not query Dev GPU capacity")
+        ),
+    )
+    monkeypatch.setattr(
+        MODULE,
         "_prepare_devgpu_runner_refresh",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("zero pending must not refresh the workspace runner")),
     )
@@ -1652,6 +1738,74 @@ def test_devgpu_recovery_global_zero_pending_skips_workspace(
     assert MODULE.sha256_file(source_path) == source_sha
     assert not any("start-workspace" in " ".join(command) for command in commands)
     assert not any("workspace-stop" in " ".join(command) for command in commands)
+
+
+def test_devgpu_recovery_records_capacity_failure_before_workspace_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    value = policy()
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(value), encoding="utf-8")
+    source = receipt_identity(tmp_path, count=2)
+    source.update({"status": "failed", "campaign_commit": "c" * 40})
+    source_path = tmp_path / "source-receipt.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    history_review = write_devgpu_history_review(source_path)
+    recovery_path = tmp_path / "recovery" / "receipt.json"
+    state, commands, runner = cnb_runner_factory(target_present=True)
+    state["dev_gpu_total"] = 3_000
+    monkeypatch.setattr(
+        MODULE,
+        "_verify_build_gpu_platform_gate",
+        lambda *_args, **_kwargs: {"classification": "cnb_build_gpu_pre_freezing_quota", "builds": []},
+    )
+    monkeypatch.setattr(MODULE, "_validate_commit", lambda _root, commit: commit)
+    monkeypatch.setattr(
+        MODULE,
+        "_plan_devgpu_pending_preflight",
+        lambda *_args, **_kwargs: devgpu_pending_preflight(pending_counts=[1, 1]),
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_prepare_devgpu_runner_refresh",
+        lambda **_kwargs: (tmp_path / "runtime-export", {"github_commit": "a" * 40, "files": []}),
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_prepare_devgpu_overlay",
+        lambda **_kwargs: {
+            "branch": "codex/devgpu-recovery-run-1",
+            "commit": "d" * 40,
+            "parent_campaign_commit": "c" * 40,
+            "config_sha256": "e" * 64,
+            "path": str(tmp_path / "overlay"),
+        },
+    )
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="capacity preflight failed"):
+        MODULE.recover_campaign_with_devgpu(
+            policy_path=policy_path,
+            operations_path=OPERATIONS,
+            source_receipt_path=source_path,
+            recovery_receipt_path=recovery_path,
+            run_dir=tmp_path,
+            history_review_path=history_review,
+            execute=True,
+            wait=True,
+            poll_seconds=0,
+            timeout_seconds=2,
+            runner=runner,
+            transport="git-objects",
+            repository_root=tmp_path,
+            github_commit="a" * 40,
+        )
+
+    saved = json.loads(recovery_path.read_text(encoding="utf-8"))
+    assert saved["status"] == "failed"
+    assert saved["devgpu_capacity_preflight"]["clean"] is False
+    assert saved["devgpu_capacity_preflight"]["pending_item_count"] == 2
+    assert saved["devgpu_capacity_preflight"]["required_dev_gpu_seconds"] == 3_600
+    assert not any("start-workspace" in " ".join(command) for command in commands)
 
 
 def test_devgpu_recovery_stops_workspace_after_stage_failure(
@@ -1994,6 +2148,7 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
     assert result["history_review"]["sha256"] == MODULE.sha256_file(history_review)
     assert result["devgpu_profile"]["expected_gpu"] == "L40"
     assert result["devgpu_profile"]["minimum_free_mib"] == 35_000
+    assert result["devgpu_capacity_preflight"]["clean"] is True
     assert [item["index"] for item in result["logical_shards"]] == [1, 2]
     assert MODULE.sha256_file(source_path) == source_sha
     assert sum("start-workspace" in " ".join(command) for command in commands) == 1

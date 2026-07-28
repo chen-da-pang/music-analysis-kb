@@ -143,6 +143,23 @@ def resolve_devgpu_recovery_profile(policy: Mapping[str, Any], profile_name: str
     return resolved
 
 
+def resolve_devgpu_capacity_preflight(policy: Mapping[str, Any]) -> dict[str, int]:
+    """Return the versioned, fail-closed quota estimate for a Dev GPU resume."""
+
+    raw = policy.get("devgpu_capacity_preflight")
+    if not isinstance(raw, Mapping):
+        raise CampaignRepositoryError("CNB policy must define devgpu_capacity_preflight")
+    resolved: dict[str, int] = {}
+    for field in ("per_pending_item_estimate_seconds", "fixed_headroom_seconds"):
+        value = raw.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise CampaignRepositoryError(
+                f"devgpu_capacity_preflight.{field} must be a positive integer"
+            )
+        resolved[field] = value
+    return resolved
+
+
 def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -290,6 +307,7 @@ def load_campaign_policy(path: str | Path) -> dict[str, Any]:
         "verified_runtime_image_digest",
         "campaign_repository",
         "devgpu_recovery_profiles",
+        "devgpu_capacity_preflight",
     }
     missing = sorted(required - set(policy))
     if missing:
@@ -710,6 +728,92 @@ def _group_quota(organization: str, runner: JsonRunner) -> dict[str, int]:
         "object": int((data.get("object_in_byte") or {}).get("total", 0)),
         "git": int((data.get("git_in_byte") or {}).get("total", 0)),
     }
+
+
+def _required_nonnegative_integer(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise CampaignRepositoryError(f"official CNB {field} is missing, invalid, or negative")
+    return value
+
+
+def devgpu_capacity_preflight(
+    policy: Mapping[str, Any], *, pending_item_count: int, runner: JsonRunner = run_cnb
+) -> dict[str, Any]:
+    """Calculate usable official Dev GPU quota for one receipt-bound recovery.
+
+    CNB publishes the total in ``get-quota`` and the used/frozen values in
+    ``get-volume``.  A successful workspace-start response is never treated as
+    capacity evidence; the exact arithmetic and policy estimate are retained
+    before that request is issued.
+    """
+
+    result: dict[str, Any] = {
+        "action": "devgpu-capacity-preflight",
+        "clean": False,
+        "pending_item_count": pending_item_count,
+        "per_pending_item_estimate_seconds": None,
+        "fixed_headroom_seconds": None,
+        "quota_total_dev_gpu_seconds": None,
+        "volume_used_dev_gpu_seconds": None,
+        "volume_frozen_dev_gpu_seconds": None,
+        "freeze_dev_gpu_seconds_defaulted_to_zero": False,
+        "available_dev_gpu_seconds": None,
+        "campaign_estimate_seconds": None,
+        "required_dev_gpu_seconds": None,
+        "errors": [],
+    }
+    try:
+        if isinstance(pending_item_count, bool) or not isinstance(pending_item_count, int) or pending_item_count <= 0:
+            raise CampaignRepositoryError("receipt-bound pending item count must be a positive integer")
+        estimate_policy = resolve_devgpu_capacity_preflight(policy)
+        result.update(estimate_policy)
+        organization = str(policy["organization_slug"])
+        quota_data = _response_data(
+            runner(["cnb", "charge", "get-quota", "--slug", organization, "--verbose"])
+        )
+        volume_data = _response_data(
+            runner(["cnb", "charge", "get-volume", "--slug", organization, "--verbose"])
+        )
+        if not isinstance(quota_data, Mapping) or not isinstance(volume_data, Mapping):
+            raise CampaignRepositoryError("official CNB quota or volume response is not an object")
+        dev_gpu_quota = quota_data.get("dev_gpu_in_sec")
+        if not isinstance(dev_gpu_quota, Mapping):
+            raise CampaignRepositoryError("official CNB dev_gpu_in_sec quota field is missing or invalid")
+        total = _required_nonnegative_integer(dev_gpu_quota.get("total"), "dev_gpu_in_sec.total")
+        used = _required_nonnegative_integer(volume_data.get("dev_gpu_in_sec"), "dev_gpu_in_sec")
+        if "freeze_dev_gpu_in_sec" not in volume_data:
+            # CNB's live volume response omits this field when no Dev GPU quota
+            # is frozen.  Preserve that official zero convention explicitly in
+            # the receipt; a present malformed or negative value still fails.
+            frozen = 0
+            result["freeze_dev_gpu_seconds_defaulted_to_zero"] = True
+        else:
+            frozen = _required_nonnegative_integer(
+                volume_data.get("freeze_dev_gpu_in_sec"), "freeze_dev_gpu_in_sec"
+            )
+        available = total - used - frozen
+        campaign_estimate = pending_item_count * estimate_policy["per_pending_item_estimate_seconds"]
+        required = campaign_estimate + estimate_policy["fixed_headroom_seconds"]
+        result.update(
+            {
+                "quota_total_dev_gpu_seconds": total,
+                "volume_used_dev_gpu_seconds": used,
+                "volume_frozen_dev_gpu_seconds": frozen,
+                "available_dev_gpu_seconds": available,
+                "campaign_estimate_seconds": campaign_estimate,
+                "required_dev_gpu_seconds": required,
+            }
+        )
+        if available < 0:
+            raise CampaignRepositoryError("official CNB available_dev_gpu_seconds is negative")
+        if available < required:
+            raise CampaignRepositoryError(
+                "official CNB usable Dev GPU capacity cannot cover the receipt-bound estimate plus headroom"
+            )
+        result["clean"] = True
+    except Exception as exc:
+        result["errors"].append(str(exc))
+    return result
 
 
 def _protected_runtime_status(policy: Mapping[str, Any], runner: JsonRunner) -> dict[str, Any]:
@@ -2869,6 +2973,18 @@ def recover_campaign_with_devgpu(
             devgpu_profile=selected_profile["name"],
         )
         receipt["overlay"] = overlay
+        capacity_preflight = devgpu_capacity_preflight(
+            policy,
+            pending_item_count=int(pending_preflight["global_pending_item_count"]),
+            runner=runner,
+        )
+        receipt["devgpu_capacity_preflight"] = capacity_preflight
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(recovery_file, receipt)
+        if not capacity_preflight["clean"]:
+            raise CampaignRepositoryError(
+                "Dev GPU capacity preflight failed: " + "; ".join(capacity_preflight["errors"])
+            )
         receipt["status"] = "starting_workspace"
         receipt["updated_at"] = now_iso()
         _atomic_write_json(recovery_file, receipt)
