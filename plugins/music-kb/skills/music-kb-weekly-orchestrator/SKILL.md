@@ -1,12 +1,25 @@
 ---
 name: music-kb-weekly-orchestrator
-description: Orchestrate a complete weekly Music KB update from the configured Kugou charts through a fixed direct download worker, a disposable CNB Music Flamingo campaign, local import, publisher snapshot installation, optional colleague SSH fan-out, and guarded audio/CNB cleanup. Use when the publisher needs to run, dry-run, or resume the recurring weekly music-library update.
+description: Orchestrate a complete weekly Music KB update from the configured Kugou charts through a Claude Code supervised, isolated parallel download path, a disposable CNB Music Flamingo campaign, local import, publisher snapshot installation, optional colleague SSH fan-out, and guarded audio/CNB cleanup. Use when the publisher needs to run, dry-run, or resume the recurring weekly music-library update.
 ---
 
 # Music KB Weekly Orchestrator
 
 Run this skill on the publisher machine only. Colleague machines are read-only
 retrieval clients and receive immutable snapshots, never the writable master.
+
+## Download host contract
+
+- **Claude Code** is the outer executor. Each primary or fallback atom starts
+  exactly one short launcher with `--executor claude --parallelism 2`.
+- The launcher owns at most two isolated shard workers. Each shard has private
+  queue, inventory copy, progress, log, and staging media.
+- One serial merger is the only process allowed to write the durable inventory,
+  progress, media tree, and atom receipt. Claude must not wait for, restart,
+  wrap, or directly invoke a shard worker.
+- A weekly fallback receives the exact primary queue path recorded by the
+  primary receipt. Its source-queue path and SHA-256 are receipt-bound on
+  resume, so it cannot sweep historical failed/no-result inventory rows.
 
 ## Non-negotiable run contract
 
@@ -150,23 +163,20 @@ be purged, so inventory—not file presence alone—is the dedupe record.
    failed, or `no_results` items. `abandoned` is a durable terminal download
    state and requires an explicit `--retry-abandoned` recovery. Do not
    interpret a new download as an analysis result.
-6. **`claude_download`** — retain this historical atom name but default to one
-   fixed direct worker. It must use `musicdl`'s `MusicClient` plus
-   `KugouMusicClient`; it first resolves the queue's exact mix-song page and
-   verified audio hash, then falls back to title/artist search only when needed.
-   It must not call `kugou-cli` or the legacy full-database downloader. Keep one
-   song-level inventory row per platform identity and do not run concurrent
-   workers against shared state. `--executor claude` is only a bounded
-   compatibility retry.
-7. **`fallback_download`** — directly process only the primary worker's
-   recorded `no_results` or `failed` states in the configured fallback order,
-   with duration/size checks. `run_claude_fallback.py` validates a Python that
-   imports `musicdl` and starts a short detached supervisor. Its default two
-   isolated staging shards never touch real inventory, progress, or audio; one
-   serial merger is the sole formal-state writer. `--executor claude` is a
-   compatibility launcher only. Preserve `retry_from_status` and fallback
-   attempt history; after the second unsuccessful fallback round, write
-   `abandoned` and do not requeue it automatically.
+6. **`claude_download`** — retain this historical atom name. The formal weekly
+   path uses one Claude Code launcher and two isolated primary shards, then one
+   serial merger. Workers use `musicdl`'s `MusicClient` plus
+   `KugouMusicClient`, preserve exact MixSongID validation, and must not call
+   `kugou-cli` or the legacy full-database downloader. No shard may write
+   shared inventory, progress, or media directly.
+7. **`fallback_download`** — process only `no_results` or `failed` identities
+   from the exact primary queue recorded by the primary receipt. The fallback
+   also uses one Claude Code launcher, two isolated staging shards, and one
+   serial merger. Resume requires the same receipt-bound source queue and
+   SHA-256; a missing, replaced, or changed queue fails closed. Preserve
+   `retry_from_status` and fallback attempt history; after the second
+   unsuccessful fallback round, write `abandoned` and do not requeue it
+   automatically.
 8. **`cnb_input_materialization`** — consume only newly downloaded queue rows;
    verify file existence, identity, SHA-256, byte count, and `source_url`; use
    hardlinks into an isolated staging directory and write the LF JSONL manifest.
@@ -324,10 +334,10 @@ and external-delivery reconciliation own import, release and cleanup; never
 copy recovery success fields into the failed campaign receipt.
 
 On the publisher Mac this is the fastest measured download profile: the proxy
-is propagated to chart capture, the serial Kugou worker, and the two-way
-fallback wrapper. Confirm that the local listener is healthy first. The default
-route is a system TUN rather than a bare direct connection; if the listener is
-unavailable, omit `--proxy` and use that route instead.
+is propagated to chart capture, the Claude-supervised two-way primary launcher,
+and the two-way fallback launcher. Confirm that the local listener is healthy
+first. The default route is a system TUN rather than a bare direct connection;
+if the listener is unavailable, omit `--proxy` and use that route instead.
 
 For a real publish, remove `--download-dry-run`, review the peer plan, add
 `--publish`, and supply `--confirm-delete-audio`,
