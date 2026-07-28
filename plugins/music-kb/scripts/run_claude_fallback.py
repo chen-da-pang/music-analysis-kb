@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Prepare retryable fallback work and launch an isolated detached supervisor.
 
-The normal direct path starts the short launcher itself.  The launcher owns one
-or two private fallback shards and writes a completion receipt only after its
-serial merger has safely updated durable state.  ``--executor claude`` remains
-an explicit compatibility path which asks Claude Code to start that same short
-launcher; Claude never owns the long-running download process.
+The normal Claude path asks Claude Code to start the short launcher itself. The
+launcher owns one or two private fallback shards and writes a completion receipt
+only after its serial merger has safely updated durable state. ``--executor
+direct`` remains an explicit diagnostic path; Claude never owns the long-running
+download process.
 """
 
 from __future__ import annotations
@@ -234,20 +234,29 @@ def processed_count(progress: dict[str, Any]) -> int:
 def verify_resumed_source_queue(manifest: dict[str, Any], source_queue: Path | None) -> None:
     """Reject an attempt to change the receipt-bound source scope on resume."""
 
-    if source_queue is None:
-        return
     expected_path = manifest.get("source_queue")
     expected_sha256 = manifest.get("source_queue_sha256")
+    if not expected_path and not expected_sha256:
+        if source_queue is not None:
+            raise RuntimeError("cannot resume an unscoped fallback run with --source-queue")
+        return
     if not isinstance(expected_path, str) or not expected_path:
-        raise RuntimeError("cannot resume an unscoped fallback run with --source-queue")
-    if source_queue != Path(expected_path):
-        raise RuntimeError(
-            f"cannot resume fallback run with a different source queue: {source_queue} != {expected_path}"
-        )
+        raise RuntimeError("cannot resume fallback run: source queue path is missing from its manifest")
     if not isinstance(expected_sha256, str) or not expected_sha256:
         raise RuntimeError("cannot resume source-scoped fallback run without source queue digest")
-    if hashlib.sha256(source_queue.read_bytes()).hexdigest() != expected_sha256:
-        raise RuntimeError("cannot resume fallback run: source queue digest changed after the initial launch")
+    recorded_queue = Path(expected_path).expanduser().resolve()
+    try:
+        recorded_sha256 = hashlib.sha256(recorded_queue.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RuntimeError(f"cannot resume fallback run: recorded source queue is unavailable: {recorded_queue}") from exc
+    if recorded_sha256 != expected_sha256:
+        raise RuntimeError("cannot resume fallback run: recorded source queue digest changed after the initial launch")
+    if source_queue is None:
+        raise RuntimeError("cannot resume source-scoped fallback run without its receipt-bound --source-queue")
+    if source_queue != recorded_queue:
+        raise RuntimeError(
+            f"cannot resume fallback run with a different source queue: {source_queue} != {recorded_queue}"
+        )
 
 
 def main() -> int:
@@ -255,9 +264,9 @@ def main() -> int:
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--claude-bin", default="claude")
-    parser.add_argument("--executor", choices=("direct", "claude"), default="direct")
+    parser.add_argument("--executor", choices=("direct", "claude"), default="claude")
     parser.add_argument("--parallelism", type=int, choices=(1, 2), default=2)
-    parser.add_argument("--timeout-seconds", type=int, default=1800)
+    parser.add_argument("--timeout-seconds", type=int, default=86_400)
     parser.add_argument("--proxy")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--operations-file", type=Path, default=Path(__file__).resolve().parents[1] / "references" / "validated-operations.json")
@@ -397,9 +406,11 @@ def main() -> int:
         "source_queue": manifest.get("source_queue"),
     }
     atom_exit_code = 0
+    launch_verified = False
     if execution != "skipped_empty_queue":
         if launch_receipt.is_file():
             launch = load_json(launch_receipt)
+            launch_verified = True
             summary["worker_launch"] = launch
             try:
                 completion = wait_for_completion(launch, completion_receipt, args.timeout_seconds)
@@ -415,9 +426,16 @@ def main() -> int:
         else:
             summary["launch_missing"] = True
             atom_exit_code = 2
-    if launcher_exit_code not in (None, 0):
+    claude_nonzero_after_verified_launch = (
+        args.executor == "claude"
+        and claude_exit_code not in (None, 0)
+        and launch_verified
+    )
+    if claude_nonzero_after_verified_launch:
+        summary["claude_exit_ignored_after_verified_launch"] = True
+    elif launcher_exit_code not in (None, 0):
         atom_exit_code = 2
-    if launcher_error:
+    if launcher_error and not (args.executor == "claude" and launch_verified):
         atom_exit_code = 2
     if progress.exists():
         progress_data = load_json(progress)

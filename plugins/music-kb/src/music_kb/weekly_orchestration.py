@@ -642,10 +642,10 @@ def run_weekly_run(
             and (download_run_dir / "queue_manifest.json").is_file()
         )
         if not delivery_supplied and not campaign_resume:
-            # The default primary and fallback download executors run their
-            # deterministic workers directly. Claude remains an explicit
-            # compatibility fallback, not a weekly preflight dependency.
-            required_commands = ("kugou-cli",)
+            # Chart capture needs kugou-cli. Both weekly download atoms use
+            # Claude Code exactly once as their outer launcher, then retain
+            # isolated workers and one serial merger underneath it.
+            required_commands = ("kugou-cli", "claude")
         if publish and not skip_peers:
             required_commands += ("rsync",)
         with atom(context, "preflight", inputs={"workspace": str(root), "publish": publish} ) as outputs:
@@ -899,7 +899,10 @@ def run_weekly_run(
                 "queue": str(queue_path),
                 "dry_run": download_dry_run,
                 "reuse_queue": download_resume,
-                "executor": "direct",
+                "executor": "claude",
+                "parallelism": 2,
+                "lookup_mode": "search-only",
+                "worker_delay": 0,
             },
         ) as outputs:
             if delivery_supplied or campaign_resume:
@@ -919,7 +922,13 @@ def run_weekly_run(
                     "--timeout-seconds",
                     str(timeout_seconds),
                     "--executor",
-                    "direct",
+                    "claude",
+                    "--parallelism",
+                    "2",
+                    "--lookup-mode",
+                    "search-only",
+                    "--worker-delay",
+                    "0",
                 ]
                 if proxy:
                     command.extend(["--proxy", proxy])
@@ -933,10 +942,26 @@ def run_weekly_run(
                 outputs.update(download_result)
 
         fallback_run_id = f"{run_id}-fallback"
+        fallback_source_queue = queue_path
+        if not delivery_supplied and not campaign_resume:
+            primary_queue_value = (download_result.get("queue_manifest") or {}).get("queue")
+            if not primary_queue_value:
+                raise RuntimeError("primary download did not report its source queue; refusing unscoped fallback")
+            fallback_source_queue = Path(str(primary_queue_value)).expanduser().resolve()
+            if not fallback_source_queue.is_file():
+                raise RuntimeError(
+                    f"primary download reported a missing source queue; refusing unscoped fallback: {fallback_source_queue}"
+                )
         with atom(
             context,
             "fallback_download",
-            inputs={"run_id": fallback_run_id, "dry_run": download_dry_run, "executor": "direct"},
+            inputs={
+                "run_id": fallback_run_id,
+                "dry_run": download_dry_run,
+                "executor": "claude",
+                "parallelism": 2,
+                "source_queue": str(fallback_source_queue),
+            },
         ) as outputs:
             if delivery_supplied or campaign_resume:
                 outputs.update({"status": "skipped", "reason": resume_reason})
@@ -953,7 +978,11 @@ def run_weekly_run(
                     "--timeout-seconds",
                     str(timeout_seconds),
                     "--executor",
-                    "direct",
+                    "claude",
+                    "--parallelism",
+                    "2",
+                    "--source-queue",
+                    str(fallback_source_queue),
                 ]
                 if proxy:
                     fallback_command.extend(["--proxy", proxy])

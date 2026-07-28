@@ -111,6 +111,8 @@ def test_direct_wrapper_starts_short_launcher_without_claude(monkeypatch, tmp_pa
             str(profile),
             "--source-queue",
             str(source_queue),
+            "--executor",
+            "direct",
             "--proxy",
             "http://127.0.0.1:7890",
         ],
@@ -137,7 +139,65 @@ def test_direct_wrapper_starts_short_launcher_without_claude(monkeypatch, tmp_pa
     assert Path(summary["receipt"]).is_file()
 
 
-def test_resume_rejects_changed_source_queue(tmp_path: Path) -> None:
+def test_wrapper_defaults_to_one_claude_launcher(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _module(WRAPPER, "run_claude_fallback_default_claude")
+    workspace = tmp_path / "workspace"
+    inventory = workspace / "data" / "song_inventory.json"
+    inventory.parent.mkdir(parents=True)
+    inventory.write_text('{"songs": []}\n', encoding="utf-8")
+    operations = _operation_file(tmp_path)
+    profile = _profile_file(tmp_path)
+    launches: list[list[str]] = []
+
+    monkeypatch.setattr(module, "resolve_musicdl_python", lambda _explicit: sys.executable)
+    monkeypatch.setattr(
+        module,
+        "run_checked",
+        lambda *_args, **_kwargs: {"queued": 1, "retry_statuses": ["no_results", "failed"]},
+    )
+
+    def fake_launch(*, command, run_dir, **_kwargs):
+        launches.append(command)
+        launch = run_dir / "fallback-worker-launch.json"
+        progress = run_dir / "fallback-progress.json"
+        launch.write_text(json.dumps({"supervisor_pid": os.getpid(), "parallelism": 2}), encoding="utf-8")
+        progress.write_text(
+            json.dumps(
+                {
+                    "finished_at": "2026-07-28T00:00:00Z",
+                    "results": {"kugou:1": {"status": "downloaded"}},
+                    "summary": {"downloaded": 1, "skipped_existing": 0, "failed": 0, "no_results": 0},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 0, None, run_dir / "claude_stdout.json", run_dir / "claude_stderr.log"
+
+    monkeypatch.setattr(module, "launch_with_claude", fake_launch)
+    monkeypatch.setattr(
+        module,
+        "wait_for_completion",
+        lambda _launch, _path, _timeout: {"status": "succeeded", "exit_code": 0, "parallelism": 2},
+    )
+    monkeypatch.setattr(
+        module.sys,
+        "argv",
+        [
+            "run_claude_fallback.py", "--workspace", str(workspace), "--run-id", "default-claude",
+            "--operations-file", str(operations), "--profile", str(profile),
+        ],
+    )
+
+    assert module.main() == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert len(launches) == 1
+    assert launches[0][launches[0].index("--parallelism") + 1] == "2"
+    assert summary["executor"] == "claude"
+    assert summary["execution"] == "claude_detached"
+    assert summary["atom_exit_code"] == 0
+
+
+def test_resume_rechecks_receipt_bound_source_queue(tmp_path: Path) -> None:
     module = _module(WRAPPER, "run_claude_fallback_source_resume")
     source_queue = tmp_path / "primary.jsonl"
     source_queue.write_text('{"identity_key":"kugou:1"}\n', encoding="utf-8")
@@ -146,9 +206,17 @@ def test_resume_rejects_changed_source_queue(tmp_path: Path) -> None:
         "source_queue_sha256": hashlib.sha256(source_queue.read_bytes()).hexdigest(),
     }
 
+    with pytest.raises(RuntimeError, match="receipt-bound --source-queue"):
+        module.verify_resumed_source_queue(manifest, None)
     module.verify_resumed_source_queue(manifest, source_queue.resolve())
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_text('{"identity_key":"kugou:1"}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="different source queue"):
+        module.verify_resumed_source_queue(manifest, replacement.resolve())
     source_queue.write_text('{"identity_key":"kugou:2"}\n', encoding="utf-8")
-    with pytest.raises(RuntimeError, match="source queue digest changed"):
+    with pytest.raises(RuntimeError, match="recorded source queue digest changed"):
+        module.verify_resumed_source_queue(manifest, None)
+    with pytest.raises(RuntimeError, match="recorded source queue digest changed"):
         module.verify_resumed_source_queue(manifest, source_queue.resolve())
 
 
