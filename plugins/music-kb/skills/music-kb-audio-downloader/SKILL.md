@@ -1,6 +1,6 @@
 ---
 name: music-kb-audio-downloader
-description: Prepare a deduplicated Kugou audio queue from a new chart export and execute the verified direct download path. The primary Kugou worker is serial; its QQ/Migu/Kuwo fallback uses two isolated workers with one safe merger. Use only on the publisher machine.
+description: Prepare a deduplicated Kugou audio queue from a new chart export and execute the Claude Code supervised download path. Primary and QQ/Migu/Kuwo fallback each use two isolated workers with one safe merger. Use only on the publisher machine.
 ---
 
 # Music KB Audio Downloader
@@ -14,11 +14,12 @@ from a completed CNB canonical delivery. The atom has four bounded stages:
 2. Compare a new `kugou-cli` chart export with that inventory. Deduplicate by
    `kugou:<mix_song_id>` first and by normalized title + artist as a fallback.
 3. Write a JSONL queue containing only songs that are not already downloaded.
-4. Run the deterministic `scripts/download_music_queue.py` worker directly in
-   one serial process. It uses `musicdl` with `KugouMusicClient`, first resolves
-   the queue's exact Kugou mix-song page to one verified audio hash, and falls
-   back to title/artist search only when that direct parser cannot produce an
-   audio URL. It updates the inventory after every attempt and writes an
+4. Start one short Claude Code launcher for the primary queue. It owns two
+   isolated `scripts/download_music_queue.py` shards and one serial merger.
+   Each worker uses `musicdl` with `KugouMusicClient`, first resolves the
+   queue's exact Kugou mix-song page to one verified audio hash, and falls back
+   to title/artist search only when that direct parser cannot produce an audio
+   URL. Only the merger updates durable inventory and writes the
    identity-bound lyric receipt from the exact result's `SongInfo.lyric`.
 
 If the primary worker leaves songs as `no_results` or `failed`, run the separate
@@ -40,8 +41,9 @@ capture atom; this atom consumes its processed songs JSON/JSONL/CSV export.
 ## Required boundary
 
 - Run on the publisher Mac only.
-- The primary Kugou worker remains the one serial owner of inventory, progress,
-  and lyric receipts. It must not be parallelized.
+- Primary and fallback workers are isolated from durable state. The single
+  serial merger is the only owner of inventory, progress, media placement, and
+  lyric receipts; do not run shard workers against shared state.
 - The fallback wrapper may run two workers only through isolated staging and a
   serial merger. Never start two `download_music_fallback.py` processes against
   the real inventory, progress, or audio directory directly.
@@ -103,21 +105,19 @@ python3 .../download_music_queue.py \
   --item-timeout-seconds 60
 ```
 
-The direct path keeps exact MixSongID validation, inventory/progress atomic
-writes, and append-only lyric receipts in the same worker. Its default
-`--lookup-mode exact-page-first` prevents `musicdl` from expanding several
-title/artist candidates when the queue already has an exact Kugou source URL;
-`--lookup-mode search-only` is the measured rollback path. `--executor claude`
-is available only for a bounded compatibility retry; it preserves the old
-serial chunk path and inherits `http_proxy`/`https_proxy` when `--proxy` is
-provided.
+The primary path keeps exact MixSongID validation, atomic merge writes, and
+append-only lyric receipts. Its default `--lookup-mode search-only` avoids the
+known exact-page parser failure before transfer; `--lookup-mode exact-page-first`
+is diagnostic only. The formal weekly contract is `--executor claude
+--parallelism 2`; Claude starts only the short launcher and inherits
+`http_proxy`/`https_proxy` when `--proxy` is provided.
 
 ### Measured publisher profile
 
 On the publisher Mac, the apparent default route is the system TUN proxy, not
 a bare public direct connection. The currently fastest validated fallback
-profile is the direct wrapper with `--parallelism 2` and an explicit healthy
-`http://127.0.0.1:7890` proxy. The direct two-song end-to-end sample completed
+profile is the Claude-supervised wrapper with `--parallelism 2` and an explicit healthy
+`http://127.0.0.1:7890` proxy. The two-song end-to-end sample completed
 2/2 identity- and `ffprobe`-validated downloads in 15.869 seconds, compared
 with 24.994 seconds for the same serial wrapper shape. Audio CDN transfer also
 benefited from two streams; four streams did not add a repeatable gain.
@@ -166,9 +166,9 @@ across runs. A second unsuccessful round becomes the durable, auditable
 `abandoned` state and is omitted from both automatic queues; use
 `run_claude_download.py --retry-abandoned` only for an explicit recovery.
 Before a real run, use `--dry-run` and review the queue count and status
-breakdown. The direct fallback wrapper owns queue preparation, safe two-way
-sharding, and the final merger. `--executor claude` remains an explicit
-compatibility way to start the same short launcher:
+breakdown. The fallback wrapper owns queue preparation, safe two-way sharding,
+and the final merger. The formal weekly path uses `--executor claude` to start
+the same short launcher:
 
 ```bash
 export MUSICDL_PYTHON=/absolute/path/to/python-that-imports-musicdl
@@ -185,12 +185,11 @@ queue with unique identities, and only those identities that are currently
 `failed` or `no_results` may enter fallback. It never sweeps historical inventory.
 
 For a real run, the wrapper validates the `fallback_download` operation record,
-proves `--worker-python` can import `musicdl`, then starts the short detached
-launcher. The supervisor runs the actual P=2 isolated shards and its serial
-merger is the only code allowed to touch real inventory/progress and the
-configured music directory. `--executor claude` may start that launcher for
-compatibility, but Claude must not wait, kill, wrap, restart, or directly run
-`download_music_fallback.py`.
+proves `--worker-python` can import `musicdl`, then lets the one Claude Code
+launcher start the detached supervisor. The supervisor runs the actual P=2
+isolated shards and its serial merger is the only code allowed to touch real
+inventory/progress and the configured music directory. Claude must not wait,
+kill, wrap, restart, or directly run `download_music_fallback.py`.
 
 Accept a fallback file only after it exists, exceeds 1 MB, and has an ffprobe
 duration of at least 60 seconds. Each child may write only its run-local shard
