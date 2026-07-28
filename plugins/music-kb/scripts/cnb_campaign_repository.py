@@ -88,6 +88,10 @@ DEVGPU_RECOVERY_REFRESHABLE_RUNTIME_FILES = (
     "scripts/check_manual_gpu_gate.py",
 )
 DEVGPU_RECOVERY_REFRESH_METADATA = "devgpu-runner-refresh.json"
+# The generated DevGPU stage can run a full 408-track campaign.  Keep the
+# client-side poll deadline aligned with that stage instead of allowing an
+# orphaned workspace to outlive the receipt-bound execution window.
+DEVGPU_WORKSPACE_MAX_SECONDS = 8 * 60 * 60
 
 JsonRunner = Callable[[Sequence[str]], dict[str, Any]]
 
@@ -903,6 +907,48 @@ def _running_workspaces(
     return [dict(row) for row in rows if isinstance(row, Mapping)]
 
 
+def _workspace_preflight(repository: str, runner: JsonRunner) -> dict[str, Any]:
+    """Record and reject any workspace visible before a new DevGPU launch."""
+
+    visible = _running_workspaces(repository, runner)
+    return {
+        "status": "clean" if not visible else "blocked",
+        "running_workspaces": visible,
+    }
+
+
+def _start_receipt_bound_workspace(
+    *, repository: str, branch: str, runner: JsonRunner
+) -> tuple[str, bool]:
+    """Start a workspace, resolving CNB's URL-only existing-workspace response safely."""
+
+    response = runner(
+        [
+            "cnb", "workspace", "start-workspace", "--repo", repository,
+            "--branch", branch, "--verbose",
+        ]
+    )
+    try:
+        return _extract_build_sn(response), False
+    except CampaignRepositoryError as start_error:
+        # CNB documents that start-workspace returns only a WebIDE URL when the
+        # environment already exists.  That URL is not execution evidence: only
+        # a single running workspace on the exact receipt-bound branch is safe.
+        candidates = _running_workspaces(repository, runner, branch=branch)
+        candidate_sns = sorted(
+            {
+                str(item["sn"])
+                for item in candidates
+                if isinstance(item.get("sn"), str) and str(item["sn"]).strip()
+            }
+        )
+        if len(candidate_sns) != 1:
+            raise CampaignRepositoryError(
+                "workspace start returned no SN and did not resolve exactly one receipt-bound running workspace"
+            ) from start_error
+        return candidate_sns[0], True
+
+
 def retained_campaign_receipt_validation_errors(
     policy: Mapping[str, Any], receipt: Mapping[str, Any], *, repository: str
 ) -> list[str]:
@@ -1348,7 +1394,7 @@ def generate_campaign_devgpu_config(
         f"      key: {_yaml_string('music-flamingo-' + campaign_id + '-ledger-writer')}",
         "      wait: true",
         "      timeout: 15000",
-        "      expires: 18000",
+        "      expires: 32400",
         "",
     ]
     return "\n".join(lines)
@@ -2887,7 +2933,7 @@ def recover_campaign_with_devgpu(
     history_review_path: str | Path | None = None,
     execute: bool = False,
     wait: bool = True,
-    timeout_seconds: float = 14_400,
+    timeout_seconds: float = DEVGPU_WORKSPACE_MAX_SECONDS,
     poll_seconds: float = 10.0,
     runner: JsonRunner = run_cnb,
     transport: str | None = None,
@@ -3037,6 +3083,14 @@ def recover_campaign_with_devgpu(
             raise CampaignRepositoryError(
                 "Dev GPU capacity preflight failed: " + "; ".join(capacity_preflight["errors"])
             )
+        workspace_preflight = _workspace_preflight(str(source["repository"]), runner)
+        receipt["workspace_preflight"] = workspace_preflight
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(recovery_file, receipt)
+        if workspace_preflight["status"] != "clean":
+            raise CampaignRepositoryError(
+                "Dev GPU recovery found a visible running workspace for the disposable campaign"
+            )
         runtime_export_dir, runner_refresh = _prepare_devgpu_runner_refresh(
             repository_root=root,
             github_commit=refresh_commit,
@@ -3055,21 +3109,22 @@ def recover_campaign_with_devgpu(
         receipt["status"] = "starting_workspace"
         receipt["updated_at"] = now_iso()
         _atomic_write_json(recovery_file, receipt)
-        response = runner(
-            [
-                "cnb", "workspace", "start-workspace", "--repo", str(source["repository"]),
-                "--branch", str(overlay["branch"]), "--verbose",
-            ]
+        workspace_sn, reused_workspace = _start_receipt_bound_workspace(
+            repository=str(source["repository"]), branch=str(overlay["branch"]), runner=runner
         )
-        workspace_sn = _extract_build_sn(response)
-        receipt["workspace"] = {"sn": workspace_sn, "status": "submitted"}
+        receipt["workspace"] = {
+            "sn": workspace_sn,
+            "status": "submitted",
+            "reused_visible_workspace": reused_workspace,
+            "timeout_seconds": min(float(timeout_seconds), DEVGPU_WORKSPACE_MAX_SECONDS),
+        }
         receipt["status"] = "running"
         receipt["updated_at"] = now_iso()
         _atomic_write_json(recovery_file, receipt)
         started = time.monotonic()
         pipeline_id: str | None = None
         while True:
-            if time.monotonic() - started > timeout_seconds:
+            if time.monotonic() - started > min(float(timeout_seconds), DEVGPU_WORKSPACE_MAX_SECONDS):
                 raise CampaignRepositoryError(f"Dev GPU recovery workspace timed out: {workspace_sn}")
             status, pipeline_id = _workspace_recovery_stage_status(str(source["repository"]), workspace_sn, runner)
             receipt["workspace"].update({"status": status, "pipeline_id": pipeline_id})
@@ -3125,7 +3180,7 @@ def launch_fresh_campaign_with_devgpu(
     run_dir: str | Path,
     execute: bool = False,
     wait: bool = True,
-    timeout_seconds: float = 14_400,
+    timeout_seconds: float = DEVGPU_WORKSPACE_MAX_SECONDS,
     poll_seconds: float = 10.0,
     runner: JsonRunner = run_cnb,
     transport: str | None = None,
@@ -3225,13 +3280,10 @@ def launch_fresh_campaign_with_devgpu(
         _atomic_write_json(launch_file, receipt)
         if not capacity["clean"]:
             raise CampaignRepositoryError("Dev GPU capacity preflight failed: " + "; ".join(capacity["errors"]))
-        visible_workspaces = _running_workspaces(str(source["repository"]), runner)
-        receipt["workspace_preflight"] = {
-            "status": "clean" if not visible_workspaces else "blocked",
-            "running_workspaces": visible_workspaces,
-        }
+        workspace_preflight = _workspace_preflight(str(source["repository"]), runner)
+        receipt["workspace_preflight"] = workspace_preflight
         _atomic_write_json(launch_file, receipt)
-        if visible_workspaces:
+        if workspace_preflight["status"] != "clean":
             raise CampaignRepositoryError(
                 "fresh Dev GPU launch found a visible running workspace for the disposable campaign"
             )
@@ -3242,38 +3294,20 @@ def launch_fresh_campaign_with_devgpu(
         receipt["status"] = "starting_workspace"
         receipt["updated_at"] = now_iso()
         _atomic_write_json(launch_file, receipt)
-        response = runner(["cnb", "workspace", "start-workspace", "--repo", str(source["repository"]), "--branch", str(overlay["branch"]), "--verbose"])
-        try:
-            workspace_sn = _extract_build_sn(response)
-            reused_workspace = False
-        except CampaignRepositoryError as start_error:
-            # CNB documents that start-workspace can return only a WebIDE URL
-            # when an environment already exists.  A URL is not execution proof;
-            # resolve exactly one running workspace for this receipt-bound branch.
-            candidates = _running_workspaces(
-                str(source["repository"]), runner, branch=str(overlay["branch"])
-            )
-            candidate_sns = [
-                str(item.get("sn"))
-                for item in candidates
-                if isinstance(item.get("sn"), str) and str(item["sn"]).strip()
-            ]
-            if len(candidate_sns) != 1:
-                raise CampaignRepositoryError(
-                    "workspace start returned no SN and did not resolve exactly one receipt-bound running workspace"
-                ) from start_error
-            workspace_sn = candidate_sns[0]
-            reused_workspace = True
+        workspace_sn, reused_workspace = _start_receipt_bound_workspace(
+            repository=str(source["repository"]), branch=str(overlay["branch"]), runner=runner
+        )
         receipt["workspace"] = {
             "sn": workspace_sn,
             "status": "submitted",
             "reused_visible_workspace": reused_workspace,
+            "timeout_seconds": min(float(timeout_seconds), DEVGPU_WORKSPACE_MAX_SECONDS),
         }
         receipt["status"] = "running"
         _atomic_write_json(launch_file, receipt)
         started = time.monotonic()
         while True:
-            if time.monotonic() - started > timeout_seconds:
+            if time.monotonic() - started > min(float(timeout_seconds), DEVGPU_WORKSPACE_MAX_SECONDS):
                 raise CampaignRepositoryError(f"fresh Dev GPU workspace timed out: {workspace_sn}")
             status, pipeline_id = _workspace_recovery_stage_status(str(source["repository"]), workspace_sn, runner)
             receipt["workspace"].update({"status": status, "pipeline_id": pipeline_id})
