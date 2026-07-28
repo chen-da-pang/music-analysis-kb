@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import subprocess
@@ -47,6 +48,8 @@ def test_direct_wrapper_starts_short_launcher_without_claude(monkeypatch, tmp_pa
     inventory.write_text('{"songs": []}\n', encoding="utf-8")
     operations = _operation_file(tmp_path)
     profile = _profile_file(tmp_path)
+    source_queue = tmp_path / "primary.jsonl"
+    source_queue.write_text('{"identity_key":"kugou:1"}\n', encoding="utf-8")
     calls: list[list[str]] = []
 
     def fake_run(command, **_kwargs):
@@ -57,10 +60,19 @@ def test_direct_wrapper_starts_short_launcher_without_claude(monkeypatch, tmp_pa
             queue = Path(values[values.index("--output") + 1])
             queue.parent.mkdir(parents=True, exist_ok=True)
             queue.write_text('{"identity_key":"kugou:1"}\n', encoding="utf-8")
+            source = Path(values[values.index("--source-queue") + 1])
             return subprocess.CompletedProcess(
                 values,
                 0,
-                json.dumps({"queued": 1, "retry_statuses": ["no_results", "failed"], "status_counts": {"no_results": 1, "failed": 0}}),
+                json.dumps(
+                    {
+                        "queued": 1,
+                        "retry_statuses": ["no_results", "failed"],
+                        "status_counts": {"no_results": 1, "failed": 0},
+                        "source_queue": str(source),
+                        "source_queue_sha256": "fixture-source-queue-sha",
+                    }
+                ),
                 "",
             )
         if script == "launch_music_fallback_worker.py":
@@ -97,6 +109,8 @@ def test_direct_wrapper_starts_short_launcher_without_claude(monkeypatch, tmp_pa
             str(operations),
             "--profile",
             str(profile),
+            "--source-queue",
+            str(source_queue),
             "--proxy",
             "http://127.0.0.1:7890",
         ],
@@ -106,7 +120,9 @@ def test_direct_wrapper_starts_short_launcher_without_claude(monkeypatch, tmp_pa
 
     summary = json.loads(capsys.readouterr().out)
     launcher_calls = [call for call in calls if Path(call[1]).name == "launch_music_fallback_worker.py"]
+    prepare_calls = [call for call in calls if Path(call[1]).name == "prepare_fallback_queue.py"]
     assert len(launcher_calls) == 1
+    assert prepare_calls[0][prepare_calls[0].index("--source-queue") + 1] == str(source_queue.resolve())
     launcher = launcher_calls[0]
     assert launcher[launcher.index("--parallelism") + 1] == "2"
     assert launcher[launcher.index("--proxy") + 1] == "http://127.0.0.1:7890"
@@ -115,9 +131,25 @@ def test_direct_wrapper_starts_short_launcher_without_claude(monkeypatch, tmp_pa
     assert all("claude" not in value.casefold() for call in calls for value in call)
     assert summary["executor"] == "direct"
     assert summary["execution"] == "direct_detached"
+    assert summary["source_queue"] == str(source_queue.resolve())
     assert summary["parallelism"] == 2
     assert summary["atom_exit_code"] == 0
     assert Path(summary["receipt"]).is_file()
+
+
+def test_resume_rejects_changed_source_queue(tmp_path: Path) -> None:
+    module = _module(WRAPPER, "run_claude_fallback_source_resume")
+    source_queue = tmp_path / "primary.jsonl"
+    source_queue.write_text('{"identity_key":"kugou:1"}\n', encoding="utf-8")
+    manifest = {
+        "source_queue": str(source_queue.resolve()),
+        "source_queue_sha256": hashlib.sha256(source_queue.read_bytes()).hexdigest(),
+    }
+
+    module.verify_resumed_source_queue(manifest, source_queue.resolve())
+    source_queue.write_text('{"identity_key":"kugou:2"}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="source queue digest changed"):
+        module.verify_resumed_source_queue(manifest, source_queue.resolve())
 
 
 def test_invalid_worker_python_stops_before_any_launcher(monkeypatch, tmp_path: Path) -> None:

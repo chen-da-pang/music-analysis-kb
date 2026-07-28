@@ -201,3 +201,57 @@ def test_prepare_fallback_queue_rejects_nonretryable_status(tmp_path: Path) -> N
     )
     assert result.returncode != 0
     assert "unsupported retry statuses: downloaded" in result.stderr
+
+
+def test_prepare_fallback_queue_scopes_to_unique_primary_queue_identities(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(
+        json.dumps(
+            {
+                "songs": [
+                    {"identity_key": "kugou:current", "title": "Current", "artist": "Artist", "download": {"status": "no_results"}},
+                    {"identity_key": "kugou:historical", "title": "Historical", "artist": "Artist", "download": {"status": "failed"}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    source_queue = tmp_path / "primary.jsonl"
+    source_queue.write_text(json.dumps({"identity_key": "kugou:current"}) + "\n", encoding="utf-8")
+    queue = tmp_path / "fallback.jsonl"
+    result = subprocess.run(
+        [
+            sys.executable, str(PREPARE), "--inventory", str(inventory), "--output", str(queue),
+            "--profile", str(PROFILE), "--statuses", "no_results,failed", "--source-queue", str(source_queue),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    manifest = json.loads(result.stdout)
+    rows = [json.loads(line) for line in queue.read_text(encoding="utf-8").splitlines()]
+    assert manifest["source_queue_identity_keys"] == 1
+    assert manifest["source_queue_unqueued_identity_keys"] == 0
+    assert manifest["queued"] == 1
+    assert [row["identity_key"] for row in rows] == ["kugou:current"]
+
+
+def test_prepare_fallback_queue_rejects_duplicate_source_identity(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text('{"songs": []}\n', encoding="utf-8")
+    source_queue = tmp_path / "primary.jsonl"
+    source_queue.write_text(
+        '{"identity_key":"kugou:current"}\n{"identity_key":"kugou:current"}\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable, str(PREPARE), "--inventory", str(inventory), "--output", str(tmp_path / "fallback.jsonl"),
+            "--profile", str(PROFILE), "--statuses", "no_results,failed", "--source-queue", str(source_queue),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "repeats identity 'kugou:current' on lines 1 and 2" in result.stderr

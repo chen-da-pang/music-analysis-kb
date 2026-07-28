@@ -11,6 +11,7 @@ launcher; Claude never owns the long-running download process.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -230,6 +231,25 @@ def processed_count(progress: dict[str, Any]) -> int:
     return sum(int(summary.get(key, 0)) for key in SUMMARY_KEYS)
 
 
+def verify_resumed_source_queue(manifest: dict[str, Any], source_queue: Path | None) -> None:
+    """Reject an attempt to change the receipt-bound source scope on resume."""
+
+    if source_queue is None:
+        return
+    expected_path = manifest.get("source_queue")
+    expected_sha256 = manifest.get("source_queue_sha256")
+    if not isinstance(expected_path, str) or not expected_path:
+        raise RuntimeError("cannot resume an unscoped fallback run with --source-queue")
+    if source_queue != Path(expected_path):
+        raise RuntimeError(
+            f"cannot resume fallback run with a different source queue: {source_queue} != {expected_path}"
+        )
+    if not isinstance(expected_sha256, str) or not expected_sha256:
+        raise RuntimeError("cannot resume source-scoped fallback run without source queue digest")
+    if hashlib.sha256(source_queue.read_bytes()).hexdigest() != expected_sha256:
+        raise RuntimeError("cannot resume fallback run: source queue digest changed after the initial launch")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, required=True)
@@ -243,12 +263,18 @@ def main() -> int:
     parser.add_argument("--operations-file", type=Path, default=Path(__file__).resolve().parents[1] / "references" / "validated-operations.json")
     parser.add_argument("--profile", type=Path, default=Path(__file__).resolve().parents[1] / "references" / "fallback-download-profile.json")
     parser.add_argument("--retry-statuses", help="Override comma-separated retry statuses from the fallback profile")
+    parser.add_argument(
+        "--source-queue",
+        type=Path,
+        help="Optional primary JSONL queue; scope fallback to identities attempted by that queue",
+    )
     parser.add_argument("--worker-python", help="Python interpreter that imports musicdl; defaults to MUSICDL_PYTHON or a validated local interpreter")
     args = parser.parse_args()
     started_at = now_iso()
     workspace = args.workspace.expanduser().resolve()
     operations = args.operations_file.expanduser().resolve()
     profile = args.profile.expanduser().resolve()
+    source_queue = args.source_queue.expanduser().resolve() if args.source_queue else None
     load_validated_operations(operations, required_atom="fallback_download")
     worker_python = resolve_musicdl_python(args.worker_python)
     profile_data = load_json(profile)
@@ -269,23 +295,23 @@ def main() -> int:
         if not manifest_path.is_file():
             raise RuntimeError(f"cannot resume fallback launch without queue manifest: {manifest_path}")
         manifest = load_json(manifest_path)
+        verify_resumed_source_queue(manifest, source_queue)
     else:
-        manifest = run_checked(
-            [
-                sys.executable,
-                str(scripts / "prepare_fallback_queue.py"),
-                "--inventory",
-                str(inventory),
-                "--output",
-                str(queue),
-                "--profile",
-                str(profile),
-                "--statuses",
-                retry_statuses,
-            ],
-            workspace,
-            args.timeout_seconds,
-        )
+        prepare_command = [
+            sys.executable,
+            str(scripts / "prepare_fallback_queue.py"),
+            "--inventory",
+            str(inventory),
+            "--output",
+            str(queue),
+            "--profile",
+            str(profile),
+            "--statuses",
+            retry_statuses,
+        ]
+        if source_queue is not None:
+            prepare_command.extend(["--source-queue", str(source_queue)])
+        manifest = run_checked(prepare_command, workspace, args.timeout_seconds)
         atomic_write_json(manifest_path, manifest)
     values = launcher_values(
         scripts=scripts,
@@ -368,6 +394,7 @@ def main() -> int:
         "progress": str(progress),
         "operations_sha256": sha256_file(operations),
         "profile": str(profile),
+        "source_queue": manifest.get("source_queue"),
     }
     atom_exit_code = 0
     if execution != "skipped_empty_queue":
@@ -414,6 +441,8 @@ def main() -> int:
             "queue": str(queue),
             "retry_statuses": manifest["retry_statuses"],
             "worker_python": worker_python,
+            "source_queue": manifest.get("source_queue"),
+            "source_queue_sha256": manifest.get("source_queue_sha256"),
         },
         "outputs": summary,
         "operations_file": str(operations),
