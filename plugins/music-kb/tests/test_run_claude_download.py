@@ -133,7 +133,7 @@ def test_direct_executor_runs_one_worker_without_claude(
         if script == "download_music_queue.py":
             direct_queue = Path(values[values.index("--queue") + 1])
             assert direct_queue.name == "download-queue-direct.jsonl"
-            assert values[values.index("--lookup-mode") + 1] == "exact-page-first"
+            assert values[values.index("--lookup-mode") + 1] == "search-only"
             assert [json.loads(line)["identity_key"] for line in direct_queue.read_text(encoding="utf-8").splitlines()] == [
                 "kugou:1",
                 "kugou:2",
@@ -185,6 +185,8 @@ def test_direct_executor_runs_one_worker_without_claude(
             "direct-fixture",
             "--operations-file",
             str(operations),
+            "--executor",
+            "direct",
         ],
     )
 
@@ -195,7 +197,7 @@ def test_direct_executor_runs_one_worker_without_claude(
     assert len(worker_calls) == 1
     assert all("claude" not in value.casefold() for call in calls for value in call)
     assert summary["executor"] == "direct"
-    assert summary["lookup_mode"] == "exact-page-first"
+    assert summary["lookup_mode"] == "search-only"
     assert summary["queued_for_attempt"] == 2
     assert summary["worker_progress"] == {
         "queue": 2,
@@ -209,6 +211,190 @@ def test_direct_executor_runs_one_worker_without_claude(
     assert summary["timing"]["worker_ms"] >= 0
 
 
+def test_claude_nonzero_after_launch_receipt_still_waits_for_completion(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _module()
+    workspace = tmp_path / "workspace"
+    source = workspace / "source.json"
+    source.parent.mkdir(parents=True)
+    source.write_text("[]\n", encoding="utf-8")
+    operations = tmp_path / "operations.json"
+    operations.write_text(
+        json.dumps({"schema_version": 1, "operations": {"claude_download": {"effective_method": "fixture"}}}),
+        encoding="utf-8",
+    )
+    rows = [_row("kugou:1"), _row("kugou:2")]
+    calls: list[list[str]] = []
+    prompts: list[str] = []
+
+    def fake_run(command, **kwargs):
+        values = [str(value) for value in command]
+        calls.append(values)
+        if values[0] == "claude":
+            prompts.append(str(kwargs.get("input") or ""))
+            run_dir = workspace / "data" / "download_runs" / "claude-fixture"
+            launch = run_dir / "primary-worker-launch.json"
+            completion = run_dir / "primary-worker-completion.json"
+            progress = run_dir / "progress.json"
+            inventory = workspace / "data" / "song_inventory.json"
+            audio_root = workspace / "music_downloads" / "KugouMusicClient"
+            audio_root.mkdir(parents=True, exist_ok=True)
+            inventory.write_text(
+                json.dumps(
+                    {
+                        "songs": [
+                            {"identity_key": "kugou:1", "download": {"status": "downloaded", "path": str(audio_root / "one.mp3")}},
+                            {"identity_key": "kugou:2", "download": {"status": "downloaded", "path": str(audio_root / "two.mp3")}},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (audio_root / "one.mp3").write_bytes(b"one")
+            (audio_root / "two.mp3").write_bytes(b"two")
+            progress.write_text(
+                json.dumps(
+                    {
+                        "finished_at": "2026-07-28T00:00:00Z",
+                        "results": {
+                            "kugou:1": {"status": "downloaded"},
+                            "kugou:2": {"status": "downloaded"},
+                        },
+                        "summary": {"downloaded": 2, "skipped_existing": 0, "failed": 0, "no_results": 0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_dir.mkdir(parents=True, exist_ok=True)
+            launch.write_text(
+                json.dumps(
+                    {
+                        "status": "launched",
+                        "run_id": "claude-fixture",
+                        "supervisor_pid": __import__("os").getpid(),
+                        "completion_receipt": str(completion),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completion.write_text(json.dumps({"status": "succeeded", "exit_code": 0, "parallelism": 2}), encoding="utf-8")
+            return subprocess.CompletedProcess(values, 17, "{\"status\":\"launched\"}", "Claude returned late failure")
+        script = Path(values[1]).name
+        if script == "build_song_inventory.py":
+            inventory = Path(values[values.index("--inventory") + 1])
+            inventory.parent.mkdir(parents=True, exist_ok=True)
+            inventory.write_text(json.dumps({"songs": []}), encoding="utf-8")
+            return subprocess.CompletedProcess(values, 0, json.dumps({"songs": 0}), "")
+        if script == "prepare_download_queue.py":
+            queue = Path(values[values.index("--output") + 1])
+            queue.parent.mkdir(parents=True, exist_ok=True)
+            queue.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            return subprocess.CompletedProcess(values, 0, json.dumps({"queued": 2}), "")
+        raise AssertionError(values)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        module.sys,
+        "argv",
+        [
+            "run_claude_download.py",
+            "--workspace",
+            str(workspace),
+            "--source",
+            str(source),
+            "--run-id",
+            "claude-fixture",
+            "--operations-file",
+            str(operations),
+        ],
+    )
+
+    assert module.main() == 0
+    summary = json.loads(capsys.readouterr().out)
+    claude_calls = [call for call in calls if call and call[0] == "claude"]
+    assert len(claude_calls) == 1
+    assert len(prompts) == 1
+    assert "launch_music_primary_worker.py" in prompts[0]
+    assert "--parallelism 2" in prompts[0]
+    assert "--lookup-mode search-only" in prompts[0]
+    assert summary["executor"] == "claude"
+    assert summary["execution"] == "claude_detached"
+    assert summary["claude_invocations"] == 1
+    assert summary["parallelism"] == 2
+    assert summary["worker_progress"]["unresolved"] == []
+    assert summary["claude_exit_code"] == 17
+    assert "completion receipt is authoritative" in summary["claude_error"]
+    assert summary["chunks"][0]["complete"] is True
+
+
+def test_same_run_id_resumes_existing_supervisor_without_rebuilding_or_relaunching(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _module()
+    workspace = tmp_path / "workspace"
+    source = workspace / "source.json"
+    source.parent.mkdir(parents=True)
+    source.write_text("[]\n", encoding="utf-8")
+    operations = tmp_path / "operations.json"
+    operations.write_text(
+        json.dumps({"schema_version": 1, "operations": {"claude_download": {"effective_method": "fixture"}}}),
+        encoding="utf-8",
+    )
+    run_id = "resume-fixture"
+    run_dir = workspace / "data" / "download_runs" / run_id
+    run_dir.mkdir(parents=True)
+    rows = [_row("kugou:1")]
+    (run_dir / "download_queue.jsonl").write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")
+    (run_dir / "download-queue-primary.jsonl").write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")
+    (run_dir / "queue_manifest.json").write_text(json.dumps({"queued": 1}), encoding="utf-8")
+    completion = run_dir / "primary-worker-completion.json"
+    (run_dir / "primary-worker-launch.json").write_text(
+        json.dumps(
+            {
+                "status": "launched",
+                "run_id": run_id,
+                "supervisor_pid": __import__("os").getpid(),
+                "completion_receipt": str(completion),
+            }
+        ),
+        encoding="utf-8",
+    )
+    completion.write_text(json.dumps({"status": "succeeded", "exit_code": 0, "parallelism": 2}), encoding="utf-8")
+    audio = workspace / "music_downloads" / "KugouMusicClient" / "one.mp3"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"one")
+    inventory = workspace / "data" / "song_inventory.json"
+    inventory.write_text(
+        json.dumps({"songs": [{"identity_key": "kugou:1", "download": {"status": "downloaded", "path": str(audio)}}]}),
+        encoding="utf-8",
+    )
+    (run_dir / "progress.json").write_text(
+        json.dumps({"finished_at": "2026-07-28T00:00:00Z", "results": {"kugou:1": {"status": "downloaded"}}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(module.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("resume must not rebuild or relaunch")))
+    monkeypatch.setattr(
+        module.sys,
+        "argv",
+        [
+            "run_claude_download.py",
+            "--workspace", str(workspace),
+            "--source", str(source),
+            "--run-id", run_id,
+            "--operations-file", str(operations),
+        ],
+    )
+
+    assert module.main() == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["execution"] == "resumed_detached"
+    assert summary["claude_invocations"] == 0
+    assert summary["inventory_output"]["resumed"] is True
+    assert summary["chunks"][0]["complete"] is True
+
+
 def test_claude_prompt_uses_one_monitor_wait_and_default_chunk_is_bounded() -> None:
     module = _module()
     prompt = module.render_prompt("python3 worker.py", chunk_index=1, chunk_total=3)
@@ -216,3 +402,11 @@ def test_claude_prompt_uses_one_monitor_wait_and_default_chunk_is_bounded() -> N
     assert module.DEFAULT_CHUNK_SIZE == 8
     assert "Monitor" in prompt
     assert "while/kill/sleep" in prompt
+
+
+def test_alias_run_primary_download_is_thin_wrapper() -> None:
+    alias = Path(__file__).parents[1] / "scripts" / "run_primary_download.py"
+    assert alias.is_file()
+    text = alias.read_text(encoding="utf-8")
+    assert "run_claude_download.py" in text
+    assert "alias" in text.casefold() or "wrapper" in text.casefold()

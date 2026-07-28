@@ -175,9 +175,14 @@ export MUSICDL_PYTHON=/absolute/path/to/python-that-imports-musicdl
 python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_fallback.py \
   --workspace "$MUSIC_WORKSPACE" \
   --run-id <run-id> \
+  --source-queue data/download_runs/<primary-run-id>/download_queue.jsonl \
   --worker-python "$MUSICDL_PYTHON" \
   --proxy http://127.0.0.1:7890
 ```
+
+For a weekly recovery, `--source-queue` is required: it must be a primary JSONL
+queue with unique identities, and only those identities that are currently
+`failed` or `no_results` may enter fallback. It never sweeps historical inventory.
 
 For a real run, the wrapper validates the `fallback_download` operation record,
 proves `--worker-python` can import `musicdl`, then starts the short detached
