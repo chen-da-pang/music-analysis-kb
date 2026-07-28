@@ -196,3 +196,24 @@ See [docs/grok-plugin.md](../../docs/grok-plugin.md) for install and validation.
 ## Grok host
 
 Publisher download/weekly: Grok orchestrates with `--executor direct` only. See [docs/grok-plugin.md](../../docs/grok-plugin.md) and skills under `skills/`.
+
+### Script aliases (Grok-friendly names)
+
+Historical entry points keep the `run_claude_*.py` names for receipt compatibility.
+Thin wrapper aliases map to the same scripts for Grok/docs:
+
+| Alias | Delegates to |
+| --- | --- |
+| `scripts/run_primary_download.py` | `scripts/run_claude_download.py` |
+| `scripts/run_fallback.py` | `scripts/run_claude_fallback.py` |
+| `scripts/run_lyrics_backfill.py` | `scripts/run_claude_lyrics_backfill.py` |
+
+Example (primary download):
+
+```bash
+python3 scripts/run_primary_download.py \
+  --workspace /path/to/music-workspace \
+  --source data/processed/kugou/<songs-export>.json \
+  --run-id <run-id> \
+  --executor direct
+```

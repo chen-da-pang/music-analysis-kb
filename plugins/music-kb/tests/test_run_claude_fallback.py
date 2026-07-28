@@ -372,3 +372,11 @@ def test_parallel_shards_share_one_total_timeout(monkeypatch, tmp_path: Path) ->
     assert processes[0].timeouts == [9.0]
     assert processes[1].killed
     assert processes[1].timeouts == [None]
+
+
+def test_alias_run_fallback_is_thin_wrapper() -> None:
+    alias = Path(__file__).parents[1] / "scripts" / "run_fallback.py"
+    assert alias.is_file()
+    text = alias.read_text(encoding="utf-8")
+    assert "run_claude_fallback.py" in text
+    assert "alias" in text.casefold() or "wrapper" in text.casefold()

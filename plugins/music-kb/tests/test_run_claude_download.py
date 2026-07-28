@@ -216,3 +216,11 @@ def test_claude_prompt_uses_one_monitor_wait_and_default_chunk_is_bounded() -> N
     assert module.DEFAULT_CHUNK_SIZE == 8
     assert "Monitor" in prompt
     assert "while/kill/sleep" in prompt
+
+
+def test_alias_run_primary_download_is_thin_wrapper() -> None:
+    alias = Path(__file__).parents[1] / "scripts" / "run_primary_download.py"
+    assert alias.is_file()
+    text = alias.read_text(encoding="utf-8")
+    assert "run_claude_download.py" in text
+    assert "alias" in text.casefold() or "wrapper" in text.casefold()

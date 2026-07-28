@@ -55,7 +55,13 @@ grok plugin validate plugins/music-kb
 
 Publisher skills default to **direct** executors. Script names such as
 `run_claude_download.py` are historical atom entry points and do not require
-Claude.
+Claude. Use the Grok alias for convenience:
+
+```bash
+python3 "$MUSIC_KB_PLUGIN/scripts/run_primary_download.py" \
+  --workspace "$MUSIC_WORKSPACE" \
+  ...
+```
 
 ### Plugin root vs workspace vs git repo (required)
 
@@ -115,6 +121,10 @@ uv run --project "$MUSIC_KB_PLUGIN" music-kb --json doctor
 - 周常：`music-kb-weekly-orchestrator`（优先一条 `weekly-run`）
 
 历史脚本名 `run_claude_*.py`、atom `claude_download` 仅为收据兼容。
+Grok 友好别名（thin wrapper）：
+- `run_primary_download.py` → `run_claude_download.py`
+- `run_fallback.py` → `run_claude_fallback.py`
+- `run_lyrics_backfill.py` → `run_claude_lyrics_backfill.py`
 
 ## MCP
 

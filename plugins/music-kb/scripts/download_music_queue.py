@@ -72,6 +72,14 @@ _METADATA_LINE = re.compile(
     re.IGNORECASE,
 )
 
+# Circuit breaker for business recovery on primary direct lookup
+# Track consecutive direct_musicdl_no_download_url / 20028 failures
+# After N=5: skip title search, mark failed quickly
+# After M=10: stop entire primary and exit with partial progress
+# Unattempted songs now get terminal state (failed) so they are eligible for fallback
+CIRCUIT_BREAKER_CONSECUTIVE_LIMIT = 5
+CIRCUIT_BREAKER_TERMINAL_LIMIT = 10
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1360,6 +1368,10 @@ def run_download(
         print(json.dumps(summary, ensure_ascii=False))
         return summary
 
+    # Circuit breaker state (business recovery)
+    consecutive_direct_failures = 0
+    early_exit = False
+
     worker_started = time.monotonic()
     try:
         from musicdl.musicdl import MusicClient
@@ -1421,6 +1433,7 @@ def run_download(
             commit_state(timing, item_started=item_started)
             continue
         lookup_started = time.monotonic()
+        lookup_ms = 0.0
         lookup_method = SEARCH_DOWNLOAD_LOOKUP_METHOD
         lookup_evidence: dict[str, Any] = {}
         best: Any | None = None
@@ -1434,6 +1447,72 @@ def run_download(
                 timeout=item_timeout_seconds,
             )
             lookup_method = str(lookup_evidence.get("lookup_method") or SEARCH_DOWNLOAD_LOOKUP_METHOD)
+
+            # Circuit breaker: track consecutive direct_musicdl_no_download_url / 20028 failures
+            direct_kind = lookup_evidence.get("direct_lookup_response_kind")
+            if direct_kind in {"direct_musicdl_no_download_url", "20028"}:
+                consecutive_direct_failures += 1
+                if consecutive_direct_failures >= CIRCUIT_BREAKER_CONSECUTIVE_LIMIT:
+                    # skip title search, mark failed quickly
+                    summary["failed"] += 1
+                    progress.setdefault("downloaded", {}).pop(identity, None)
+                    audit = {
+                        "lookup_method": lookup_method,
+                        "direct_lookup_response_kind": direct_kind,
+                        **lookup_evidence,
+                    }
+                    record_attempt(item, "failed", error=f"circuit breaker: consecutive direct failures {consecutive_direct_failures} >= {CIRCUIT_BREAKER_CONSECUTIVE_LIMIT}", **audit)
+                    progress["results"][identity] = {
+                        "status": "failed",
+                        "error": f"circuit breaker: consecutive direct failures {consecutive_direct_failures} >= {CIRCUIT_BREAKER_CONSECUTIVE_LIMIT}",
+                        "at": now_iso(),
+                        **audit,
+                    }
+                    timing = record_item_timing(
+                        identity,
+                        item_started=item_started,
+                        status="failed",
+                        lookup_method=lookup_method,
+                        lookup_ms=elapsed_ms(lookup_started),
+                        error=f"circuit breaker: consecutive direct failures {consecutive_direct_failures} >= {CIRCUIT_BREAKER_CONSECUTIVE_LIMIT}",
+                    )
+                    commit_state(timing, item_started=item_started)
+                    if consecutive_direct_failures >= CIRCUIT_BREAKER_TERMINAL_LIMIT:
+                        early_exit = True
+                        # mark remaining unattempted songs as terminal failed state so eligible for fallback
+                        for rem in selected[index + 1 :]:
+                            rem_identity = str(rem.get("identity_key") or rem.get("title_artist_key") or "")
+                            if rem_identity and rem_identity not in progress["results"]:
+                                rem_item = update_inventory_song(inventory, rem)
+                                record_attempt(rem_item, "failed", error="circuit breaker: primary stopped early with partial progress", direct_lookup_response_kind="circuit_breaker_terminal")
+                                progress["results"][rem_identity] = {
+                                    "status": "failed",
+                                    "error": "circuit breaker: primary stopped early with partial progress",
+                                    "at": now_iso(),
+                                }
+                                timing = record_item_timing(
+                                    rem_identity,
+                                    item_started=item_started,
+                                    status="failed",
+                                )
+                                summary["failed"] += 1
+                        # save partial progress and exit
+                        partial_timings = [
+                            progress["item_timings"][k]
+                            for k in list(progress["item_timings"].keys())
+                            if k in {str(c.get("identity_key") or c.get("title_artist_key") or "") for c in selected[: index + 1]}
+                        ]
+                        summary["timing"] = summarize_download_timing(partial_timings, worker_started)
+                        progress["finished_at"] = now_iso()
+                        progress["summary"] = summary
+                        atomic_write_json(progress_path, progress)
+                        inventory["generated_at"] = now_iso()
+                        inventory["counts"] = recompute_counts(inventory)
+                        atomic_write_json(inventory_path, inventory)
+                        print(json.dumps(summary, ensure_ascii=False))
+                        return summary
+                    continue
+                # else fallthrough to title search fallback
 
         if best is None:
             lookup_method = SEARCH_DOWNLOAD_LOOKUP_METHOD
