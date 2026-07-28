@@ -98,6 +98,15 @@ the next invocation with the same `--run-id` is a campaign resume. It restores
 the on-disk state and receipt, verifies the exact run id/repository prefix,
 GitHub commit, runtime digest, transport, and manifest hash/count, and reuses
 only that repository. A new run still refuses any leftover campaign repository.
+For a different fresh run, an old campaign repository remains a blocker by
+default. The sole exception is an explicit `--retained-campaign-receipt`: it
+must prove one exact prefix-mapped repository is `failed` or `interrupted`, was
+created and pushed, has no delivery, and names a workspace that CNB reports as
+not running. The preflight records the supplied receipt path/hash and still
+requires all other prefix repositories to be absent. It passes that same proof
+to repository preparation, where quota, target-absence, transport and the new
+manifest's actual byte estimate are checked again. Never infer this exception
+from repository discovery or use it for a completed/mismatched/active receipt.
 When that receipt is already `completed` and its delivery path/hash/count still
 match, reuse the verified delivery and skip another campaign submit; only an
 incomplete receipt may trigger a shard retry.
@@ -115,7 +124,8 @@ be purged, so inventory—not file presence alone—is the dedupe record.
 2. **`cnb_storage_preflight`** — on a fresh path run the disposable-campaign
    preflight. Verify the protected `moss-music-runner` repository/main and the
    pinned image digest, organization quota headroom, target absence, and no
-   leftover repositories matching `campaign_repository_prefix`. Do not treat
+   leftover repositories matching `campaign_repository_prefix`; only the
+   explicit receipt-bound retained exception above may coexist. Do not treat
    historical orphan LFS objects in the protected runtime repository as a fresh
    campaign blocker or attempt to delete that runtime. The legacy
    `--cnb-command` path alone uses the old protected-repository storage gate.

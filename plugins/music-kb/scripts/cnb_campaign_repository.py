@@ -763,6 +763,79 @@ def _campaign_repositories(policy: Mapping[str, Any], runner: JsonRunner) -> lis
     return sorted(set(names))
 
 
+def _running_workspaces(repository: str, runner: JsonRunner) -> list[dict[str, Any]]:
+    """Return visible running workspaces for one disposable repository.
+
+    A 404 is an audited absence here.  Any other API error still reaches the
+    caller as a hard preflight failure through ``run_cnb``.
+    """
+
+    response, absent = _cnb_optional(
+        [
+            "cnb",
+            "workspace",
+            "list-workspaces",
+            "--slug",
+            repository,
+            "--status",
+            "running",
+            "--page",
+            "1",
+            "--page-size",
+            "100",
+            "--verbose",
+        ],
+        runner,
+    )
+    if absent or response is None:
+        return []
+    payload = _response_data(response) or {}
+    rows = payload.get("list", []) if isinstance(payload, Mapping) else []
+    return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+
+def retained_campaign_receipt_validation_errors(
+    policy: Mapping[str, Any], receipt: Mapping[str, Any], *, repository: str
+) -> list[str]:
+    """Validate the deliberately narrow fresh-run retained-repository exception."""
+
+    errors: list[str] = []
+    expected_prefix = f"{policy['organization_slug']}/{policy['campaign_repository_prefix']}"
+    if not repository.startswith(expected_prefix):
+        errors.append("retained repository does not match the strict campaign prefix")
+    if receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION:
+        errors.append("retained receipt schema_version does not match")
+    if receipt.get("atom") != "cnb_campaign_repository":
+        errors.append("retained receipt atom is not cnb_campaign_repository")
+    if receipt.get("status") not in {"failed", "interrupted"}:
+        errors.append("retained receipt status is not failed or interrupted")
+    receipt_run_id = str(receipt.get("run_id", "")).strip()
+    try:
+        _, expected_repository = _full_repository_slug(policy, receipt_run_id)
+    except CampaignRepositoryError:
+        expected_repository = ""
+        errors.append("retained receipt run_id is not a safe campaign identity")
+    if receipt.get("repository") != repository:
+        errors.append("retained receipt repository does not match the explicit retained repository")
+    if expected_repository and repository != expected_repository:
+        errors.append("retained receipt repository does not match its strict run-id/prefix mapping")
+    if receipt.get("repository_name") != repository.split("/", 1)[-1]:
+        errors.append("retained receipt repository_name does not match the explicit retained repository")
+    if receipt.get("repository_prefix") != policy.get("campaign_repository_prefix"):
+        errors.append("retained receipt repository_prefix does not match policy")
+    if receipt.get("organization") != policy.get("organization_slug"):
+        errors.append("retained receipt organization does not match policy")
+    if receipt.get("repository_created") is not True:
+        errors.append("retained receipt does not prove repository creation")
+    if receipt.get("repository_pushed") is not True:
+        errors.append("retained receipt does not prove repository push")
+    if receipt.get("delivery") is not None:
+        errors.append("retained receipt already has a canonical delivery")
+    if not str(receipt.get("workspace", "")).strip():
+        errors.append("retained receipt lacks receipt-bound workspace provenance")
+    return sorted(set(errors))
+
+
 def campaign_preflight(
     policy: Mapping[str, Any],
     *,
@@ -770,6 +843,8 @@ def campaign_preflight(
     estimated_bytes: int = 0,
     target_repository: str | None = None,
     resume_repository: str | None = None,
+    retained_campaign_receipt: Mapping[str, Any] | None = None,
+    retained_campaign_receipt_path: str | None = None,
     largest_file_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Read-only preflight for the disposable campaign route."""
@@ -797,8 +872,21 @@ def campaign_preflight(
                 raise CampaignRepositoryError("resume repository name does not map to a safe run_id")
         except CampaignRepositoryError as exc:
             raise CampaignRepositoryError(f"resume repository is not an exact campaign slug: {resume_repository}") from exc
+    if retained_campaign_receipt is not None and resume_repository is not None:
+        raise CampaignRepositoryError("retained campaign receipt override is only valid for a fresh campaign")
+    retained_repository: str | None = None
+    retained_receipt_errors: list[str] = []
+    retained_running_workspaces: list[dict[str, Any]] = []
+    if retained_campaign_receipt is not None:
+        retained_repository = str(retained_campaign_receipt.get("repository", "")).strip()
+        retained_receipt_errors = retained_campaign_receipt_validation_errors(
+            policy, retained_campaign_receipt, repository=retained_repository
+        )
+        if not retained_receipt_errors:
+            retained_running_workspaces = _running_workspaces(retained_repository, runner)
+    allowed_campaign_repository = resume_repository or retained_repository
     other_campaign_repositories = [
-        value for value in campaign_repositories if value != resume_repository
+        value for value in campaign_repositories if value != allowed_campaign_repository
     ]
     target_present = bool(target_repository and _repo_exists(target_repository, runner))
     object_free = quota["object"] - volume["object"]
@@ -813,6 +901,14 @@ def campaign_preflight(
         "git_headroom": git_free >= minimum_git_free,
         "runtime_digest_policy_consistent": str(campaign["runtime_image"]) == str(policy["verified_runtime_image_digest"]),
     }
+    if retained_campaign_receipt is not None:
+        checks.update(
+            {
+                "retained_campaign_receipt_bound": not retained_receipt_errors,
+                "retained_campaign_repository_present": retained_repository in campaign_repositories,
+                "retained_campaign_workspace_stopped": not retained_running_workspaces,
+            }
+        )
     if resume_repository is None:
         checks["target_repository_absent"] = not target_present
     else:
@@ -845,6 +941,15 @@ def campaign_preflight(
         "estimated_campaign_bytes": estimated_bytes,
         "target_repository": target_repository,
         "resume_repository": resume_repository,
+        "retained_campaign_repository": retained_repository,
+        "retained_campaign_receipt_path": retained_campaign_receipt_path,
+        "retained_campaign_receipt_sha256": (
+            sha256_file(Path(retained_campaign_receipt_path))
+            if retained_campaign_receipt_path is not None
+            else None
+        ),
+        "retained_campaign_receipt_errors": retained_receipt_errors,
+        "retained_campaign_running_workspaces": retained_running_workspaces,
         "largest_file_bytes": largest_file_bytes,
     }
 
@@ -1427,6 +1532,8 @@ def prepare_campaign_repository(
     work_dir: str | Path | None = None,
     transport: str | None = None,
     allow_unpublished: bool = False,
+    retained_campaign_receipt: Mapping[str, Any] | None = None,
+    retained_campaign_receipt_path: str | None = None,
 ) -> dict[str, Any]:
     """Prepare and optionally push one exact disposable repository."""
 
@@ -1490,6 +1597,8 @@ def prepare_campaign_repository(
         estimated_bytes=int(manifest_summary["source_bytes"]),
         target_repository=repository,
         resume_repository=repository if resume else None,
+        retained_campaign_receipt=retained_campaign_receipt,
+        retained_campaign_receipt_path=retained_campaign_receipt_path,
         largest_file_bytes=largest,
     )
     if execute and not preflight["clean"]:
@@ -3553,6 +3662,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-count", type=int)
     parser.add_argument("--transport", choices=("lfs", "git-objects"))
     parser.add_argument("--resume-repository", help="Exact receipt-bound campaign repository allowed during resume")
+    parser.add_argument(
+        "--retained-campaign-receipt",
+        type=Path,
+        help="Explicit failed/interrupted receipt allowed to retain one otherwise-blocking campaign repository",
+    )
     parser.add_argument("--execute", action="store_true", help="Allow CNB repository/build/delete side effects")
     parser.add_argument(
         "--allow-unpublished",
@@ -3572,6 +3686,11 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        retained_campaign_receipt = (
+            _read_json(args.retained_campaign_receipt.expanduser().resolve())
+            if args.retained_campaign_receipt is not None
+            else None
+        )
         if args.action == "preflight":
             operations = args.operations_file.expanduser().resolve()
             load_validated_operations(operations, required_atom="cnb_campaign_repository")
@@ -3580,6 +3699,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 policy,
                 runner=run_cnb,
                 resume_repository=args.resume_repository,
+                retained_campaign_receipt=retained_campaign_receipt,
+                retained_campaign_receipt_path=(
+                    str(args.retained_campaign_receipt.expanduser().resolve())
+                    if args.retained_campaign_receipt is not None
+                    else None
+                ),
             )
         elif args.action == "prepare":
             if not args.run_id or not args.staging or not args.run_dir or not args.github_commit:
@@ -3600,6 +3725,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 work_dir=args.work_dir,
                 transport=args.transport,
                 allow_unpublished=args.allow_unpublished,
+                retained_campaign_receipt=retained_campaign_receipt,
+                retained_campaign_receipt_path=(
+                    str(args.retained_campaign_receipt.expanduser().resolve())
+                    if args.retained_campaign_receipt is not None
+                    else None
+                ),
             )
         elif args.action == "submit":
             if not args.receipt or not args.run_dir:

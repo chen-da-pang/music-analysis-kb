@@ -327,6 +327,8 @@ def test_weekly_run_exposes_disposable_campaign_controls() -> None:
             "a" * 40,
             "--cnb-campaign-work-dir",
             "/tmp/campaign-work",
+            "--retained-campaign-receipt",
+            "/tmp/retained-campaign-receipt.json",
         ]
     )
     assert parsed.cnb_campaign_dry_run is True
@@ -334,6 +336,7 @@ def test_weekly_run_exposes_disposable_campaign_controls() -> None:
     assert parsed.cnb_campaign_timeout_seconds == 120
     assert parsed.cnb_github_commit == "a" * 40
     assert parsed.cnb_campaign_work_dir == Path("/tmp/campaign-work")
+    assert parsed.retained_campaign_receipt == Path("/tmp/retained-campaign-receipt.json")
 
 
 def test_peer_inventory_environment_override(monkeypatch, tmp_path: Path) -> None:

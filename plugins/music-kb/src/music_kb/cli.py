@@ -361,6 +361,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional empty directory for the generated disposable campaign checkout",
     )
+    weekly_run.add_argument(
+        "--retained-campaign-receipt",
+        type=Path,
+        help="Explicit failed/interrupted receipt that permits retaining exactly one CNB campaign repository during a fresh run",
+    )
     weekly_run.add_argument("--confirm-delete-cnb-storage", action="store_true")
     weekly_run.add_argument(
         "--confirm-delete-cnb-repositories",
@@ -583,6 +588,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             cnb_campaign_timeout_seconds=args.cnb_campaign_timeout_seconds,
             cnb_github_commit=args.cnb_github_commit,
             cnb_campaign_work_dir=args.cnb_campaign_work_dir,
+            retained_campaign_receipt=args.retained_campaign_receipt,
         )
         return 0, result
     raise AssertionError("unhandled command")

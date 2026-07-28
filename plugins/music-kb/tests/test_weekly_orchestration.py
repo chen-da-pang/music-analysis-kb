@@ -476,25 +476,25 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
     progress.write_text("{}\n", encoding="utf-8")
     chart_path = tmp_path / "chart.json"
     queue_path = tmp_path / "queue.jsonl"
+    retained_receipt = tmp_path / "retained-campaign-receipt.json"
+    retained_receipt.write_text("{}\n", encoding="utf-8")
 
     preflight_commands: list[tuple[str, ...]] = []
+    campaign_preflight_commands: list[list[str]] = []
 
     def fake_preflight(**kwargs):
         preflight_commands.append(tuple(kwargs["required_commands"]))
         return {"valid": True, "failed_required": [], "commands": {}}
 
     monkeypatch.setattr("music_kb.weekly_orchestration.run_preflight", fake_preflight)
-    monkeypatch.setattr(
-        "music_kb.weekly_orchestration._json_command_allow_failure",
-        lambda *args, **kwargs: (
-            {
-                "action": "campaign-preflight",
-                "clean": True,
-                "checks": {},
-            },
-            subprocess.CompletedProcess(args[0], 0, "", ""),
-        ),
-    )
+    def fake_allow(command, *, cwd, timeout_seconds, env=None):
+        campaign_preflight_commands.append(list(command))
+        return (
+            {"action": "campaign-preflight", "clean": True, "checks": {}},
+            subprocess.CompletedProcess(command, 0, "", ""),
+        )
+
+    monkeypatch.setattr("music_kb.weekly_orchestration._json_command_allow_failure", fake_allow)
 
     def fake_json_command(command, *, cwd, timeout_seconds, env=None):
         name = Path(command[1]).name if len(command) > 1 else ""
@@ -538,6 +538,7 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
             assert command[command.index("--proxy") + 1] == "http://127.0.0.1:7890"
             return {"queue_manifest": {"queued": 0}}, subprocess.CompletedProcess(command, 0, "", "")
         if name == "cnb_campaign_repository.py" and "prepare" in command:
+            assert command[command.index("--retained-campaign-receipt") + 1] == str(retained_receipt)
             receipt = Path(command[command.index("--receipt") + 1])
             receipt.parent.mkdir(parents=True, exist_ok=True)
             receipt.write_text(
@@ -582,6 +583,7 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
         proxy="http://127.0.0.1:7890",
         cnb_campaign_dry_run=True,
         cnb_github_commit="a" * 40,
+        retained_campaign_receipt=retained_receipt,
         skip_peers=True,
     )
     state = json.loads(Path(result["state"]).read_text(encoding="utf-8"))
@@ -591,6 +593,7 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
     assert state["atoms"]["cnb_campaign_submit"]["outputs"]["status"] == "submit_planned"
     assert state["atoms"]["cnb_analysis"]["outputs"]["status"] == "skipped"
     assert preflight_commands == [("kugou-cli",)]
+    assert campaign_preflight_commands[0][campaign_preflight_commands[0].index("--retained-campaign-receipt") + 1] == str(retained_receipt)
     assert (tmp_path / "data" / "weekly_runs" / "fresh-campaign" / "cnb-input" / "manifest.jsonl").is_file()
 
 
