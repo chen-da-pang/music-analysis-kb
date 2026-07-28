@@ -1,5 +1,9 @@
 # Weekly audio download through Claude Code
 
+> **Path note (Grok Build):** prefer `$MUSIC_KB_PLUGIN/scripts/...` with an absolute
+> plugin root. The `music-analysis-kb/plugins/music-kb/scripts/...` forms below are
+> historical relative examples from a specific checkout layout.
+
 The July 6 Claude Code session is the source of truth for the download method.
 It inspected the 927-song SQLite/Obsidian corpus, installed `musicdl`, tested
 `半岛铁盒 周杰伦`, wrote `batch_download.py`, and ran the full batch. The
@@ -27,9 +31,10 @@ download behavior reviewable and repeatable.
 
 ```bash
 export MUSIC_WORKSPACE=/path/to/music-workspace
+export MUSIC_KB_PLUGIN=/absolute/path/to/plugins/music-kb
 cd "$MUSIC_WORKSPACE"
 
-python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_download.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_download.py" \
   --workspace "$MUSIC_WORKSPACE" \
   --source data/processed/kugou/<new-songs-export>.json \
   --run-id kugou-download-2026w30 \
@@ -44,7 +49,7 @@ equivalent generic field names).
 ## Dry run first
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_download.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_download.py" \
   --workspace "$MUSIC_WORKSPACE" \
   --source data/processed/kugou/<new-songs-export>.json \
   --run-id kugou-download-2026w30-dry \
@@ -64,7 +69,7 @@ The wrapper writes the exact prompt to
 the same directory. The child is told to run only:
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/download_music_queue.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/download_music_queue.py" \
   --queue data/download_runs/<run-id>/download_queue.jsonl \
   --inventory data/song_inventory.json \
   --work-dir music_downloads \
@@ -132,7 +137,7 @@ that row's `platform_track_key` (MixSongID). It never uses URL fragments, title,
 or artist as an identity substitute. Dry-run first:
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_lyrics_backfill.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_lyrics_backfill.py" \
   --workspace "$MUSIC_WORKSPACE" \
   --db "$HOME/.music-kb/music-master.sqlite" \
   --chart-db "$MUSIC_WORKSPACE/data/music_trends.sqlite" \
@@ -161,7 +166,7 @@ After the canonical records, their listening URLs, and their terminal lyric
 outcomes have been verified, run the prune atom in dry-run mode first:
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/prune_audio_library.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/prune_audio_library.py" \
   --inventory data/song_inventory.json \
   --audio-root music_downloads/KugouMusicClient \
   --knowledge-db "$HOME/.music-kb/music-master.sqlite" \

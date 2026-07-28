@@ -22,8 +22,14 @@ DEFAULT_PORT = 22
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 DEFAULT_PLUGIN_CACHE_ROOT = "~/.codex/plugins/cache/music-analysis-kb/music-kb"
+# Grok support
+GROK_INSTALL_ROOT = "~/.grok/installed-plugins"
+GROK_PLUGIN_DIR = "~/.grok/installed-plugins/music-kb-*"
+GROK_PLUGIN_CACHE = "~/.grok/installed-plugins"
 MAX_OUTPUT_CHARS = 2_000
-DEFAULT_PLUGIN_VERSION = "0.8.5"
+DEFAULT_PLUGIN_VERSION = "0.8.6"
+# Keep .codex-plugin and .grok-plugin plugin.json versions identical.
+# Runtime version discovery currently reads the Codex-shaped manifest.
 PLUGIN_MANIFEST_PATH = Path(__file__).resolve().parents[2] / ".codex-plugin" / "plugin.json"
 
 CommandRunner = Callable[[Sequence[str], int], subprocess.CompletedProcess[str]]
@@ -114,13 +120,31 @@ def _remote_executable_setting(value: str, *, field: str, context: str) -> str:
 
 
 def _current_plugin_version() -> str:
-    try:
-        manifest = json.loads(PLUGIN_MANIFEST_PATH.read_text(encoding="utf-8"))
-        version = str(manifest.get("version") or "").strip()
-        if version:
-            return version
-    except (OSError, ValueError, TypeError):
-        pass
+    # Support .codex-plugin (default) + Grok installed plugins + .grok-plugin
+    candidates = [
+        Path(__file__).resolve().parents[2] / ".codex-plugin" / "plugin.json",
+        Path(__file__).resolve().parents[2] / ".grok-plugin" / "plugin.json",
+    ]
+    for mp in candidates:
+        if mp.is_file():
+            try:
+                manifest = json.loads(mp.read_text(encoding="utf-8"))
+                version = str(manifest.get("version") or "").strip()
+                if version:
+                    return version
+            except (OSError, ValueError, TypeError):
+                pass
+    # also scan Grok installed plugins
+    for root in [Path(GROK_INSTALL_ROOT).expanduser(), Path(GROK_PLUGIN_CACHE).expanduser()]:
+        for p in root.glob("music-kb-*"):
+            if (p / ".grok-plugin" / "plugin.json").is_file():
+                try:
+                    manifest = json.loads((p / ".grok-plugin" / "plugin.json").read_text(encoding="utf-8"))
+                    version = str(manifest.get("version") or "").strip()
+                    if version:
+                        return version
+                except (OSError, ValueError, TypeError):
+                    pass
     try:
         return package_version("music-kb")
     except PackageNotFoundError:

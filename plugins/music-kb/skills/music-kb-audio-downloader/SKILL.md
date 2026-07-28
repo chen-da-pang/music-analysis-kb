@@ -5,9 +5,95 @@ description: Prepare a deduplicated Kugou audio queue from a new chart export an
 
 # Music KB Audio Downloader
 
-This is the upstream audio-download atom for the weekly publisher workflow.
-It is intentionally separate from `music-kb-weekly-publisher`, which starts
-from a completed CNB canonical delivery. The atom has four bounded stages:
+This is the upstream **primary download** atom for the weekly publisher
+workflow (receipt/atom name is still `claude_download` for resume
+compatibility — that name does **not** mean Claude must run). It is separate
+from `music-kb-weekly-publisher`, which starts from a completed CNB delivery.
+
+## Grok 宿主合同（必读）
+
+| 角色 | 职责 |
+| --- | --- |
+| **Grok** | 编排员 + 审计员：设路径、启动 fixed 命令、等进程结束、读 progress/atom 收据、判失败/是否进 fallback |
+| **Python worker** | 唯一允许写 `song_inventory`、progress、音频、歌词收据的进程 |
+
+代码默认已是 `--executor direct`（musicdl 串行 worker）。**真正下文件的是 worker，不是 Claude。**
+
+### 根路径
+
+Never invent a checkout folder name such as `music-analysis-kb/plugins/...`.
+
+| 变量 | 含义 |
+| --- | --- |
+| `MUSIC_WORKSPACE` | 发布机数据区（榜、库存、音频、`data/download_runs`） |
+| `MUSIC_KB_PLUGIN` | 插件包根（含 `scripts/`、`references/`、`pyproject.toml`） |
+
+```bash
+export MUSIC_WORKSPACE="/absolute/path/to/music-workspace"
+# 优先 monorepo checkout：
+export MUSIC_KB_PLUGIN="/absolute/path/to/music-analysis-kb/plugins/music-kb"
+# 或：grok plugin details music-kb 给出的 enabled 安装路径
+# 禁止 ls …/music-kb-* | head -1
+test -f "$MUSIC_KB_PLUGIN/scripts/run_claude_download.py"
+```
+
+脚本调用：
+
+```bash
+python3 "$MUSIC_KB_PLUGIN/scripts/<script>.py" ...
+```
+
+相对 `data/...` 路径时 `cwd` = `$MUSIC_WORKSPACE`。
+
+### Grok 上禁止
+
+- `--executor claude`（以及再 spawn Claude/Codex 去下载）
+- 手改 inventory / 伪造成功
+- 多个 worker 同时写正式库存
+- worker 仍在跑就宣称成功
+- 直接对正式库存跑 `download_music_fallback.py` 分片
+
+### 长任务怎么盯（Grok，不用 Claude Monitor）
+
+1. 启动 fixed 命令（**必须** `--executor direct`，可省略则依赖默认 direct）
+2. 长任务 background / 等进程退出
+3. 成功 = 进程 exit 0 **且** `progress.json` / wrapper JSON 为终端态
+4. 失败 = 只读 `status`/`reason`，按合同进 fallback 或停下
+
+### 历史命名对照
+
+| 对外称呼 | 收据/脚本（勿改字段以免 resume 坏） |
+| --- | --- |
+| 主下载 primary download | atom `claude_download`，`run_claude_download.py` |
+| 跨平台 fallback | atom `fallback_download`，`run_claude_fallback.py` |
+
+## Grok 操作剧本（主下载 → fallback）
+
+1. 设好 `MUSIC_WORKSPACE` / `MUSIC_KB_PLUGIN`。
+2. 需要时先 `--dry-run`，再实跑主下载：
+
+```bash
+cd "$MUSIC_WORKSPACE"
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_download.py"   --workspace "$MUSIC_WORKSPACE"   --source data/processed/kugou/<songs-export>.json   --run-id <run-id>   --executor direct   --proxy http://127.0.0.1:7890
+```
+
+3. 盯 `data/download_runs/<run-id>/progress.json`。
+4. 若连续大量 `direct_musicdl_no_download_url` / 平台验证失败：
+   **不要**为空跑完整队酷狗 title-search 浪费时间；记录失败并进入 fallback 决策。
+5. Fallback **只处理库存里已是 `failed` / `no_results` 的歌**。
+   主下载从未尝试、尚未写入 inventory 的歌 **不会**进入 fallback 队列——须先让主路径写出终端态（或承认需业务侧快失败，P0 不改 worker）。
+6. 启动 fallback（direct only）：
+
+```bash
+export MUSICDL_PYTHON=/absolute/path/to/python-that-imports-musicdl
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_fallback.py"   --workspace "$MUSIC_WORKSPACE"   --run-id <run-id>   --worker-python "$MUSICDL_PYTHON"   --executor direct   --proxy http://127.0.0.1:7890
+```
+
+先 `--dry-run` 看 queued 数量与 status 分解。
+
+## Worker 内部四阶段（由 wrapper 调用，Grok 不手搓写库存）
+
+The atom has four bounded stages:
 
 1. Rebuild `data/song_inventory.json` from the Kugou SQLite source, the legacy
    July 6 progress file, and the actual audio files on disk.
@@ -53,15 +139,17 @@ capture atom; this atom consumes its processed songs JSON/JSONL/CSV export.
 
 ## Canonical invocation
 
-From the workspace containing `data/music_trends.sqlite`:
+From the workspace containing `data/music_trends.sqlite` (set both roots first):
 
 ```bash
 export MUSIC_WORKSPACE=/path/to/music-workspace
+export MUSIC_KB_PLUGIN=/absolute/path/to/plugins/music-kb
 cd "$MUSIC_WORKSPACE"
-python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_download.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_download.py" \
   --workspace "$MUSIC_WORKSPACE" \
   --source data/processed/kugou/kugou-charts-full-20260706-105721-songs-dedup.json \
   --run-id kugou-download-2026w29 \
+  --executor direct \
   --proxy http://127.0.0.1:7890
 ```
 
@@ -76,13 +164,14 @@ the wrapper must not hand-edit inventory, progress, queue, or retention state.
 The wrapper performs these local commands before starting the fixed worker:
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/build_song_inventory.py \
+cd "$MUSIC_WORKSPACE"
+python3 "$MUSIC_KB_PLUGIN/scripts/build_song_inventory.py" \
   --db data/music_trends.sqlite \
   --progress download_progress.json \
   --inventory data/song_inventory.json \
   --audio-root music_downloads/KugouMusicClient
 
-python3 music-analysis-kb/plugins/music-kb/scripts/prepare_download_queue.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/prepare_download_queue.py" \
   --source data/processed/kugou/<new-songs-export>.json \
   --inventory data/song_inventory.json \
   --output data/download_runs/<run-id>/download_queue.jsonl \
@@ -93,7 +182,7 @@ It then materializes one filtered execution queue and invokes the worker once
 (the wrapper supplies absolute paths and captures the result):
 
 ```bash
-python3 .../download_music_queue.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/download_music_queue.py" \
   --queue data/download_runs/<run-id>/download-queue-direct.jsonl \
   --inventory data/song_inventory.json \
   --work-dir music_downloads \
@@ -107,10 +196,14 @@ The direct path keeps exact MixSongID validation, inventory/progress atomic
 writes, and append-only lyric receipts in the same worker. Its default
 `--lookup-mode exact-page-first` prevents `musicdl` from expanding several
 title/artist candidates when the queue already has an exact Kugou source URL;
-`--lookup-mode search-only` is the measured rollback path. `--executor claude`
-is available only for a bounded compatibility retry; it preserves the old
-serial chunk path and inherits `http_proxy`/`https_proxy` when `--proxy` is
-provided.
+`--lookup-mode search-only` is the measured rollback path.
+
+### Legacy executor (Grok 禁止)
+
+`--executor claude` still exists for Codex/Claude Code compatibility only.
+**Do not use it under Grok Build.** It spawns a nested Claude CLI with Monitor
+semantics; that is slower, costlier, and not the supported host model.
+
 
 ### Measured publisher profile
 
@@ -142,11 +235,12 @@ For the historical library, do **not** re-download audio. Run the dedicated
 wrapper against the publisher master:
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_lyrics_backfill.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_lyrics_backfill.py" \
   --workspace "$MUSIC_WORKSPACE" \
   --db "$HOME/.music-kb/music-master.sqlite" \
   --chart-db "$MUSIC_WORKSPACE/data/music_trends.sqlite" \
   --run-id kugou-lyrics-backfill-2026w30 \
+  --executor direct \
   --dry-run
 ```
 
@@ -160,37 +254,37 @@ automatically.
 
 ### Fallback invocation
 
-The fallback queue contains only records whose current inventory status is
-`no_results` or `failed`. Each record receives at most two fallback rounds
-across runs. A second unsuccessful round becomes the durable, auditable
-`abandoned` state and is omitted from both automatic queues; use
-`run_claude_download.py --retry-abandoned` only for an explicit recovery.
-Before a real run, use `--dry-run` and review the queue count and status
-breakdown. The direct fallback wrapper owns queue preparation, safe two-way
-sharding, and the final merger. `--executor claude` remains an explicit
-compatibility way to start the same short launcher:
+The fallback queue contains **only** inventory rows whose status is
+`no_results` or `failed`. Songs never attempted by primary download (not yet
+in inventory as terminal) **are not** selected. Each record receives at most
+two fallback rounds; a second unsuccessful round becomes `abandoned` (needs
+explicit `--retry-abandoned` recovery). Always `--dry-run` first and review
+queued counts.
+
+Under Grok, start fallback with **direct** only:
 
 ```bash
 export MUSICDL_PYTHON=/absolute/path/to/python-that-imports-musicdl
-python3 music-analysis-kb/plugins/music-kb/scripts/run_claude_fallback.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/run_claude_fallback.py" \
   --workspace "$MUSIC_WORKSPACE" \
   --run-id <run-id> \
   --worker-python "$MUSICDL_PYTHON" \
+  --executor direct \
   --proxy http://127.0.0.1:7890
 ```
 
-For a real run, the wrapper validates the `fallback_download` operation record,
-proves `--worker-python` can import `musicdl`, then starts the short detached
-launcher. The supervisor runs the actual P=2 isolated shards and its serial
-merger is the only code allowed to touch real inventory/progress and the
-configured music directory. `--executor claude` may start that launcher for
-compatibility, but Claude must not wait, kill, wrap, restart, or directly run
-`download_music_fallback.py`.
+The wrapper validates the `fallback_download` operation record, proves
+`--worker-python` imports `musicdl`, then starts a short detached supervisor.
+P=2 isolated shards never touch real inventory; one serial merger is the only
+formal-state writer. **Grok must not** wait/kill/wrap/restart that launcher
+incorrectly, and must not run `download_music_fallback.py` against the real
+inventory by hand.
 
 Accept a fallback file only after it exists, exceeds 1 MB, and has an ffprobe
-duration of at least 60 seconds. Each child may write only its run-local shard
-directory; it must not call `kugou-cli`, the old full-database downloader, or
-edit real inventory by hand.
+duration of at least 60 seconds.
+
+`--executor claude` for fallback is **legacy only** (Codex/Claude Code). **Grok
+禁止使用。**
 
 ## Inventory contract
 
@@ -219,7 +313,8 @@ present, and lyric coverage is terminal for every canonical recording, the
 local audio tree can be removed without breaking deduplication:
 
 ```bash
-python3 music-analysis-kb/plugins/music-kb/scripts/prune_audio_library.py \
+cd "$MUSIC_WORKSPACE"
+python3 "$MUSIC_KB_PLUGIN/scripts/prune_audio_library.py" \
   --inventory data/song_inventory.json \
   --audio-root music_downloads/KugouMusicClient \
   --knowledge-db "$HOME/.music-kb/music-master.sqlite" \
@@ -231,7 +326,7 @@ count, source-track count, non-empty source-link count, and full lyric coverage
 before deleting anything. Execute the deletion only with the explicit flag:
 
 ```bash
-.../prune_audio_library.py \
+python3 "$MUSIC_KB_PLUGIN/scripts/prune_audio_library.py" \
   --inventory data/song_inventory.json \
   --audio-root music_downloads/KugouMusicClient \
   --knowledge-db "$HOME/.music-kb/music-master.sqlite" \
@@ -244,17 +339,16 @@ historical relative path. It changes only the retention state to
 `purged_after_analysis`, so the next weekly queue still skips all previously
 acquired songs even though their audio files are gone.
 
-## Provenance from the original Claude Code run
+## Provenance (historical)
 
-The original July 6 Claude Code conversation is retained locally at:
+The July 6 2026 publisher session that first validated the download method is
+archived outside this plugin (Claude Code session history on the publisher
+Mac). It is **not** required to run this atom under Grok Build.
 
-```text
-~/.claude/projects/-Users-wycm-Documents--------/aa501171-fbfe-408b-9724-d2a2071038e4.jsonl
-```
-
-It records the validated method: install `musicdl`, test a Kugou search and a
-single download, write `batch_download.py`, then run the batch in the
-background. The final report was 927/927 successful, 0 failed, 0 no-result,
-about 37GB, with FLAC/MP3 output and LRC files. This atom preserves the
-effective `MusicClient` + `KugouMusicClient` method but adds queue-level
-deduplication and per-run inventory updates.
+That session recorded: install `musicdl`, test a Kugou search and a single
+download, write `batch_download.py`, then run the batch in the background.
+The final report was 927/927 successful, 0 failed, 0 no-result, about 37GB,
+with FLAC/MP3 output and LRC files. This atom preserves the effective
+`MusicClient` + `KugouMusicClient` method but adds queue-level deduplication
+and per-run inventory updates. Default executor today is **direct**, not a
+Claude-hosted worker.

@@ -8,12 +8,79 @@ description: Orchestrate a complete weekly Music KB update from the configured K
 Run this skill on the publisher machine only. Colleague machines are read-only
 retrieval clients and receive immutable snapshots, never the writable master.
 
+## Grok 宿主合同（必读）
+
+| 角色 | 职责 |
+| --- | --- |
+| **Grok** | 编排员：设路径、启动 **一条** `weekly-run`（或单原子排障）、等进程、读 `run-state.json` / `atoms/*.json` |
+| **`music-kb weekly-run` + workers** | 唯一写库存/进度/音频/周常收据的进程 |
+
+- 下载/fallback 在编排器内已固定 **`--executor direct`**。Grok **禁止** 改成 `--executor claude` 或再套 Claude/Codex。
+- 历史 atom/脚本名 `claude_download`、`run_claude_*.py` **仅** 为收据兼容，**不**表示要跑 Claude。
+- 默认 **不要** 手搓每个 atom；除非单步 debug。
+- 成功/失败只认收据，不手改 `run-state` / inventory。
+- 恢复必须同一 `--run-id`，禁止换新 id 掩盖失败。
+
+### Grok 周常剧本
+
+1. 设 `MUSIC_WORKSPACE` / `MUSIC_KB_PLUGIN`（CNB 再加 `MUSIC_KB_REPO`）。
+2. 优先：
+
+```bash
+uv run --project "$MUSIC_KB_PLUGIN" music-kb --json weekly-run \
+  --workspace "$MUSIC_WORKSPACE" \
+  --run-id <run-id> \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --chart-database "$MUSIC_WORKSPACE/data/music_trends.sqlite" \
+  --peers-file "$HOME/.config/music-kb/peers.toml" \
+  --proxy http://127.0.0.1:7890 \
+  --cnb-transport lfs \
+  --download-dry-run
+```
+
+3. 长任务：background / 等进程退出；盯  
+   `$MUSIC_WORKSPACE/data/weekly_runs/<run-id>/run-state.json` 与 `atoms/`。
+4. 用户要求停在 CNB 前时，使用既有 dry-run / 不进入 campaign 的标志组合，不要半截手改状态。
+5. 主下载系统性取链失败时：读 `atoms/claude_download.json` 与 download progress，再决定是否单独跑 fallback（见 audio-downloader skill），**不要**空跑整队酷狗搜索。
+
+## Paths: plugin root vs workspace vs git repo
+
+| Variable | Meaning |
+| --- | --- |
+| `MUSIC_WORKSPACE` | Publisher data workspace (`data/`, `music_downloads/`, weekly receipts) |
+| `MUSIC_KB_PLUGIN` | Absolute path to the plugin package root (`scripts/`, `references/`, `pyproject.toml`) |
+| `MUSIC_KB_REPO` | Absolute path to the **git repository root** that contains this plugin (needed for CNB recover/export) |
+
+Resolve once:
+
+```bash
+export MUSIC_WORKSPACE="/absolute/path/to/music-workspace"
+# Prefer a monorepo checkout for publisher work (git + scripts + references):
+export MUSIC_KB_PLUGIN="/absolute/path/to/music-analysis-kb/plugins/music-kb"
+export MUSIC_KB_REPO="/absolute/path/to/music-analysis-kb"
+test -f "$MUSIC_KB_PLUGIN/references/validated-operations.json"
+test -d "$MUSIC_KB_REPO/.git"
+```
+
+Notes:
+
+- A Grok **installed-plugin** copy under `~/.grok/installed-plugins/music-kb-*`
+  is fine for CLI/MCP and most script atoms, but it is **not** a git checkout.
+  Do **not** derive `MUSIC_KB_REPO` as `$MUSIC_KB_PLUGIN/../..` from an install
+  tree; set `MUSIC_KB_REPO` to the real monorepo root, or run CNB
+  prepare/recover only from a checkout-based `MUSIC_KB_PLUGIN`.
+- If multiple install dirs exist, do not use `ls | head -1`. Point
+  `MUSIC_KB_PLUGIN` at the enabled install path from `grok plugin details music-kb`,
+  or at the monorepo `plugins/music-kb` path.
+- Prefer `uv run --project "$MUSIC_KB_PLUGIN" music-kb …` so the CLI comes from
+  the plugin package, not a guessed relative checkout name.
+
 ## Non-negotiable run contract
 
 Before every atom, read and validate:
 
 ```text
-plugins/music-kb/references/validated-operations.json
+$MUSIC_KB_PLUGIN/references/validated-operations.json
 ```
 
 Require the current atom's entry and record the operation-record hash in its
@@ -127,23 +194,15 @@ be purged, so inventory—not file presence alone—is the dedupe record.
    failed, or `no_results` items. `abandoned` is a durable terminal download
    state and requires an explicit `--retry-abandoned` recovery. Do not
    interpret a new download as an analysis result.
-6. **`claude_download`** — retain this historical atom name but default to one
-   fixed direct worker. It must use `musicdl`'s `MusicClient` plus
-   `KugouMusicClient`; it first resolves the queue's exact mix-song page and
-   verified audio hash, then falls back to title/artist search only when needed.
-   It must not call `kugou-cli` or the legacy full-database downloader. Keep one
-   song-level inventory row per platform identity and do not run concurrent
-   workers against shared state. `--executor claude` is only a bounded
-   compatibility retry.
-7. **`fallback_download`** — directly process only the primary worker's
-   recorded `no_results` or `failed` states in the configured fallback order,
-   with duration/size checks. `run_claude_fallback.py` validates a Python that
-   imports `musicdl` and starts a short detached supervisor. Its default two
-   isolated staging shards never touch real inventory, progress, or audio; one
-   serial merger is the sole formal-state writer. `--executor claude` is a
-   compatibility launcher only. Preserve `retry_from_status` and fallback
-   attempt history; after the second unsuccessful fallback round, write
-   `abandoned` and do not requeue it automatically.
+6. **主下载 / primary download**（收据 atom 名仍为 `claude_download`）—
+   编排器固定 `--executor direct` 的一个串行 musicdl worker。使用
+   `MusicClient` + `KugouMusicClient`，先精确 mix-song 页再必要时 title/artist
+   搜索。不得调用 `kugou-cli` 或旧全库下载器；禁止多 worker 共享库存。
+   **Grok 禁止** `--executor claude`。
+7. **`fallback_download`** — 只处理主下载留下的库存 `no_results` / `failed`
+  （未尝试且未入库的歌不在此队列）。`run_claude_fallback.py --executor direct`：
+   P=2 隔离 staging + 串行 merger 写正式状态。**Grok 禁止** claude launcher。
+   两轮失败后 `abandoned`，需显式 recovery 才再入队。
 8. **`cnb_input_materialization`** — consume only newly downloaded queue rows;
    verify file existence, identity, SHA-256, byte count, and `source_url`; use
    hardlinks into an isolated staging directory and write the LF JSONL manifest.
@@ -232,7 +291,7 @@ status stops the atom before it can claim a repository was created, deleted, or
 cleaned.
 
 The campaign policy is
-`plugins/music-kb/references/cnb-storage-policy.json`. A campaign repository is
+`$MUSIC_KB_PLUGIN/references/cnb-storage-policy.json`. A campaign repository is
 temporary; GitHub is the only source of runner code. A failed build, ledger
 recovery error, incomplete receipt, release failure, or peer failure leaves the
 same repository and receipt in place. A retry may reuse the receipt-bound work
@@ -257,11 +316,13 @@ Use the executable entry point; do not bypass run state or call the old full
 database downloader:
 
 ```bash
-uv run music-kb --json weekly-run \
-  --workspace /path/to/music-workspace \
+export MUSIC_KB_PLUGIN=/absolute/path/to/plugins/music-kb
+export MUSIC_WORKSPACE=/absolute/path/to/music-workspace
+uv run --project "$MUSIC_KB_PLUGIN" music-kb --json weekly-run \
+  --workspace "$MUSIC_WORKSPACE" \
   --run-id kugou-2026w30 \
   --db "$HOME/.music-kb/music-master.sqlite" \
-  --chart-database /path/to/music_trends.sqlite \
+  --chart-database "$MUSIC_WORKSPACE/data/music_trends.sqlite" \
   --peers-file "$HOME/.config/music-kb/peers.toml" \
   --proxy http://127.0.0.1:7890 \
   --cnb-transport lfs \
@@ -269,14 +330,21 @@ uv run music-kb --json weekly-run \
 ```
 
 When a receipt has the recorded build-GPU platform failure and the explicit
-Dev GPU recovery atom is selected, keep the source receipt untouched:
+Dev GPU recovery atom is selected, keep the source receipt untouched.
+`--repository-root` is the **git repo root** that contains this plugin (not the
+data workspace):
 
 ```bash
-uv run python scripts/cnb_campaign_repository.py recover-devgpu \
-  --policy references/cnb-storage-policy.json \
-  --operations-file references/validated-operations.json \
-  --repository-root /path/to/music-analysis-kb \
-  --github-commit "$(git -C /path/to/music-analysis-kb rev-parse origin/main)" \
+export MUSIC_KB_PLUGIN=/absolute/path/to/music-analysis-kb/plugins/music-kb
+export MUSIC_KB_REPO=/absolute/path/to/music-analysis-kb   # must be a real git root
+# Only if MUSIC_KB_PLUGIN is inside that monorepo (not an install copy):
+# export MUSIC_KB_REPO="$(cd "$MUSIC_KB_PLUGIN/../.." && pwd)"
+uv run --project "$MUSIC_KB_PLUGIN" python \
+  "$MUSIC_KB_PLUGIN/scripts/cnb_campaign_repository.py" recover-devgpu \
+  --policy "$MUSIC_KB_PLUGIN/references/cnb-storage-policy.json" \
+  --operations-file "$MUSIC_KB_PLUGIN/references/validated-operations.json" \
+  --repository-root "$MUSIC_KB_REPO" \
+  --github-commit "$(git -C "$MUSIC_KB_REPO" rev-parse origin/main)" \
   --receipt /path/to/run/cnb/campaign-receipt.json \
   --recovery-receipt /path/to/run/cnb/devgpu-recovery/receipt.json \
   --history-review /path/to/run/cnb/devgpu-recovery/history-review.json \

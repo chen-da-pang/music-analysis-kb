@@ -117,3 +117,11 @@ def test_backfill_wrapper_defaults_to_the_direct_exact_source_executor() -> None
     assert 'choices=("direct", "claude")' in source
     assert 'default="direct"' in source
     assert '"executor": "direct"' in source
+
+
+def test_alias_run_lyrics_backfill_is_thin_wrapper() -> None:
+    alias = Path(__file__).parents[1] / "scripts" / "run_lyrics_backfill.py"
+    assert alias.is_file()
+    text = alias.read_text(encoding="utf-8")
+    assert "run_claude_lyrics_backfill.py" in text
+    assert "alias" in text.casefold() or "wrapper" in text.casefold()

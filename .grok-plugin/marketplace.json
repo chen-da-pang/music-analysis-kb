@@ -1,0 +1,22 @@
+{
+  "name": "music-analysis-kb",
+  "description": "Local-first Music Flamingo knowledge base: publisher workflows, read-only retrieval, and MCP tools for Grok Build.",
+  "owner": {
+    "name": "Wuyou Music",
+    "email": "71575499+chen-da-pang@users.noreply.github.com"
+  },
+  "plugins": [
+    {
+      "name": "music-kb",
+      "description": "Local SQLite music-analysis search with natural-language discovery, selected-song lyrics, publisher download/orchestration skills, and read-only MCP tools.",
+      "category": "productivity",
+      "version": "0.8.6",
+      "source": {
+        "type": "local",
+        "path": "./plugins/music-kb"
+      },
+      "homepage": "https://github.com/chen-da-pang/music-analysis-kb",
+      "keywords": ["music", "sqlite", "mcp", "retrieval", "music-flamingo", "kugou"]
+    }
+  ]
+}
