@@ -47,6 +47,10 @@
       "execution_profile": "nvidia-h20/full_precision/bfloat16"
     }
   },
+  "devgpu_capacity_preflight": {
+    "per_pending_item_estimate_seconds": 900,
+    "fixed_headroom_seconds": 1800
+  },
   "clean_repo_object_bytes_max": 25000000000,
   "clean_repo_git_bytes_max": 500000000,
   "minimum_group_object_free_bytes": 10000000000,

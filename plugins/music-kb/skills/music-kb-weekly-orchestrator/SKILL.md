@@ -76,6 +76,19 @@ Use the previously verified operation for a recognized fingerprint:
 If the history review does not yield a known safe operation, stop before
 allocating compute and record the unresolved decision in the owning Issue.
 
+For a nonzero-pending Dev GPU recovery, after the receipt-bound pending plan and
+zero-pending bypass but before any runner refresh or CNB overlay mutation, read
+the official CNB organization `get-quota` / `get-volume` fields and record
+`available_dev_gpu_seconds = dev_gpu_in_sec.total - dev_gpu_in_sec -
+freeze_dev_gpu_in_sec`. The versioned policy supplies a per-pending-item
+estimate and fixed headroom; both must fit in that available capacity. Missing,
+non-integer, or negative total/used values, a present malformed/negative frozen
+value, or negative/insufficient available capacity blocks allocation. CNB omits
+`freeze_dev_gpu_in_sec` when zero in its current response: normalize only that
+absent field to zero and record the normalization. This capacity proof does not
+replace the existing history, receipt, clean-GPU or supervisor gates; zero
+pending still bypasses workspace allocation entirely.
+
 ## Fresh versus delivery-resume
 
 With `--delivery`, validate the supplied canonical Music Flamingo JSONL and its
