@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -98,6 +99,30 @@ DEVGPU_WORKSPACE_MAX_SECONDS = 8 * 60 * 60
 DEVGPU_WORKSPACE_LIFECYCLE_GUARD_SECONDS = 11 * 60
 
 JsonRunner = Callable[[Sequence[str]], dict[str, Any]]
+
+# The one CreateRepo process needs enough host configuration to find the CNB
+# CLI, its TLS/proxy route, and the caller-owned token file. Do not inherit a
+# general-purpose environment into that privileged subprocess.
+CAMPAIGN_CREATE_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+)
 
 
 class CampaignRepositoryError(RuntimeError):
@@ -258,6 +283,14 @@ def run_cnb(command: Sequence[str]) -> dict[str, Any]:
     cli_env = os.environ.copy()
     cli_env.pop("CNB_TOKEN", None)
     cli_env.pop("MUSIC_KB_CNB_GIT_TOKEN", None)
+    return _run_cnb_with_environment(command, cli_env=cli_env)
+
+
+def _run_cnb_with_environment(
+    command: Sequence[str], *, cli_env: Mapping[str, str]
+) -> dict[str, Any]:
+    """Run one CNB command with an explicitly constructed process environment."""
+
     response = _run_json(command, env=cli_env)
     raw_status = response.get("status")
     try:
@@ -275,6 +308,57 @@ def run_cnb(command: Sequence[str]) -> dict[str, Any]:
         detail = str(data or "")
     suffix = f": {detail}" if detail else ""
     raise CampaignRepositoryError(f"CNB API request failed with status {status}{suffix}")
+
+
+def _read_private_campaign_create_token(token_file: str | Path) -> str:
+    """Read a dedicated CreateRepo token without persisting or echoing it.
+
+    The token file is deliberately a caller-owned secret boundary.  It must be
+    readable only by the owner, and this adapter never records either its path
+    or contents in a campaign receipt.
+    """
+
+    path = Path(token_file).expanduser().resolve()
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        raise CampaignRepositoryError("campaign-create token file is not stat-able") from exc
+    if not path.is_file():
+        raise CampaignRepositoryError("campaign-create token path is not a regular file")
+    if mode & 0o077:
+        raise CampaignRepositoryError(
+            "campaign-create token file must not be readable, writable, or executable by group or other"
+        )
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise CampaignRepositoryError("campaign-create token file is unreadable") from exc
+    if not token or any(character.isspace() for character in token):
+        raise CampaignRepositoryError("campaign-create token file must contain one non-whitespace token")
+    return token
+
+
+def run_cnb_with_campaign_create_token(
+    command: Sequence[str], *, token_file: str | Path
+) -> dict[str, Any]:
+    """Run only CNB's exact CreateRepo endpoint with a dedicated token.
+
+    This narrow adapter prevents a high-privilege campaign token from being
+    inherited by quota, workspace, build, cleanup, or Git/LFS subprocesses.
+    """
+
+    if tuple(command[:3]) != ("cnb", "repositories", "create-repo"):
+        raise CampaignRepositoryError(
+            "campaign-create token is restricted to cnb repositories create-repo"
+        )
+    token = _read_private_campaign_create_token(token_file)
+    cli_env = {
+        key: value
+        for key in CAMPAIGN_CREATE_ENV_ALLOWLIST
+        if (value := os.environ.get(key)) is not None
+    }
+    cli_env["CNB_TOKEN"] = token
+    return _run_cnb_with_environment(command, cli_env=cli_env)
 
 
 def _response_data(response: Mapping[str, Any]) -> Any:
@@ -1697,6 +1781,7 @@ def prepare_campaign_repository(
     allow_unpublished: bool = False,
     retained_campaign_receipt: Mapping[str, Any] | None = None,
     retained_campaign_receipt_path: str | None = None,
+    campaign_create_token_file: str | Path | None = None,
 ) -> dict[str, Any]:
     """Prepare and optionally push one exact disposable repository."""
 
@@ -1706,6 +1791,10 @@ def prepare_campaign_repository(
     policy = _policy_with_transport(load_campaign_policy(policy_path), transport)
     if allow_unpublished and execute:
         raise CampaignRepositoryError("--allow-unpublished is permitted only for a non-executing dry-run")
+    if campaign_create_token_file is not None and not execute:
+        raise CampaignRepositoryError(
+            "campaign-create token file is permitted only for an executable prepare"
+        )
     root = Path(repository_root).expanduser().resolve()
     run_dir_path = Path(run_dir).expanduser().resolve()
     run_dir_path.mkdir(parents=True, exist_ok=True)
@@ -1894,7 +1983,14 @@ def prepare_campaign_repository(
                     raise CampaignRepositoryError(
                         "target campaign repository exists without receipt-bound creation evidence; refusing to claim it"
                     )
-                create_response = runner(
+                create_runner = (
+                    (lambda command: run_cnb_with_campaign_create_token(
+                        command, token_file=campaign_create_token_file
+                    ))
+                    if campaign_create_token_file is not None
+                    else runner
+                )
+                create_response = create_runner(
                     [
                         "cnb", "repositories", "create-repo", "--slug", str(policy["organization_slug"]),
                         "--name", name, "--visibility", str(campaign["visibility"]), "--verbose",
@@ -1902,11 +1998,15 @@ def prepare_campaign_repository(
                 )
                 if _is_not_found(create_response):
                     raise CampaignRepositoryError(f"CNB repository creation returned 404: {repository}")
-                if _repo_exists(repository, runner) is False:
-                    raise CampaignRepositoryError(f"CNB repository was not visible after creation: {repository}")
+                # Record a verified 2xx CreateRepo response before checking
+                # read-after-write visibility through the ordinary OAuth
+                # runner. CNB can briefly lag there; preserving this proof
+                # lets the exact receipt retry rather than minting a new slug.
                 receipt["repository_created"] = True
                 receipt["updated_at"] = now_iso()
                 _atomic_write_json(receipt_file, receipt)
+                if _repo_exists(repository, runner) is False:
+                    raise CampaignRepositoryError(f"CNB repository was not visible after creation: {repository}")
             if not receipt["repository_pushed"]:
                 env, askpass = _git_push_environment()
                 try:
@@ -4089,6 +4189,14 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="Explicit failed/interrupted receipt allowed to retain one otherwise-blocking campaign repository",
     )
+    parser.add_argument(
+        "--campaign-create-token-file",
+        type=Path,
+        help=(
+            "Private token file used only for CNB repositories create-repo during an "
+            "executable prepare; never passed to Git/LFS or workspace APIs"
+        ),
+    )
     parser.add_argument("--execute", action="store_true", help="Allow CNB repository/build/delete side effects")
     parser.add_argument(
         "--allow-unpublished",
@@ -4108,6 +4216,10 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.campaign_create_token_file is not None and args.action != "prepare":
+            raise CampaignRepositoryError(
+                "--campaign-create-token-file is valid only for the prepare action"
+            )
         retained_campaign_receipt = (
             _read_json(args.retained_campaign_receipt.expanduser().resolve())
             if args.retained_campaign_receipt is not None
@@ -4153,6 +4265,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if args.retained_campaign_receipt is not None
                     else None
                 ),
+                campaign_create_token_file=args.campaign_create_token_file,
             )
         elif args.action == "submit":
             if not args.receipt or not args.run_dir:

@@ -1324,6 +1324,50 @@ def test_recover_devgpu_cli_passes_the_selected_profile(monkeypatch: pytest.Monk
     assert captured["devgpu_profile"] == "H20"
 
 
+def test_prepare_cli_passes_private_campaign_create_token_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict = {}
+
+    def fake_prepare(**kwargs):
+        captured.update(kwargs)
+        return {"status": "planned"}
+
+    token_file = tmp_path / "campaign-create-token"
+    monkeypatch.setattr(MODULE, "prepare_campaign_repository", fake_prepare)
+    assert MODULE.main(
+        [
+            "prepare",
+            "--policy",
+            str(tmp_path / "policy.json"),
+            "--run-id",
+            "run-1",
+            "--staging",
+            str(tmp_path / "staging"),
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--github-commit",
+            "a" * 40,
+            "--campaign-create-token-file",
+            str(token_file),
+            "--execute",
+        ]
+    ) == 0
+    assert captured["campaign_create_token_file"] == token_file
+
+
+def test_campaign_create_token_cli_option_is_rejected_outside_prepare(tmp_path: Path) -> None:
+    assert MODULE.main(
+        [
+            "preflight",
+            "--policy",
+            str(tmp_path / "policy.json"),
+            "--campaign-create-token-file",
+            str(tmp_path / "campaign-create-token"),
+        ]
+    ) == 2
+
+
 def test_devgpu_recovery_stage_script_is_valid_posix_sh(tmp_path: Path) -> None:
     config = MODULE.generate_campaign_devgpu_config(
         policy(),
@@ -1505,6 +1549,207 @@ def test_run_cnb_strips_git_tokens_and_preserves_cli_oauth_environment(
     assert "CNB_TOKEN" not in captured
     assert "MUSIC_KB_CNB_GIT_TOKEN" not in captured
     assert captured["HOME"] == "/oauth-home"
+
+
+def test_campaign_create_token_is_private_and_limited_to_create_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token_file = tmp_path / "campaign-create-token"
+    token_file.write_text("create-only-token\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    captured: dict[str, str] = {}
+
+    def fake_run_json(_command, **kwargs):
+        captured.update(kwargs["env"])
+        return {"status": 201, "data": {"path": "org/campaign"}}
+
+    monkeypatch.setenv("CNB_TOKEN", "wrong-global-token")
+    monkeypatch.setenv("MUSIC_KB_CNB_GIT_TOKEN", "separate-git-token")
+    monkeypatch.setenv("UNRELATED_SECRET", "must-not-reach-create-repo")
+    monkeypatch.setattr(MODULE, "_run_json", fake_run_json)
+
+    response = MODULE.run_cnb_with_campaign_create_token(
+        ["cnb", "repositories", "create-repo", "--slug", "org", "--name", "campaign"],
+        token_file=token_file,
+    )
+
+    assert response["status"] == 201
+    assert captured["CNB_TOKEN"] == "create-only-token"
+    assert "MUSIC_KB_CNB_GIT_TOKEN" not in captured
+    assert "UNRELATED_SECRET" not in captured
+    with pytest.raises(MODULE.CampaignRepositoryError, match="restricted to cnb repositories create-repo"):
+        MODULE.run_cnb_with_campaign_create_token(
+            ["cnb", "workspace", "start-workspace", "--repo", "org/campaign"],
+            token_file=token_file,
+        )
+
+
+def test_campaign_create_token_file_rejects_group_or_world_permissions(tmp_path: Path) -> None:
+    token_file = tmp_path / "campaign-create-token"
+    token_file.write_text("create-only-token\n", encoding="utf-8")
+    token_file.chmod(0o644)
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="group or other"):
+        MODULE.run_cnb_with_campaign_create_token(
+            ["cnb", "repositories", "create-repo"], token_file=token_file
+        )
+
+
+def test_prepare_routes_only_create_repo_through_private_campaign_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value = policy()
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(value), encoding="utf-8")
+    staging = tmp_path / "staging"
+    (staging / "audio").mkdir(parents=True)
+    payload = b"audio"
+    (staging / "audio" / "song.flac").write_bytes(payload)
+    (staging / "manifest.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "kugou-1",
+                "relative_audio_path": "audio/song.flac",
+                "source_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "title": "Song",
+                "artist": "Artist",
+                "campaign_id": "run-1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "github"
+    root.mkdir()
+    token_file = tmp_path / "campaign-create-token"
+    token_file.write_text("create-only-token\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setattr(MODULE, "_validate_commit", lambda _root, commit, **_kwargs: commit)
+    monkeypatch.setattr(
+        MODULE,
+        "_export_runtime",
+        lambda _root, _commit, output, **_kwargs: fake_export_runtime(output, _commit),
+    )
+    monkeypatch.setattr(MODULE, "_git_push_environment", lambda: ({}, None))
+    monkeypatch.setattr(MODULE, "_run_git_authenticated", lambda *_args, **_kwargs: None)
+    state, ordinary_commands, ordinary_runner = cnb_runner_factory()
+    privileged_commands: list[list[str]] = []
+
+    def fake_privileged_runner(command, *, token_file):
+        assert token_file == token_file_path
+        privileged_commands.append(list(command))
+        state["target_present"] = True
+        return {"status": 201, "data": {"path": "org/music-flamingo-campaign-run-1"}}
+
+    token_file_path = token_file
+    monkeypatch.setattr(MODULE, "run_cnb_with_campaign_create_token", fake_privileged_runner)
+    receipt = MODULE.prepare_campaign_repository(
+        policy_path=policy_path,
+        operations_path=OPERATIONS,
+        repository_root=root,
+        run_id="run-1",
+        staging=staging,
+        run_dir=tmp_path / "run",
+        github_commit="a" * 40,
+        expected_count=1,
+        execute=True,
+        runner=ordinary_runner,
+        campaign_create_token_file=token_file_path,
+    )
+
+    assert receipt["status"] == "created_and_pushed"
+    assert [command[:3] for command in privileged_commands] == [["cnb", "repositories", "create-repo"]]
+    assert not any("create-repo" in " ".join(command) for command in ordinary_commands)
+    saved = (tmp_path / "run" / "cnb" / "campaign-receipt.json").read_text(encoding="utf-8")
+    assert str(token_file_path) not in saved
+    assert "create-only-token" not in saved
+
+
+def test_prepare_records_verified_create_before_oauth_visibility_lag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value = policy()
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(value), encoding="utf-8")
+    staging = tmp_path / "staging"
+    (staging / "audio").mkdir(parents=True)
+    payload = b"audio"
+    (staging / "audio" / "song.flac").write_bytes(payload)
+    (staging / "manifest.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "kugou-1",
+                "relative_audio_path": "audio/song.flac",
+                "source_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "title": "Song",
+                "artist": "Artist",
+                "campaign_id": "run-1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "github"
+    root.mkdir()
+    token_file = tmp_path / "campaign-create-token"
+    token_file.write_text("create-only-token\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setattr(MODULE, "_validate_commit", lambda _root, commit, **_kwargs: commit)
+    monkeypatch.setattr(
+        MODULE,
+        "_export_runtime",
+        lambda _root, _commit, output, **_kwargs: fake_export_runtime(output, _commit),
+    )
+    monkeypatch.setattr(MODULE, "_git_push_environment", lambda: ({}, None))
+    monkeypatch.setattr(MODULE, "_run_git_authenticated", lambda *_args, **_kwargs: None)
+    state, commands, base_runner = cnb_runner_factory()
+    visibility_lag = {"active": True}
+    create_calls: list[list[str]] = []
+
+    def ordinary_runner(command):
+        if "repositories get-by-id" in " ".join(command):
+            repository = command[command.index("--repo") + 1]
+            if (
+                repository == "org/music-flamingo-campaign-run-1"
+                and state["target_present"]
+                and visibility_lag["active"]
+            ):
+                commands.append(list(command))
+                visibility_lag["active"] = False
+                return {"status": 404, "data": {"errcode": 5}}
+        return base_runner(command)
+
+    def fake_privileged_runner(command, *, token_file):
+        assert token_file == token_file_path
+        create_calls.append(list(command))
+        state["target_present"] = True
+        return {"status": 201, "data": {"path": "org/music-flamingo-campaign-run-1"}}
+
+    token_file_path = token_file
+    monkeypatch.setattr(MODULE, "run_cnb_with_campaign_create_token", fake_privileged_runner)
+    common = {
+        "policy_path": policy_path,
+        "operations_path": OPERATIONS,
+        "repository_root": root,
+        "run_id": "run-1",
+        "staging": staging,
+        "run_dir": tmp_path / "run",
+        "github_commit": "a" * 40,
+        "expected_count": 1,
+        "execute": True,
+        "runner": ordinary_runner,
+        "campaign_create_token_file": token_file_path,
+    }
+    with pytest.raises(MODULE.CampaignRepositoryError, match="not visible after creation"):
+        MODULE.prepare_campaign_repository(**common)
+    saved = json.loads((tmp_path / "run" / "cnb" / "campaign-receipt.json").read_text(encoding="utf-8"))
+    assert saved["repository_created"] is True
+
+    resumed = MODULE.prepare_campaign_repository(**common)
+    assert resumed["status"] == "created_and_pushed"
+    assert len(create_calls) == 1
 
 
 def test_prepare_devgpu_overlay_refreshes_allowed_runner_file_then_reuses_remote_branch(
