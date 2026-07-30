@@ -1135,6 +1135,8 @@ def test_devgpu_recovery_config_runs_all_shards_with_clean_gpu_gates() -> None:
     assert "    - name: Run receipt-bound Dev GPU full resume" in config
     assert "      timeout: 8h" in config
     assert "      expires: 32400" in config
+    assert "        sleep 660" in config
+    assert "[music-flamingo-workspace-lifecycle-guard] passed guard_seconds=660" in config
     assert "        sleep 60" in config
     assert "--phase before_hydrate" in config
     assert "--phase stable_before_hydrate" in config
@@ -1155,6 +1157,9 @@ def test_devgpu_recovery_config_runs_all_shards_with_clean_gpu_gates() -> None:
     assert 'if [ "$pending_count" -eq 0 ]; then' in stage
     assert '"campaign_status": "already_complete_for_selected_shard"' in stage
     assert '"reason": "static_shard_has_no_pending_items"' in stage
+    lifecycle_guard = stage.index("[music-flamingo-workspace-lifecycle-guard]")
+    first_gpu_gate = stage.index("--phase before_hydrate")
+    assert lifecycle_guard < first_gpu_gate
     empty_shard_start = stage.index('if [ "$pending_count" -eq 0 ]; then')
     pre_model_gate = stage.index('--phase "pre_model_s${shard_index}"')
     runner_start = stage.index("bash scripts/devgpu_run_batch.sh")
@@ -1181,7 +1186,7 @@ def test_devgpu_recovery_config_skips_zero_pending_shard_without_running_model(t
     stage = config.split(marker, 1)[1].split("\n    lock:\n", 1)[0]
     shell_script = "\n".join(
         line.removeprefix("        ") for line in stage.splitlines()
-    ).replace("sleep 60", ":").replace(
+    ).replace("sleep 660", ":").replace("sleep 60", ":").replace(
         "/workspace/cache/output/music_flamingo_pipeline", str(tmp_path / "output")
     )
     scripts = tmp_path / "scripts"
@@ -2208,6 +2213,7 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
     assert result["workspace_preflight"]["status"] == "clean"
     assert result["workspace"]["reused_visible_workspace"] is False
     assert result["workspace"]["timeout_seconds"] == MODULE.DEVGPU_WORKSPACE_MAX_SECONDS
+    assert result["workspace"]["lifecycle_guard_seconds"] == MODULE.DEVGPU_WORKSPACE_LIFECYCLE_GUARD_SECONDS
     assert [item["index"] for item in result["logical_shards"]] == [1, 2]
     assert MODULE.sha256_file(source_path) == source_sha
     assert sum("start-workspace" in " ".join(command) for command in commands) == 1
@@ -2437,6 +2443,7 @@ def test_fresh_devgpu_launch_stops_workspace_and_recovers_delivery(
     assert result["workspace"]["stopped"] is True
     assert result["admission"]["sha256"] == MODULE.sha256_file(admission)
     assert result["workspace"]["timeout_seconds"] == MODULE.DEVGPU_WORKSPACE_MAX_SECONDS
+    assert result["workspace"]["lifecycle_guard_seconds"] == MODULE.DEVGPU_WORKSPACE_LIFECYCLE_GUARD_SECONDS
     assert not any("start-build" in " ".join(command) for command in commands)
     assert sum("start-workspace" in " ".join(command) for command in commands) == 1
 
