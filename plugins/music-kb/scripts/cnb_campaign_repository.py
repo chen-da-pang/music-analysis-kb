@@ -88,6 +88,10 @@ DEVGPU_RECOVERY_REFRESHABLE_RUNTIME_FILES = (
     "scripts/check_manual_gpu_gate.py",
 )
 DEVGPU_RECOVERY_REFRESH_METADATA = "devgpu-runner-refresh.json"
+# The generated DevGPU stage can run a full 408-track campaign.  Keep the
+# client-side poll deadline aligned with that stage instead of allowing an
+# orphaned workspace to outlive the receipt-bound execution window.
+DEVGPU_WORKSPACE_MAX_SECONDS = 8 * 60 * 60
 
 JsonRunner = Callable[[Sequence[str]], dict[str, Any]]
 
@@ -867,35 +871,82 @@ def _campaign_repositories(policy: Mapping[str, Any], runner: JsonRunner) -> lis
     return sorted(set(names))
 
 
-def _running_workspaces(repository: str, runner: JsonRunner) -> list[dict[str, Any]]:
+def _running_workspaces(
+    repository: str,
+    runner: JsonRunner,
+    *,
+    branch: str | None = None,
+) -> list[dict[str, Any]]:
     """Return visible running workspaces for one disposable repository.
 
     A 404 is an audited absence here.  Any other API error still reaches the
     caller as a hard preflight failure through ``run_cnb``.
     """
 
-    response, absent = _cnb_optional(
-        [
-            "cnb",
-            "workspace",
-            "list-workspaces",
-            "--slug",
-            repository,
-            "--status",
-            "running",
-            "--page",
-            "1",
-            "--page-size",
-            "100",
-            "--verbose",
-        ],
-        runner,
-    )
+    command = [
+        "cnb",
+        "workspace",
+        "list-workspaces",
+        "--slug",
+        repository,
+        "--status",
+        "running",
+        "--page",
+        "1",
+        "--page-size",
+        "100",
+        "--verbose",
+    ]
+    if branch:
+        command.extend(["--branch", branch])
+    response, absent = _cnb_optional(command, runner)
     if absent or response is None:
         return []
     payload = _response_data(response) or {}
     rows = payload.get("list", []) if isinstance(payload, Mapping) else []
     return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+
+def _workspace_preflight(repository: str, runner: JsonRunner) -> dict[str, Any]:
+    """Record and reject any workspace visible before a new DevGPU launch."""
+
+    visible = _running_workspaces(repository, runner)
+    return {
+        "status": "clean" if not visible else "blocked",
+        "running_workspaces": visible,
+    }
+
+
+def _start_receipt_bound_workspace(
+    *, repository: str, branch: str, runner: JsonRunner
+) -> tuple[str, bool]:
+    """Start a workspace, resolving CNB's URL-only existing-workspace response safely."""
+
+    response = runner(
+        [
+            "cnb", "workspace", "start-workspace", "--repo", repository,
+            "--branch", branch, "--verbose",
+        ]
+    )
+    try:
+        return _extract_build_sn(response), False
+    except CampaignRepositoryError as start_error:
+        # CNB documents that start-workspace returns only a WebIDE URL when the
+        # environment already exists.  That URL is not execution evidence: only
+        # a single running workspace on the exact receipt-bound branch is safe.
+        candidates = _running_workspaces(repository, runner, branch=branch)
+        candidate_sns = sorted(
+            {
+                str(item["sn"])
+                for item in candidates
+                if isinstance(item.get("sn"), str) and str(item["sn"]).strip()
+            }
+        )
+        if len(candidate_sns) != 1:
+            raise CampaignRepositoryError(
+                "workspace start returned no SN and did not resolve exactly one receipt-bound running workspace"
+            ) from start_error
+        return candidate_sns[0], True
 
 
 def retained_campaign_receipt_validation_errors(
@@ -1229,7 +1280,7 @@ def generate_campaign_devgpu_config(
         "      MUSIC_FLAMINGO_DETAILED_CUDA_TELEMETRY: '0'",
         "    stages:",
         "    - name: Run receipt-bound Dev GPU full resume",
-        "      timeout: 4h",
+        "      timeout: 8h",
         "      script: |",
         "        set -eu",
         "        gate_root=\"/workspace/cache/output/music_flamingo_pipeline/devgpu-recovery-${CNB_BUILD_ID}\"",
@@ -1343,7 +1394,7 @@ def generate_campaign_devgpu_config(
         f"      key: {_yaml_string('music-flamingo-' + campaign_id + '-ledger-writer')}",
         "      wait: true",
         "      timeout: 15000",
-        "      expires: 18000",
+        "      expires: 32400",
         "",
     ]
     return "\n".join(lines)
@@ -2476,6 +2527,7 @@ def _prepare_devgpu_overlay(
     runtime_export_dir: Path,
     runner_refresh: Mapping[str, Any],
     devgpu_profile: str = "L40",
+    overlay_kind: str = "recovery",
 ) -> dict[str, Any]:
     checkout = Path(str(source_receipt["checkout"])).expanduser().resolve()
     campaign_commit = str(source_receipt.get("campaign_commit", ""))
@@ -2496,7 +2548,9 @@ def _prepare_devgpu_overlay(
         if not remote_main or remote_main[0] != campaign_commit:
             raise CampaignRepositoryError("remote campaign main no longer matches the receipt campaign_commit")
 
-        branch = f"codex/devgpu-recovery-{source_receipt['run_id']}"
+        if overlay_kind not in {"recovery", "campaign"}:
+            raise CampaignRepositoryError("Dev GPU overlay kind is invalid")
+        branch = f"codex/devgpu-{overlay_kind}-{source_receipt['run_id']}"
         config = generate_campaign_devgpu_config(
             policy,
             campaign_id=str(source_receipt["run_id"]),
@@ -2810,6 +2864,65 @@ def _validated_devgpu_history_review(
     }
 
 
+def _validated_fresh_devgpu_admission(
+    admission_path: str | Path,
+    *,
+    source_receipt_path: Path,
+    source_receipt: Mapping[str, Any],
+    operations_sha256: str,
+) -> dict[str, Any]:
+    """Validate the explicit human admission for a fresh direct Dev GPU run.
+
+    This is intentionally not a recovery history review: it must not invent a
+    Build-GPU failure simply to enter the Dev GPU route.
+    """
+
+    path = Path(admission_path).expanduser().resolve()
+    value = _read_json(path)
+    expected = {
+        "schema_version": 1,
+        "atom": "cnb_campaign_devgpu_launch",
+        "run_id": source_receipt.get("run_id"),
+        "repository": source_receipt.get("repository"),
+        "source_receipt_sha256": sha256_file(source_receipt_path),
+        "operations_sha256": operations_sha256,
+    }
+    errors = [f"fresh Dev GPU admission {key} does not bind the prepared campaign" for key, item in expected.items() if value.get(key) != item]
+    manifest = value.get("manifest")
+    if not isinstance(manifest, Mapping) or _manifest_binding_fields(manifest) != _manifest_binding_fields(source_receipt.get("manifest", {})):
+        errors.append("fresh Dev GPU admission manifest does not match the prepared receipt")
+    authorization = value.get("user_authorization")
+    if not isinstance(authorization, Mapping) or authorization.get("action") != "user_authorized_fresh_direct_devgpu_campaign":
+        errors.append("fresh Dev GPU admission lacks the explicit direct-launch authorization")
+    elif not isinstance(authorization.get("authorized_at"), str) or not str(authorization["authorized_at"]).strip():
+        errors.append("fresh Dev GPU admission authorization lacks authorized_at")
+    snapshot = value.get("quota_snapshot")
+    required_snapshot = ("captured_at", "quota_total_dev_gpu_seconds", "volume_used_dev_gpu_seconds", "volume_frozen_dev_gpu_seconds", "available_dev_gpu_seconds")
+    if not isinstance(snapshot, Mapping):
+        errors.append("fresh Dev GPU admission lacks a quota_snapshot")
+    else:
+        for field in required_snapshot:
+            item = snapshot.get(field)
+            if field == "captured_at":
+                valid = isinstance(item, str) and bool(item.strip())
+            else:
+                valid = isinstance(item, int) and not isinstance(item, bool) and item >= 0
+            if not valid:
+                errors.append(f"fresh Dev GPU admission quota_snapshot.{field} is invalid")
+        if not errors and snapshot["available_dev_gpu_seconds"] != (
+            snapshot["quota_total_dev_gpu_seconds"] - snapshot["volume_used_dev_gpu_seconds"] - snapshot["volume_frozen_dev_gpu_seconds"]
+        ):
+            errors.append("fresh Dev GPU admission quota snapshot arithmetic is inconsistent")
+    if errors:
+        raise CampaignRepositoryError("fresh Dev GPU admission is invalid: " + "; ".join(errors))
+    return {
+        "path": str(path),
+        "sha256": sha256_file(path),
+        "user_authorization": copy.deepcopy(dict(authorization)),
+        "quota_snapshot": copy.deepcopy(dict(snapshot)),
+    }
+
+
 def recover_campaign_with_devgpu(
     *,
     policy_path: str | Path,
@@ -2820,7 +2933,7 @@ def recover_campaign_with_devgpu(
     history_review_path: str | Path | None = None,
     execute: bool = False,
     wait: bool = True,
-    timeout_seconds: float = 14_400,
+    timeout_seconds: float = DEVGPU_WORKSPACE_MAX_SECONDS,
     poll_seconds: float = 10.0,
     runner: JsonRunner = run_cnb,
     transport: str | None = None,
@@ -2970,6 +3083,14 @@ def recover_campaign_with_devgpu(
             raise CampaignRepositoryError(
                 "Dev GPU capacity preflight failed: " + "; ".join(capacity_preflight["errors"])
             )
+        workspace_preflight = _workspace_preflight(str(source["repository"]), runner)
+        receipt["workspace_preflight"] = workspace_preflight
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(recovery_file, receipt)
+        if workspace_preflight["status"] != "clean":
+            raise CampaignRepositoryError(
+                "Dev GPU recovery found a visible running workspace for the disposable campaign"
+            )
         runtime_export_dir, runner_refresh = _prepare_devgpu_runner_refresh(
             repository_root=root,
             github_commit=refresh_commit,
@@ -2988,21 +3109,22 @@ def recover_campaign_with_devgpu(
         receipt["status"] = "starting_workspace"
         receipt["updated_at"] = now_iso()
         _atomic_write_json(recovery_file, receipt)
-        response = runner(
-            [
-                "cnb", "workspace", "start-workspace", "--repo", str(source["repository"]),
-                "--branch", str(overlay["branch"]), "--verbose",
-            ]
+        workspace_sn, reused_workspace = _start_receipt_bound_workspace(
+            repository=str(source["repository"]), branch=str(overlay["branch"]), runner=runner
         )
-        workspace_sn = _extract_build_sn(response)
-        receipt["workspace"] = {"sn": workspace_sn, "status": "submitted"}
+        receipt["workspace"] = {
+            "sn": workspace_sn,
+            "status": "submitted",
+            "reused_visible_workspace": reused_workspace,
+            "timeout_seconds": min(float(timeout_seconds), DEVGPU_WORKSPACE_MAX_SECONDS),
+        }
         receipt["status"] = "running"
         receipt["updated_at"] = now_iso()
         _atomic_write_json(recovery_file, receipt)
         started = time.monotonic()
         pipeline_id: str | None = None
         while True:
-            if time.monotonic() - started > timeout_seconds:
+            if time.monotonic() - started > min(float(timeout_seconds), DEVGPU_WORKSPACE_MAX_SECONDS):
                 raise CampaignRepositoryError(f"Dev GPU recovery workspace timed out: {workspace_sn}")
             status, pipeline_id = _workspace_recovery_stage_status(str(source["repository"]), workspace_sn, runner)
             receipt["workspace"].update({"status": status, "pipeline_id": pipeline_id})
@@ -3045,6 +3167,177 @@ def recover_campaign_with_devgpu(
         receipt["failure"] = {"phase": "devgpu_recovery", "message": str(exc)}
         receipt["updated_at"] = now_iso()
         _atomic_write_json(recovery_file, receipt)
+        raise
+
+
+def launch_fresh_campaign_with_devgpu(
+    *,
+    policy_path: str | Path,
+    operations_path: str | Path,
+    source_receipt_path: str | Path,
+    admission_path: str | Path,
+    launch_receipt_path: str | Path,
+    run_dir: str | Path,
+    execute: bool = False,
+    wait: bool = True,
+    timeout_seconds: float = DEVGPU_WORKSPACE_MAX_SECONDS,
+    poll_seconds: float = 10.0,
+    runner: JsonRunner = run_cnb,
+    transport: str | None = None,
+    repository_root: str | Path | None = None,
+    github_commit: str | None = None,
+    devgpu_profile: str = "L40",
+) -> dict[str, Any]:
+    """Launch a fresh, explicitly admitted campaign in Dev GPU.
+
+    This route is deliberately separate from ``recover_campaign_with_devgpu``:
+    it never submits a Build-GPU job and it cannot accept a receipt that has
+    already entered the build or delivery lifecycle.
+    """
+
+    operations = Path(operations_path).expanduser().resolve()
+    load_validated_operations(operations, required_atom="cnb_campaign_devgpu_launch")
+    operations_sha256 = sha256_file(operations)
+    policy = _policy_with_transport(load_campaign_policy(policy_path), transport)
+    selected_profile = resolve_devgpu_recovery_profile(policy, devgpu_profile)
+    source_file = Path(source_receipt_path).expanduser().resolve()
+    source = _read_json(source_file)
+    binding = validate_campaign_receipt_binding(policy, source, operations_sha256=None)
+    errors = list(binding["errors"])
+    if source.get("status") not in {"created_and_pushed", "planned"}:
+        errors.append("fresh Dev GPU launch requires a prepared-and-pushed campaign receipt")
+    if source.get("repository_created") is not True or source.get("repository_pushed") is not True:
+        errors.append("fresh Dev GPU launch requires repository creation/push proof")
+    if source.get("delivery") is not None:
+        errors.append("fresh Dev GPU launch rejects a receipt that already has delivery")
+    builds = source.get("builds")
+    if not isinstance(builds, list) or builds:
+        errors.append("fresh Dev GPU launch rejects a receipt with submitted builds")
+    if errors:
+        raise CampaignRepositoryError("fresh Dev GPU source is invalid: " + "; ".join(errors))
+    if not _repo_exists(str(source["repository"]), runner):
+        raise CampaignRepositoryError("receipt-bound campaign repository is missing")
+
+    admission = _validated_fresh_devgpu_admission(
+        admission_path,
+        source_receipt_path=source_file,
+        source_receipt=source,
+        operations_sha256=operations_sha256,
+    )
+    launch_file = Path(launch_receipt_path).expanduser().resolve()
+    launch_dir = launch_file.parent
+    launch_dir.mkdir(parents=True, exist_ok=True)
+    existing = _read_json(launch_file) if launch_file.is_file() else {}
+    if existing.get("status") == "completed":
+        return {**existing, "receipt": str(launch_file)}
+    if existing and (
+        existing.get("source_receipt_sha256") != sha256_file(source_file)
+        or existing.get("admission", {}).get("sha256") != admission["sha256"]
+    ):
+        raise CampaignRepositoryError("fresh Dev GPU launch receipt is not bound to this source/admission")
+    attempts = list(existing.get("attempts", [])) if isinstance(existing.get("attempts"), list) else []
+    if existing.get("status") == "failed" and isinstance(existing.get("workspace"), Mapping):
+        attempts.append({"status": "failed", "updated_at": existing.get("updated_at"), "workspace": copy.deepcopy(existing["workspace"]), "failure": copy.deepcopy(existing.get("failure"))})
+    receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "atom": "cnb_campaign_devgpu_launch",
+        "status": "planned" if not execute else "preparing",
+        "operations_sha256": operations_sha256,
+        "source_receipt": str(source_file),
+        "source_receipt_sha256": sha256_file(source_file),
+        "admission": admission,
+        "run_id": source["run_id"],
+        "repository": source["repository"],
+        "manifest": copy.deepcopy(source["manifest"]),
+        "runtime_image": source["runtime_image"],
+        "campaign_commit": source["campaign_commit"],
+        "devgpu_profile": copy.deepcopy(selected_profile),
+        "execution_mode": "fresh_direct_devgpu",
+        "attempts": attempts,
+        "created_at": existing.get("created_at") or now_iso(),
+        "updated_at": now_iso(),
+        "failure": None,
+    }
+    if not execute:
+        _atomic_write_json(launch_file, receipt)
+        return {**receipt, "receipt": str(launch_file)}
+    if not wait:
+        raise CampaignRepositoryError("executable fresh Dev GPU launch must wait for the full workspace stage")
+    if repository_root is None or github_commit is None:
+        raise CampaignRepositoryError("executable fresh Dev GPU launch requires --repository-root and --github-commit")
+    root = Path(repository_root).expanduser().resolve()
+    refresh_commit = _validate_commit(root, github_commit)
+    workspace_sn = ""
+    try:
+        ledger_branch = str(policy["campaign_repository"]["ledger_branch_template"]).format(campaign_id=source["run_id"])
+        pending_preflight = _plan_devgpu_pending_preflight(source, recovery_dir=launch_dir, ledger_branch=ledger_branch, execution_profile=str(selected_profile["execution_profile"]), shard_count=int(policy["campaign_repository"]["shard_count"]))
+        receipt["pending_preflight"] = pending_preflight
+        _atomic_write_json(launch_file, receipt)
+        if pending_preflight["global_pending_item_count"] == 0:
+            raise CampaignRepositoryError("fresh Dev GPU launch requires pending items; use the normal delivery recovery path")
+        capacity = devgpu_capacity_preflight(policy, pending_item_count=int(pending_preflight["global_pending_item_count"]), runner=runner)
+        receipt["devgpu_capacity_preflight"] = capacity
+        _atomic_write_json(launch_file, receipt)
+        if not capacity["clean"]:
+            raise CampaignRepositoryError("Dev GPU capacity preflight failed: " + "; ".join(capacity["errors"]))
+        workspace_preflight = _workspace_preflight(str(source["repository"]), runner)
+        receipt["workspace_preflight"] = workspace_preflight
+        _atomic_write_json(launch_file, receipt)
+        if workspace_preflight["status"] != "clean":
+            raise CampaignRepositoryError(
+                "fresh Dev GPU launch found a visible running workspace for the disposable campaign"
+            )
+        runtime_export_dir, runner_refresh = _prepare_devgpu_runner_refresh(repository_root=root, github_commit=refresh_commit, recovery_dir=launch_dir)
+        receipt["runner_refresh"] = runner_refresh
+        overlay = _prepare_devgpu_overlay(policy=policy, source_receipt=source, recovery_dir=launch_dir, runtime_export_dir=runtime_export_dir, runner_refresh=runner_refresh, devgpu_profile=selected_profile["name"], overlay_kind="campaign")
+        receipt["overlay"] = overlay
+        receipt["status"] = "starting_workspace"
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(launch_file, receipt)
+        workspace_sn, reused_workspace = _start_receipt_bound_workspace(
+            repository=str(source["repository"]), branch=str(overlay["branch"]), runner=runner
+        )
+        receipt["workspace"] = {
+            "sn": workspace_sn,
+            "status": "submitted",
+            "reused_visible_workspace": reused_workspace,
+            "timeout_seconds": min(float(timeout_seconds), DEVGPU_WORKSPACE_MAX_SECONDS),
+        }
+        receipt["status"] = "running"
+        _atomic_write_json(launch_file, receipt)
+        started = time.monotonic()
+        while True:
+            if time.monotonic() - started > min(float(timeout_seconds), DEVGPU_WORKSPACE_MAX_SECONDS):
+                raise CampaignRepositoryError(f"fresh Dev GPU workspace timed out: {workspace_sn}")
+            status, pipeline_id = _workspace_recovery_stage_status(str(source["repository"]), workspace_sn, runner)
+            receipt["workspace"].update({"status": status, "pipeline_id": pipeline_id})
+            _atomic_write_json(launch_file, receipt)
+            if status in TERMINAL_BUILD_STATES:
+                if status != "success":
+                    raise CampaignRepositoryError(f"fresh Dev GPU stage reached terminal status {status}")
+                break
+            time.sleep(max(0.1, poll_seconds))
+        runner(["cnb", "workspace", "workspace-stop", "--sn", workspace_sn, "--verbose"])
+        receipt["workspace"]["stopped"] = True
+        delivery_source = dict(source)
+        delivery_source["ledger_branch"] = ledger_branch
+        receipt["delivery"] = _recover_delivery(delivery_source, run_dir=Path(run_dir).expanduser().resolve(), require_source_url=True, fresh_ledger=True)
+        receipt["logical_shards"] = [{"index": item["index"], "id": item["id"], "status": "success", "pending_item_count": item["pending_item_count"], "workspace_sn": workspace_sn} for item in pending_preflight["shards"]]
+        receipt["status"] = "completed"
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(launch_file, receipt)
+        return {**receipt, "receipt": str(launch_file)}
+    except Exception as exc:
+        if workspace_sn:
+            try:
+                runner(["cnb", "workspace", "workspace-stop", "--sn", workspace_sn, "--verbose"])
+                receipt.setdefault("workspace", {})["stopped_after_failure"] = True
+            except Exception as stop_exc:
+                receipt.setdefault("workspace", {})["stop_error"] = str(stop_exc)
+        receipt["status"] = "failed"
+        receipt["failure"] = {"phase": "fresh_devgpu_launch", "message": str(exc)}
+        receipt["updated_at"] = now_iso()
+        _atomic_write_json(launch_file, receipt)
         raise
 
 
@@ -3747,6 +4040,7 @@ def _parser() -> argparse.ArgumentParser:
             "prepare",
             "submit",
             "recover-devgpu",
+            "launch-devgpu",
             "cleanup",
             "reconcile-external-delivery",
             "cleanup-reconciled-external-delivery",
@@ -3761,6 +4055,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--recovery-receipt", type=Path)
+    parser.add_argument("--admission", type=Path, help="Required receipt-bound authorization for fresh direct Dev GPU launch")
+    parser.add_argument("--launch-receipt", type=Path)
     parser.add_argument(
         "--history-review",
         type=Path,
@@ -3875,6 +4171,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 recovery_receipt_path=args.recovery_receipt,
                 run_dir=args.run_dir,
                 history_review_path=args.history_review,
+                execute=args.execute,
+                wait=args.wait,
+                timeout_seconds=args.timeout_seconds,
+                poll_seconds=args.poll_seconds,
+                transport=args.transport,
+                repository_root=args.repository_root,
+                github_commit=args.github_commit,
+                devgpu_profile=args.devgpu_profile,
+            )
+        elif args.action == "launch-devgpu":
+            if not args.receipt or not args.admission or not args.launch_receipt or not args.run_dir:
+                raise CampaignRepositoryError("launch-devgpu requires --receipt, --admission, --launch-receipt, and --run-dir")
+            result = launch_fresh_campaign_with_devgpu(
+                policy_path=args.policy,
+                operations_path=args.operations_file,
+                source_receipt_path=args.receipt,
+                admission_path=args.admission,
+                launch_receipt_path=args.launch_receipt,
+                run_dir=args.run_dir,
                 execute=args.execute,
                 wait=args.wait,
                 timeout_seconds=args.timeout_seconds,

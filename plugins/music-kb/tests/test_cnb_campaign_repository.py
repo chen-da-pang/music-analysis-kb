@@ -282,6 +282,37 @@ def write_devgpu_history_review(
     return review_path
 
 
+def write_fresh_devgpu_admission(source_path: Path, *, path: Path | None = None) -> Path:
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    admission_path = path or source_path.with_name("fresh-devgpu-admission.json")
+    admission_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "atom": "cnb_campaign_devgpu_launch",
+                "run_id": source["run_id"],
+                "repository": source["repository"],
+                "source_receipt_sha256": MODULE.sha256_file(source_path),
+                "operations_sha256": MODULE.sha256_file(OPERATIONS),
+                "manifest": source["manifest"],
+                "user_authorization": {
+                    "action": "user_authorized_fresh_direct_devgpu_campaign",
+                    "authorized_at": "2026-07-28T00:00:00Z",
+                },
+                "quota_snapshot": {
+                    "captured_at": "2026-07-28T00:00:00Z",
+                    "quota_total_dev_gpu_seconds": 4_000_000,
+                    "volume_used_dev_gpu_seconds": 500_000,
+                    "volume_frozen_dev_gpu_seconds": 100_000,
+                    "available_dev_gpu_seconds": 3_400_000,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return admission_path
+
+
 def devgpu_pending_preflight(*, pending_counts: list[int]) -> dict:
     """Return a minimal receipt-shaped local pending plan for recovery tests."""
 
@@ -1102,6 +1133,8 @@ def test_devgpu_recovery_config_runs_all_shards_with_clean_gpu_gates() -> None:
     assert "  vscode:\n" in config
     assert "      tags: cnb:arch:amd64:gpu:L40" in config
     assert "    - name: Run receipt-bound Dev GPU full resume" in config
+    assert "      timeout: 8h" in config
+    assert "      expires: 32400" in config
     assert "        sleep 60" in config
     assert "--phase before_hydrate" in config
     assert "--phase stable_before_hydrate" in config
@@ -1111,7 +1144,7 @@ def test_devgpu_recovery_config_runs_all_shards_with_clean_gpu_gates() -> None:
     assert 'while [ "$release_attempt" -le 20 ]; do' in config
     assert '--phase "${release_phase}_attempt_${release_attempt}"' in config
     assert 'wait_for_clean_gpu "post_shard_s${shard_index}_release"' in config
-    marker = "    - name: Run receipt-bound Dev GPU full resume\n      timeout: 4h\n      script: |\n"
+    marker = "    - name: Run receipt-bound Dev GPU full resume\n      timeout: 8h\n      script: |\n"
     stage = config.split(marker, 1)[1].split("\n    lock:\n", 1)[0]
     assert "bash scripts/devgpu_run_batch.sh" in stage
     assert "run_music_flamingo_campaign.sh" not in stage
@@ -1144,7 +1177,7 @@ def test_devgpu_recovery_config_skips_zero_pending_shard_without_running_model(t
         item_count=1,
         source_manifest_sha256="b" * 64,
     )
-    marker = "    - name: Run receipt-bound Dev GPU full resume\n      timeout: 4h\n      script: |\n"
+    marker = "    - name: Run receipt-bound Dev GPU full resume\n      timeout: 8h\n      script: |\n"
     stage = config.split(marker, 1)[1].split("\n    lock:\n", 1)[0]
     shell_script = "\n".join(
         line.removeprefix("        ") for line in stage.splitlines()
@@ -1294,7 +1327,7 @@ def test_devgpu_recovery_stage_script_is_valid_posix_sh(tmp_path: Path) -> None:
         item_count=48,
         source_manifest_sha256="b" * 64,
     )
-    marker = "    - name: Run receipt-bound Dev GPU full resume\n      timeout: 4h\n      script: |\n"
+    marker = "    - name: Run receipt-bound Dev GPU full resume\n      timeout: 8h\n      script: |\n"
     stage = config.split(marker, 1)[1].split("\n    lock:\n", 1)[0]
     script = "\n".join(line[8:] for line in stage.splitlines()) + "\n"
     script_path = tmp_path / "devgpu-stage.sh"
@@ -1988,6 +2021,31 @@ def test_devgpu_workspace_success_requires_the_full_resume_stage() -> None:
         MODULE._workspace_recovery_stage_status("org/repo", "cnb-workspace", runner)
 
 
+def test_receipt_bound_workspace_start_resolves_url_only_response() -> None:
+    commands: list[list[str]] = []
+
+    def runner(command):
+        commands.append(list(command))
+        if "start-workspace" in command:
+            return {"status": 200, "data": {"url": "https://cnb.cool/workspace/loading"}}
+        if "list-workspaces" in command:
+            assert command[command.index("--branch") + 1] == "codex/devgpu-campaign-run-1"
+            return {
+                "status": 200,
+                "data": {"list": [{"sn": "cnb-workspace-url-only", "branch": "codex/devgpu-campaign-run-1"}]},
+            }
+        raise AssertionError(command)
+
+    sn, reused = MODULE._start_receipt_bound_workspace(
+        repository="org/music-flamingo-campaign-run-1",
+        branch="codex/devgpu-campaign-run-1",
+        runner=runner,
+    )
+    assert sn == "cnb-workspace-url-only"
+    assert reused is True
+    assert ["start-workspace" in " ".join(command) for command in commands] == [True, False]
+
+
 def test_devgpu_recovery_requires_every_build_to_prove_pre_freezing_quota() -> None:
     source = {
         "repository": "org/music-flamingo-campaign-run-1",
@@ -2134,7 +2192,7 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
         execute=True,
         wait=True,
         poll_seconds=0,
-        timeout_seconds=2,
+        timeout_seconds=86_400,
         runner=runner,
         transport="git-objects",
         repository_root=tmp_path,
@@ -2147,11 +2205,240 @@ def test_devgpu_recovery_keeps_failed_source_receipt_immutable(
     assert result["devgpu_profile"]["expected_gpu"] == "L40"
     assert result["devgpu_profile"]["minimum_free_mib"] == 35_000
     assert result["devgpu_capacity_preflight"]["clean"] is True
+    assert result["workspace_preflight"]["status"] == "clean"
+    assert result["workspace"]["reused_visible_workspace"] is False
+    assert result["workspace"]["timeout_seconds"] == MODULE.DEVGPU_WORKSPACE_MAX_SECONDS
     assert [item["index"] for item in result["logical_shards"]] == [1, 2]
     assert MODULE.sha256_file(source_path) == source_sha
     assert sum("start-workspace" in " ".join(command) for command in commands) == 1
     assert sum("workspace-stop" in " ".join(command) for command in commands) == 1
     assert recover_calls == [{"run_dir": tmp_path, "require_source_url": True, "fresh_ledger": True}]
+
+
+def test_devgpu_recovery_rejects_visible_workspace_before_overlay_or_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(policy()), encoding="utf-8")
+    source = receipt_identity(tmp_path, count=2)
+    source.update(
+        {
+            "status": "failed",
+            "campaign_commit": "c" * 40,
+            "failure": {"phase": "submit_or_recover", "message": "build GPU quota"},
+        }
+    )
+    source_path = tmp_path / "source-receipt.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    history_review = write_devgpu_history_review(source_path)
+    recovery_path = tmp_path / "devgpu-recovery.json"
+    _, commands, runner = cnb_runner_factory(target_present=True)
+    monkeypatch.setattr(
+        MODULE,
+        "_verify_build_gpu_platform_gate",
+        lambda *_args, **_kwargs: {"classification": "cnb_build_gpu_pre_freezing_quota", "builds": []},
+    )
+    monkeypatch.setattr(MODULE, "_validate_commit", lambda _root, commit: commit)
+    monkeypatch.setattr(
+        MODULE,
+        "_plan_devgpu_pending_preflight",
+        lambda *_args, **_kwargs: devgpu_pending_preflight(pending_counts=[1, 1]),
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_workspace_preflight",
+        lambda *_args, **_kwargs: {"status": "blocked", "running_workspaces": [{"sn": "cnb-stale-1"}]},
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_prepare_devgpu_runner_refresh",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("visible workspace must not refresh")),
+    )
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="visible running workspace"):
+        MODULE.recover_campaign_with_devgpu(
+            policy_path=policy_path,
+            operations_path=OPERATIONS,
+            source_receipt_path=source_path,
+            recovery_receipt_path=recovery_path,
+            run_dir=tmp_path,
+            history_review_path=history_review,
+            execute=True,
+            wait=True,
+            runner=runner,
+            transport="git-objects",
+            repository_root=tmp_path,
+            github_commit="a" * 40,
+        )
+    saved = json.loads(recovery_path.read_text(encoding="utf-8"))
+    assert saved["workspace_preflight"]["status"] == "blocked"
+    assert not any("start-build" in " ".join(command) or "start-workspace" in " ".join(command) for command in commands)
+
+
+def test_fresh_devgpu_launch_rejects_builds_before_capacity_or_workspace(tmp_path: Path) -> None:
+    source = receipt_identity(tmp_path, count=2)
+    source["builds"] = [{"index": 1, "id": "run-1-s1", "sn": "build-1", "status": "submitted"}]
+    source_path = tmp_path / "source.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    admission = write_fresh_devgpu_admission(source_path)
+    value = policy()
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(value), encoding="utf-8")
+    _, commands, runner = cnb_runner_factory(target_present=True)
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="submitted builds"):
+        MODULE.launch_fresh_campaign_with_devgpu(
+            policy_path=policy_path, operations_path=OPERATIONS, source_receipt_path=source_path,
+            admission_path=admission, launch_receipt_path=tmp_path / "launch.json", run_dir=tmp_path,
+            execute=True, runner=runner, repository_root=tmp_path, github_commit="a" * 40,
+        )
+    assert not any("start-build" in " ".join(command) or "start-workspace" in " ".join(command) for command in commands)
+
+
+def test_fresh_devgpu_launch_records_capacity_before_overlay_or_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = receipt_identity(tmp_path, count=2)
+    source["campaign_commit"] = "c" * 40
+    source_path = tmp_path / "source.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    admission = write_fresh_devgpu_admission(source_path)
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(policy()), encoding="utf-8")
+    state, commands, runner = cnb_runner_factory(target_present=True)
+    state["dev_gpu_total"] = 3_000
+    monkeypatch.setattr(MODULE, "_validate_commit", lambda _root, commit: commit)
+    monkeypatch.setattr(MODULE, "_plan_devgpu_pending_preflight", lambda *_args, **_kwargs: devgpu_pending_preflight(pending_counts=[1, 1]))
+    monkeypatch.setattr(MODULE, "_prepare_devgpu_runner_refresh", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("capacity failure must not refresh")))
+    monkeypatch.setattr(MODULE, "_prepare_devgpu_overlay", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("capacity failure must not overlay")))
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="capacity preflight failed"):
+        MODULE.launch_fresh_campaign_with_devgpu(
+            policy_path=policy_path, operations_path=OPERATIONS, source_receipt_path=source_path,
+            admission_path=admission, launch_receipt_path=tmp_path / "launch.json", run_dir=tmp_path,
+            execute=True, wait=True, runner=runner, repository_root=tmp_path, github_commit="a" * 40,
+        )
+    saved = json.loads((tmp_path / "launch.json").read_text(encoding="utf-8"))
+    assert saved["devgpu_capacity_preflight"]["clean"] is False
+    assert not any("start-build" in " ".join(command) or "start-workspace" in " ".join(command) for command in commands)
+
+
+def test_fresh_devgpu_launch_rejects_visible_workspace_before_overlay_or_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = receipt_identity(tmp_path, count=2)
+    source["campaign_commit"] = "c" * 40
+    source_path = tmp_path / "source.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    admission = write_fresh_devgpu_admission(source_path)
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(policy()), encoding="utf-8")
+    _, commands, runner = cnb_runner_factory(target_present=True)
+    monkeypatch.setattr(MODULE, "_validate_commit", lambda _root, commit: commit)
+    monkeypatch.setattr(MODULE, "_plan_devgpu_pending_preflight", lambda *_args, **_kwargs: devgpu_pending_preflight(pending_counts=[1, 1]))
+    monkeypatch.setattr(
+        MODULE,
+        "_running_workspaces",
+        lambda *_args, **_kwargs: [{"sn": "cnb-stale-1", "branch": "codex/devgpu-campaign-run-1"}],
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_prepare_devgpu_runner_refresh",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("visible workspace must not refresh")),
+    )
+
+    with pytest.raises(MODULE.CampaignRepositoryError, match="visible running workspace"):
+        MODULE.launch_fresh_campaign_with_devgpu(
+            policy_path=policy_path, operations_path=OPERATIONS, source_receipt_path=source_path,
+            admission_path=admission, launch_receipt_path=tmp_path / "launch.json", run_dir=tmp_path,
+            execute=True, wait=True, runner=runner, repository_root=tmp_path, github_commit="a" * 40,
+        )
+    saved = json.loads((tmp_path / "launch.json").read_text(encoding="utf-8"))
+    assert saved["workspace_preflight"]["status"] == "blocked"
+    assert not any("start-build" in " ".join(command) or "start-workspace" in " ".join(command) for command in commands)
+
+
+def test_fresh_devgpu_launch_resolves_url_only_start_from_exact_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = receipt_identity(tmp_path, count=2)
+    source["campaign_commit"] = "c" * 40
+    source_path = tmp_path / "source.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    admission = write_fresh_devgpu_admission(source_path)
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(policy()), encoding="utf-8")
+    _, commands, base_runner = cnb_runner_factory(target_present=True)
+    workspace_list_calls = 0
+
+    def runner(command):
+        nonlocal workspace_list_calls
+        joined = " ".join(command)
+        if "list-workspaces" in joined:
+            commands.append(list(command))
+            workspace_list_calls += 1
+            if workspace_list_calls == 1:
+                return {"status": 200, "data": {"list": []}}
+            return {
+                "status": 200,
+                "data": {"list": [{"sn": "cnb-workspace-url-only", "branch": "codex/devgpu-campaign-run-1"}]},
+            }
+        if "start-workspace" in joined:
+            commands.append(list(command))
+            return {"status": 200, "data": {"url": "https://cnb.cool/workspace/loading"}}
+        if "get-build-status" in joined:
+            commands.append(list(command))
+            return {"status": 200, "data": {"status": "success", "pipelinesStatus": {"cnb-workspace-url-only-001": {"stages": [{"id": "stage-0", "name": "Run receipt-bound Dev GPU full resume", "status": "success"}]}}}}
+        return base_runner(command)
+
+    monkeypatch.setattr(MODULE, "_validate_commit", lambda _root, commit: commit)
+    monkeypatch.setattr(MODULE, "_plan_devgpu_pending_preflight", lambda *_args, **_kwargs: devgpu_pending_preflight(pending_counts=[1, 1]))
+    monkeypatch.setattr(MODULE, "_prepare_devgpu_runner_refresh", lambda **_kwargs: (tmp_path / "runtime-export", {"github_commit": "a" * 40, "files": []}))
+    monkeypatch.setattr(MODULE, "_prepare_devgpu_overlay", lambda **_kwargs: {"branch": "codex/devgpu-campaign-run-1", "commit": "d" * 40})
+    monkeypatch.setattr(MODULE, "_recover_delivery", lambda *_args, **_kwargs: {"path": str(tmp_path / "delivery.jsonl"), "count": 2, "sha256": "f" * 64, "ledger_branch": "campaign-results/run-1"})
+    result = MODULE.launch_fresh_campaign_with_devgpu(
+        policy_path=policy_path, operations_path=OPERATIONS, source_receipt_path=source_path,
+        admission_path=admission, launch_receipt_path=tmp_path / "launch.json", run_dir=tmp_path,
+        execute=True, wait=True, runner=runner, repository_root=tmp_path, github_commit="a" * 40, poll_seconds=0,
+    )
+    assert result["workspace"]["sn"] == "cnb-workspace-url-only"
+    assert result["workspace"]["reused_visible_workspace"] is True
+    assert workspace_list_calls == 2
+
+
+def test_fresh_devgpu_launch_stops_workspace_and_recovers_delivery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = receipt_identity(tmp_path, count=2)
+    source["campaign_commit"] = "c" * 40
+    source_path = tmp_path / "source.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    admission = write_fresh_devgpu_admission(source_path)
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(policy()), encoding="utf-8")
+    _, commands, base_runner = cnb_runner_factory(target_present=True)
+    def runner(command):
+        if "get-build-status" in " ".join(command):
+            commands.append(list(command))
+            return {"status": 200, "data": {"status": "success", "pipelinesStatus": {"cnb-workspace-1-001": {"stages": [{"id": "stage-0", "name": "Run receipt-bound Dev GPU full resume", "status": "success"}]}}}}
+        return base_runner(command)
+    monkeypatch.setattr(MODULE, "_validate_commit", lambda _root, commit: commit)
+    monkeypatch.setattr(MODULE, "_plan_devgpu_pending_preflight", lambda *_args, **_kwargs: devgpu_pending_preflight(pending_counts=[1, 1]))
+    monkeypatch.setattr(MODULE, "_prepare_devgpu_runner_refresh", lambda **_kwargs: (tmp_path / "runtime-export", {"github_commit": "a" * 40, "files": []}))
+    monkeypatch.setattr(MODULE, "_prepare_devgpu_overlay", lambda **_kwargs: {"branch": "codex/devgpu-campaign-run-1", "commit": "d" * 40})
+    monkeypatch.setattr(MODULE, "_recover_delivery", lambda *_args, **_kwargs: {"path": str(tmp_path / "delivery.jsonl"), "count": 2, "sha256": "f" * 64, "ledger_branch": "campaign-results/run-1"})
+    result = MODULE.launch_fresh_campaign_with_devgpu(
+        policy_path=policy_path, operations_path=OPERATIONS, source_receipt_path=source_path,
+        admission_path=admission, launch_receipt_path=tmp_path / "launch.json", run_dir=tmp_path,
+        execute=True, wait=True, runner=runner, repository_root=tmp_path, github_commit="a" * 40, poll_seconds=0,
+    )
+    assert result["status"] == "completed"
+    assert result["execution_mode"] == "fresh_direct_devgpu"
+    assert result["workspace"]["stopped"] is True
+    assert result["admission"]["sha256"] == MODULE.sha256_file(admission)
+    assert result["workspace"]["timeout_seconds"] == MODULE.DEVGPU_WORKSPACE_MAX_SECONDS
+    assert not any("start-build" in " ".join(command) for command in commands)
+    assert sum("start-workspace" in " ".join(command) for command in commands) == 1
 
 
 def test_recover_delivery_reuses_receipt_bound_ledger_clone(
