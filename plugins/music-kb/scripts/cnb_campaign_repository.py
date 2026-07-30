@@ -92,6 +92,10 @@ DEVGPU_RECOVERY_REFRESH_METADATA = "devgpu-runner-refresh.json"
 # client-side poll deadline aligned with that stage instead of allowing an
 # orphaned workspace to outlive the receipt-bound execution window.
 DEVGPU_WORKSPACE_MAX_SECONDS = 8 * 60 * 60
+# CNB documents that a workspace not entered in VS Code is recycled after ten
+# minutes.  Keep model hydration behind a longer stage-local dwell: if that
+# policy applies to an unattended launch, the campaign stops before inference.
+DEVGPU_WORKSPACE_LIFECYCLE_GUARD_SECONDS = 11 * 60
 
 JsonRunner = Callable[[Sequence[str]], dict[str, Any]]
 
@@ -1285,6 +1289,10 @@ def generate_campaign_devgpu_config(
         "        set -eu",
         "        gate_root=\"/workspace/cache/output/music_flamingo_pipeline/devgpu-recovery-${CNB_BUILD_ID}\"",
         "        mkdir -p \"$gate_root\"",
+        "        # CNB recycles a workspace that has not entered VS Code after ten minutes.",
+        "        # Do not hydrate the model until this unattended-workspace guard has passed.",
+        f"        sleep {DEVGPU_WORKSPACE_LIFECYCLE_GUARD_SECONDS}",
+        f"        printf '%s\\n' \"[music-flamingo-workspace-lifecycle-guard] passed guard_seconds={DEVGPU_WORKSPACE_LIFECYCLE_GUARD_SECONDS}\"",
         f"        python scripts/check_manual_gpu_gate.py --phase before_hydrate --expected-gpu {profile['expected_gpu']} --minimum-free-mib {profile['minimum_free_mib']} --max-utilization-percent 0 --receipt \"$gate_root/gpu-before-hydrate.json\"",
         "        sleep 60",
         f"        python scripts/check_manual_gpu_gate.py --phase stable_before_hydrate --expected-gpu {profile['expected_gpu']} --minimum-free-mib {profile['minimum_free_mib']} --max-utilization-percent 0 --receipt \"$gate_root/gpu-stable-before-hydrate.json\"",
@@ -3117,6 +3125,7 @@ def recover_campaign_with_devgpu(
             "status": "submitted",
             "reused_visible_workspace": reused_workspace,
             "timeout_seconds": min(float(timeout_seconds), DEVGPU_WORKSPACE_MAX_SECONDS),
+            "lifecycle_guard_seconds": DEVGPU_WORKSPACE_LIFECYCLE_GUARD_SECONDS,
         }
         receipt["status"] = "running"
         receipt["updated_at"] = now_iso()
@@ -3302,6 +3311,7 @@ def launch_fresh_campaign_with_devgpu(
             "status": "submitted",
             "reused_visible_workspace": reused_workspace,
             "timeout_seconds": min(float(timeout_seconds), DEVGPU_WORKSPACE_MAX_SECONDS),
+            "lifecycle_guard_seconds": DEVGPU_WORKSPACE_LIFECYCLE_GUARD_SECONDS,
         }
         receipt["status"] = "running"
         _atomic_write_json(launch_file, receipt)
