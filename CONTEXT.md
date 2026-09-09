@@ -5,7 +5,7 @@
 ## Language
 
 **MOSS-Music**:
-OpenMOSS 的 8B 音乐理解模型，经 MLX 8-bit 量化在本机 Apple Silicon 运行；当前的分析主通道（整曲整体分析，不分段）。
+OpenMOSS 的 8B 音乐理解模型，经 MLX 8-bit 量化在本机 Apple Silicon 运行；迁移中的分析主通道（整曲整体分析，不分段）。
 _Avoid_: MOSS（单用时含糊）、moss runner（那是 CNB 镜像名，跑的却是 Music Flamingo）
 
 **Music Flamingo**:

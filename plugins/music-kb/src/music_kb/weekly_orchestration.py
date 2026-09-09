@@ -549,9 +549,8 @@ def run_weekly_run(
         # write; --delivery resumes are post-analysis and never touch CNB,
         # and both dry-run modes stop before any billable CNB call.
         raise ValueError(
-            "CNB analysis runtime is retired and now paid (docs/adr/0001); "
-            "weekly analysis defaults to the local MOSS-Music path. Supply a "
-            "canonical --delivery to resume after analysis, use "
+            "CNB analysis runtime is retired and now paid (docs/adr/0001). "
+            "Supply a canonical --delivery to resume after analysis, use "
             "--download-dry-run or --cnb-campaign-dry-run to stop before "
             "billable CNB work, or pass --confirm-cnb-analysis to explicitly "
             "accept paid CNB usage."

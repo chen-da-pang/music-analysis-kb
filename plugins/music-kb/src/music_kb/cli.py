@@ -332,8 +332,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm-cnb-analysis",
         action="store_true",
         help="Explicitly accept paid CNB cloud analysis. CNB is a retired, "
-        "paid runtime (docs/adr/0001); the local MOSS-Music path is the "
-        "default, so a fresh run touching CNB fails fast without this flag.",
+        "paid runtime (docs/adr/0001); a fresh run touching CNB fails "
+        "fast without this flag.",
     )
     weekly_run.add_argument("--cnb-storage-policy", type=Path, default=default_cnb_storage_policy())
     weekly_run.add_argument(

@@ -105,6 +105,11 @@ and is never a production bypass. `--cnb-command` is an explicit
 legacy fallback and is the only path that uses the protected-repository storage
 gate.
 
+CNB is a paid, retired runtime (ADR-0001): a fresh run without
+`--download-dry-run`/`--cnb-campaign-dry-run`/`--delivery` must also pass
+`--confirm-cnb-analysis` or it fails fast at input validation. Supplied-delivery
+resumes (`--delivery`) never touch CNB and need no flag.
+
 Add `--publish` after the peer dry-run has been reviewed. Every production
 publish must also include `--confirm-delete-audio`,
 `--confirm-delete-cnb-storage`, and `--confirm-delete-cnb-repositories`; the

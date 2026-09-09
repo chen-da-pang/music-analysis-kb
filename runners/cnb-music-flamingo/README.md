@@ -2,8 +2,8 @@
 
 > **RETIRED (2026-09, ADR-0001)**: CNB began charging for GPU usage, so this
 > runtime is no longer the weekly analysis path and is not a fallback. It is
-> kept as historical reference only; the current default is local MOSS-Music
-> (MLX 8-bit). Any fresh run that would touch billable CNB atoms now requires
+> kept as historical reference only; the weekly default is being migrated
+> to local MOSS-Music (MLX 8-bit). Any fresh run that would touch billable CNB atoms now requires
 > the explicit `--confirm-cnb-analysis` flag. Supplied-delivery resumes
 > (`--delivery`) are unaffected.
 
