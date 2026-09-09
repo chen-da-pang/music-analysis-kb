@@ -225,6 +225,35 @@ def test_weekly_run_rejects_publish_opt_out(tmp_path: Path) -> None:
         )
 
 
+def test_cnb_analysis_gate_blocks_fresh_run_without_confirmation(tmp_path: Path) -> None:
+    # CNB is a paid, retired runtime (docs/adr/0001): a run whose path would
+    # execute CNB analysis work must fail fast before any workspace write
+    # unless the paid usage is confirmed explicitly.
+    with pytest.raises(ValueError, match="--confirm-cnb-analysis"):
+        run_weekly_run(
+            workspace=tmp_path,
+            run_id="cnb-gate-blocked",
+            rank_ids=(),
+            chart_page=1,
+            chart_size=100,
+            chart_profile=None,
+            database=tmp_path / "master.sqlite",
+            inventory=tmp_path / "data" / "song_inventory.json",
+            audio_root=tmp_path / "audio",
+            legacy_progress=tmp_path / "download_progress.json",
+            operations_file=OPERATIONS,
+            output_dir=tmp_path / "releases",
+            release_name="cnb-gate-blocked",
+            peers_file=None,
+            peer_names=(),
+            publish=False,
+            delivery=None,
+            cnb_command=None,
+            chart_database=None,
+            state_file=tmp_path / "publish-state.json",
+        )
+
+
 def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path: Path, lyric_receipt_writer) -> None:
     delivery = tmp_path / "canonical_delivery.jsonl"
     rows = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines() if line]
@@ -800,6 +829,7 @@ def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
         chart_database=None,
         state_file=tmp_path / "publish-state.json",
         cnb_github_commit="a" * 40,
+        confirm_cnb_analysis=True,
         skip_peers=True,
     )
     state = json.loads(Path(result["state"]).read_text(encoding="utf-8"))

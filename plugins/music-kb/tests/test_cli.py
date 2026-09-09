@@ -339,6 +339,16 @@ def test_weekly_run_exposes_disposable_campaign_controls() -> None:
     assert parsed.retained_campaign_receipt == Path("/tmp/retained-campaign-receipt.json")
 
 
+def test_weekly_run_exposes_confirm_cnb_analysis_flag() -> None:
+    parser = cli.build_parser()
+    parsed = parser.parse_args(
+        ["weekly-run", "--run-id", "fixture-run", "--confirm-cnb-analysis"]
+    )
+    assert parsed.confirm_cnb_analysis is True
+    default = parser.parse_args(["weekly-run", "--run-id", "fixture-run"])
+    assert default.confirm_cnb_analysis is False
+
+
 def test_peer_inventory_environment_override(monkeypatch, tmp_path: Path) -> None:
     override = tmp_path / "custom-peers.toml"
     monkeypatch.setenv("MUSIC_KB_PEERS_FILE", str(override))

@@ -342,6 +342,10 @@ if the listener is unavailable, omit `--proxy` and use that route instead.
 For a real publish, remove `--download-dry-run`, review the peer plan, add
 `--publish`, and supply `--confirm-delete-audio`,
 `--confirm-delete-cnb-storage`, and `--confirm-delete-cnb-repositories`.
+CNB is a paid, retired runtime (ADR-0001): a fresh run without
+`--download-dry-run`/`--cnb-campaign-dry-run`/`--delivery` must also pass
+`--confirm-cnb-analysis` or it fails fast at input validation; supplied-delivery
+resumes never touch CNB and need no flag.
 Use `--cnb-campaign-dry-run` to exercise export/config/manifest checks without
 creating or pushing a campaign repository. If the current code is intentionally
 unpublished, the adapter's `--allow-unpublished` is permitted only on the
