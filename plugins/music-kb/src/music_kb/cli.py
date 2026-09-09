@@ -328,6 +328,13 @@ def build_parser() -> argparse.ArgumentParser:
     weekly_run.add_argument("--download-dry-run", action="store_true")
     weekly_run.add_argument("--download-max-items", type=int)
     weekly_run.add_argument("--confirm-delete-audio", action="store_true")
+    weekly_run.add_argument(
+        "--confirm-cnb-analysis",
+        action="store_true",
+        help="Explicitly accept paid CNB cloud analysis. CNB is a retired, "
+        "paid runtime (docs/adr/0001); the local MOSS-Music path is the "
+        "default, so a fresh run touching CNB fails fast without this flag.",
+    )
     weekly_run.add_argument("--cnb-storage-policy", type=Path, default=default_cnb_storage_policy())
     weekly_run.add_argument(
         "--cnb-transport",
@@ -582,6 +589,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             cnb_storage_policy=args.cnb_storage_policy,
             confirm_delete_cnb_storage=args.confirm_delete_cnb_storage,
             confirm_delete_cnb_repositories=args.confirm_delete_cnb_repositories,
+            confirm_cnb_analysis=args.confirm_cnb_analysis,
             cnb_transport=args.cnb_transport,
             cnb_campaign_dry_run=args.cnb_campaign_dry_run,
             cnb_campaign_poll_seconds=args.cnb_campaign_poll_seconds,

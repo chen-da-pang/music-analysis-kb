@@ -488,6 +488,7 @@ def run_weekly_run(
     cnb_storage_policy: str | Path = DEFAULT_CNB_STORAGE_POLICY,
     confirm_delete_cnb_storage: bool = False,
     confirm_delete_cnb_repositories: bool = False,
+    confirm_cnb_analysis: bool = False,
     cnb_transport: str = "lfs",
     cnb_campaign_dry_run: bool = False,
     cnb_campaign_poll_seconds: float = 10.0,
@@ -537,6 +538,24 @@ def run_weekly_run(
         _resolve_workspace_path(path, root) for path in lyric_receipt_paths
     ]
     delivery_supplied = delivery is not None
+    if (
+        not delivery_supplied
+        and not download_dry_run
+        and not cnb_campaign_dry_run
+        and not confirm_cnb_analysis
+    ):
+        # CNB is a paid, retired runtime (docs/adr/0001). A run whose path
+        # would execute CNB analysis work fails fast before any workspace
+        # write; --delivery resumes are post-analysis and never touch CNB,
+        # and both dry-run modes stop before any billable CNB call.
+        raise ValueError(
+            "CNB analysis runtime is retired and now paid (docs/adr/0001); "
+            "weekly analysis defaults to the local MOSS-Music path. Supply a "
+            "canonical --delivery to resume after analysis, use "
+            "--download-dry-run or --cnb-campaign-dry-run to stop before "
+            "billable CNB work, or pass --confirm-cnb-analysis to explicitly "
+            "accept paid CNB usage."
+        )
     resume_reason = "verified supplied delivery resumes after Music Flamingo analysis"
     # The exact command set is finalized after we inspect a same-run receipt.
     # A receipt resume skips chart capture/download entirely, so requiring

@@ -1,5 +1,12 @@
 # CNB Music Flamingo Runner
 
+> **RETIRED (2026-09, ADR-0001)**: CNB began charging for GPU usage, so this
+> runtime is no longer the weekly analysis path and is not a fallback. It is
+> kept as historical reference only; the current default is local MOSS-Music
+> (MLX 8-bit). Any fresh run that would touch billable CNB atoms now requires
+> the explicit `--confirm-cnb-analysis` flag. Supplied-delivery resumes
+> (`--delivery`) are unaffected.
+
 > This directory is the GitHub-owned source tree for the GPU runtime. GitHub
 > `chen-da-pang/music-analysis-kb` is the only source of truth for this code,
 > its tests, and its operational documentation. CNB is a disposable execution

@@ -7,6 +7,8 @@ It intentionally contains **code, fixtures, and documentation only**. Do not
 put production SQLite files, lyrics, audio, SSH keys, or analysis exports in
 this directory or in Git.
 
+> **运行时状态（2026-09，ADR-0001）**：CNB 云端 Music Flamingo 分析运行时已退役——CNB 平台开始收费，不再作为默认或回退链路；本节及 weekly-run 中所有 `cnb_*` 原子仅作历史参考保留。新默认分析路径为本机 MOSS-Music（MLX 8-bit）。fresh 周更若要触达 CNB 计费入口，现在必须显式传 `--confirm-cnb-analysis`，否则快速失败。现状分析续跑（`--delivery`）不受影响。
+
 ## Natural-language retrieval
 
 The retrieval Skill is designed for a first request in ordinary language. A
