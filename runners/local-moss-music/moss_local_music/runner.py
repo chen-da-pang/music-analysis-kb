@@ -50,6 +50,7 @@ def run_single(
     *,
     model_path: str | None = None,
     run_id: str,
+    item_id: str | None = None,
     generate_fn: Optional[GenerateFn] = None,
     temp: float = DEFAULT_TEMP,
     top_p: float = DEFAULT_TOP_P,
@@ -77,10 +78,10 @@ def run_single(
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    item_id = Path(audio_path).stem
-    answer_path = out / f"{item_id}.answer.txt"
-    raw_path = out / f"{item_id}.raw.md"
-    sidecar_path = out / f"{item_id}.sidecar.json"
+    stable_id = item_id or Path(audio_path).stem
+    answer_path = out / f"{stable_id}.answer.txt"
+    raw_path = out / f"{stable_id}.raw.md"
+    sidecar_path = out / f"{stable_id}.sidecar.json"
     answer_path.write_text(answer + "\n", encoding="utf-8")
     raw_path.write_text(
         raw_text if raw_text.endswith("\n") else raw_text + "\n", encoding="utf-8"
@@ -89,7 +90,7 @@ def run_single(
     sidecar: dict[str, Any] = {
         "schema_version": SIDECAR_SCHEMA_VERSION,
         "run_id": run_id,
-        "item_id": item_id,
+        "item_id": stable_id,
         "audio_path": str(Path(audio_path).resolve()),
         "model_path": resolved_model,
         "model_id": DEFAULT_MODEL_ID,
