@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run state-isolated fallback shards and merge their terminal results.
 
-The direct path defaults to two isolated shards.  Each shard owns a private
+The direct path runs one to six isolated shards (default two).  Each shard owns a private
 queue, inventory copy, progress file, and download staging directory.  Only
 after every shard has reached a terminal result does one serial merger move
 the verified media and write the real inventory/progress files.  This keeps

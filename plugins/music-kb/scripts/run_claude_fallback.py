@@ -2,7 +2,7 @@
 """Prepare retryable fallback work and launch an isolated detached supervisor.
 
 The normal Claude path asks Claude Code to start the short launcher itself. The
-launcher owns one or two private fallback shards and writes a completion receipt
+launcher owns up to six private fallback shards and writes a completion receipt
 only after its serial merger has safely updated durable state. ``--executor
 direct`` remains an explicit diagnostic path; Claude never owns the long-running
 download process.
@@ -265,7 +265,7 @@ def main() -> int:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--claude-bin", default="claude")
     parser.add_argument("--executor", choices=("direct", "claude"), default="claude")
-    parser.add_argument("--parallelism", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--parallelism", type=int, choices=(1, 2, 3, 4, 5, 6), default=2)
     parser.add_argument("--timeout-seconds", type=int, default=86_400)
     parser.add_argument("--proxy")
     parser.add_argument("--dry-run", action="store_true")

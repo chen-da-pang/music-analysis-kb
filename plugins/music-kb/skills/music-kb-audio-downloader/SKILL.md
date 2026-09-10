@@ -30,7 +30,8 @@ worker receives its own queue shard, inventory copy, progress file, log, and
 staging audio directory. Only after every shard reaches terminal results and the
 real inventory hash is unchanged does one serial merger move verified media and
 sidecars into the real audio directory and update the real inventory/progress.
-`--parallelism 1` is the diagnostic rollback; do not use more than two workers.
+`--parallelism 1` is the diagnostic rollback; more than six workers is not permitted
+(bandwidth saturates near K=6, see ADR-0002).
 Fallback matching is exact on normalized title and artist, with only aliases
 listed in the queue/profile accepted. A fallback file is accepted only when it
 exists, exceeds 1 MB, and has an `ffprobe` duration of at least 60 seconds.
@@ -166,7 +167,8 @@ across runs. A second unsuccessful round becomes the durable, auditable
 `abandoned` state and is omitted from both automatic queues; use
 `run_claude_download.py --retry-abandoned` only for an explicit recovery.
 Before a real run, use `--dry-run` and review the queue count and status
-breakdown. The fallback wrapper owns queue preparation, safe two-way sharding,
+breakdown. The fallback wrapper owns queue preparation, safe isolated sharding (up to six
+shards per ADR-0002; two remains the default),
 and the final merger. The formal weekly path uses `--executor claude` to start
 the same short launcher:
 
