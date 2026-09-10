@@ -8,16 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-RUNNER_DIR = Path(__file__).resolve().parents[1]
-PLUGIN_SRC = RUNNER_DIR.parents[1] / "plugins" / "music-kb" / "src"
-for path in (str(RUNNER_DIR), str(PLUGIN_SRC)):
-    if path not in sys.path:
-        sys.path.insert(0, path)
 
 from moss_local_music.delivery import (  # noqa: E402
     TrackIdentity,
@@ -48,6 +42,8 @@ def _probe_sidecar() -> dict:
         "item_id": "保持童真_MMM",
         "audio_path": "/audio/保持童真_MMM.mp3",
         "model_path": "/models/moss-8bit",
+        "model_id": "mlx-community/MOSS-Music-8B-Thinking-8bit",
+        "prompt_version": "v5",
         "prompt": "p",
         "prompt_sha256": hashlib.sha256(b"p").hexdigest(),
         "generation_controls": {"temp": 1.0, "top_p": 0.8, "top_k": 50, "max_new_tokens": 1500},
@@ -91,6 +87,7 @@ class BuildDeliveryRowTest(unittest.TestCase):
 class DeliveryFileValidationTest(unittest.TestCase):
     def test_written_file_passes_existing_validator(self):
         from music_kb.campaign_delivery import load_campaign_delivery_file
+        from music_kb.errors import ValidationError  # noqa: F401
 
         rows = [
             build_delivery_row(
@@ -123,6 +120,7 @@ class DeliveryFileValidationTest(unittest.TestCase):
 
     def test_tampered_output_text_fails_validator(self):
         from music_kb.campaign_delivery import load_campaign_delivery_file
+        from music_kb.errors import ValidationError
 
         row = build_delivery_row(
             _probe_sidecar(),
@@ -135,7 +133,7 @@ class DeliveryFileValidationTest(unittest.TestCase):
         row["output_text"] = row["output_text"] + " tampered"
         with tempfile.TemporaryDirectory() as tmp:
             path = write_delivery_jsonl([row], Path(tmp) / "delivery.jsonl")
-            with self.assertRaises(Exception):
+            with self.assertRaises(ValidationError):
                 load_campaign_delivery_file(path, expected_count=1)
 
 

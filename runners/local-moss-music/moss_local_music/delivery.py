@@ -64,7 +64,9 @@ def build_delivery_row(
         row["source_url"] = track.source_url
     row["provenance"] = {
         "runtime": "local-moss-music/mlx-8bit",
+        "model_id": sidecar["model_id"],
         "model_path": sidecar["model_path"],
+        "prompt_version": sidecar["prompt_version"],
         "prompt_sha256": sidecar["prompt_sha256"],
         "generation_controls": sidecar["generation_controls"],
         "generation_rate_tok_s": sidecar["generation_rate_tok_s"],

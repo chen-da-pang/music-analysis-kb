@@ -7,16 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-RUNNER_DIR = Path(__file__).resolve().parents[1]
-PLUGIN_SRC = RUNNER_DIR.parents[1] / "plugins" / "music-kb" / "src"
-for path in (str(RUNNER_DIR), str(PLUGIN_SRC)):
-    if path not in sys.path:
-        sys.path.insert(0, path)
 
 from moss_local_music import build_prompt, run_single, split_answer  # noqa: E402
 

@@ -9,19 +9,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .generate_bridge import (
+    DEFAULT_MODEL_ID,
     DEFAULT_MAX_NEW_TOKENS,
     DEFAULT_TEMP,
     DEFAULT_TOP_K,
     DEFAULT_TOP_P,
+    default_generate_fn,
     resolve_model_path,
 )
-from .prompt import build_prompt
+from .prompt import PROMPT_VERSION, build_prompt
 
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -61,7 +62,7 @@ def run_single(
     audit fields). Returns the sidecar dict."""
 
     prompt = build_prompt()
-    gen = generate_fn or _default_generate
+    gen = generate_fn or default_generate_fn
     resolved_model = resolve_model_path(model_path)
     raw_text, token_count, elapsed = gen(
         audio_path,
@@ -91,6 +92,8 @@ def run_single(
         "item_id": item_id,
         "audio_path": str(Path(audio_path).resolve()),
         "model_path": resolved_model,
+        "model_id": DEFAULT_MODEL_ID,
+        "prompt_version": PROMPT_VERSION,
         "prompt": prompt,
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "generation_controls": {
@@ -113,12 +116,6 @@ def run_single(
         json.dumps(sidecar, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return sidecar
-
-
-def _default_generate(audio_path: str, model_path: str, prompt: str, **kwargs):
-    from .generate_bridge import default_generate_fn
-
-    return default_generate_fn(audio_path, model_path, prompt, **kwargs)
 
 
 def main() -> None:

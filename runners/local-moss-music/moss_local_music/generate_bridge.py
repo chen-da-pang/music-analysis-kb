@@ -9,16 +9,26 @@ batch loop pays the load cost once.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
-DEFAULT_HF_CACHE_MODEL = Path(
-    "~/.cache/huggingface/hub/models--mlx-community--MOSS-Music-8B-Thinking-8bit"
-).expanduser()
+DEFAULT_MODEL_ID = "mlx-community/MOSS-Music-8B-Thinking-8bit"
+
+def _default_hf_cache_model() -> Path:
+    hub = os.environ.get("HF_HUB_CACHE") or os.path.join(
+        os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")), "hub"
+    )
+    return Path(hub) / ("models--" + DEFAULT_MODEL_ID.replace("/", "--"))
+
+DEFAULT_HF_CACHE_MODEL = _default_hf_cache_model()
 
 MOSS_MLX_DIR = Path(
-    "~/Documents/ChatGPT/拆解 歌曲情绪/third_party/MOSS-Music-moss/mlx"
+    os.environ.get(
+        "MOSS_MLX_DIR",
+        "~/Documents/ChatGPT/拆解 歌曲情绪/third_party/MOSS-Music-moss/mlx",
+    )
 ).expanduser()
 
 DEFAULT_TEMP = 1.0
@@ -67,10 +77,10 @@ def default_generate_fn(
 ) -> tuple[str, int, float]:
     """Generate one analysis; returns (raw text, token count, elapsed seconds)."""
 
-    import mlx.core as _mx  # noqa: F401  (fails fast outside .venv-moss)
+    import mlx.core  # noqa: F401  (fails fast outside .venv-moss)
 
-    if str(MOSS_MLX_DIR) not in __import__("sys").path:
-        __import__("sys").path.insert(0, str(MOSS_MLX_DIR))
+    if str(MOSS_MLX_DIR) not in sys.path:
+        sys.path.insert(0, str(MOSS_MLX_DIR))
     from moss_music_mlx.convert import load_pretrained
     from moss_music_mlx.generate import stream_generate
 

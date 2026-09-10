@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+PROMPT_VERSION = "v5"
+
 OFFICIAL_FIVE_DIM_PROMPT = (
     "请从风格与速度、调性与和声、乐器编配、结构安排以及整体情绪几个方面描述这段音乐。"
 )
