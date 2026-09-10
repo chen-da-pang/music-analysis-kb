@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "sources": [
-    "QQMusicClient",
     "MiguMusicClient",
+    "QQMusicClient",
     "KuwoMusicClient"
   ],
   "retry_statuses": [
@@ -10,11 +10,21 @@
     "failed"
   ],
   "max_fallback_attempts": 2,
-  "source_timeout_seconds": 90,
+  "source_timeout_seconds": 45,
   "minimum_size_bytes": 1000000,
   "minimum_duration_seconds": 60,
   "artist_aliases": {
-    "Pretty Girl\u0000RESCENE": [["RESCENE", "RESCENE (리센느)"]],
-    "Beyond the Dream\u0000DINO": [["DINO", "디노"]]
+    "Pretty Girl\u0000RESCENE": [
+      [
+        "RESCENE",
+        "RESCENE (리센느)"
+      ]
+    ],
+    "Beyond the Dream\u0000DINO": [
+      [
+        "DINO",
+        "디노"
+      ]
+    ]
   }
 }
