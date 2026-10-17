@@ -8,7 +8,7 @@ import pytest
 from pathlib import Path
 
 from music_kb.repository import MusicKBRepository
-from music_kb.errors import NotFoundError, ReadOnlyError, ValidationError
+from music_kb.errors import DatabaseNotInitializedError, NotFoundError, ReadOnlyError, ValidationError
 from music_kb.schema import initialize_database
 
 
@@ -123,6 +123,50 @@ def test_embeddings_are_publisher_only_even_with_snapshot_write_override(master_
             repository.import_embeddings([embedding()], **MODEL)
 
 
+def test_production_dimensions_model_registration_and_partial_coverage(master_database, fixture_payload):
+    with MusicKBRepository(master_database) as repository:
+        payload = deepcopy(fixture_payload)
+        payload["recording"].update(id="unembedded", title="Unembedded", audio_sha256="b" * 64)
+        payload["source_tracks"] = []
+        repository.import_analysis(payload)
+        with pytest.raises(ValidationError, match="not registered"):
+            repository.import_embeddings([embedding()], model_id="missing")
+        for model_id, name, factor, dim in [
+            ("muq", "MuQ-MuLan", "", 512),
+            ("merit", "MERIT", "rhythm", 128),
+            ("merit", "MERIT", "timbre", 128),
+        ]:
+            model = dict(MODEL, model_id=model_id, model_name=name, dim=dim)
+            repository.register_embedding_model(**model)
+            row = embedding(vector=(1.0,) + (0.0,) * (dim - 1), norm=1.000005)
+            repository.import_embeddings([row], model_id=model_id, factor=factor)
+        counts = repository.status()["counts"]
+        assert counts["embedding_models"] == 2
+        assert counts["recordings_with_embeddings"] == 1
+        assert repository.status()["embedding_coverage"]["ratio"] == 0.5
+        assert repository.validate()["valid"]
+        with pytest.raises(ValidationError, match="different metadata"):
+            repository.register_embedding_model(**dict(MODEL, model_id="muq", dim=128))
+        with pytest.raises(ValidationError, match="another id"):
+            repository.register_embedding_model(**dict(MODEL, model_id="other-muq", dim=512))
+
+
+def test_upsert_changes_neighbors_and_keeps_default_model(master_database, fixture_payload):
+    with MusicKBRepository(master_database) as repository:
+        payload = deepcopy(fixture_payload)
+        payload["recording"].update(id="other", title="Other", audio_sha256="b" * 64)
+        payload["source_tracks"] = []
+        repository.import_analysis(payload)
+        repository.import_embeddings([embedding(), embedding("other", (0, 1), "b" * 64)], **MODEL)
+        assert repository.similar(SEED)["results"][0]["distance"] == 1.0
+        repository.import_embeddings([embedding("other", (-1, 0), "b" * 64)], model_id=MODEL["model_id"])
+        assert repository.similar(SEED)["results"][0]["distance"] == 2.0
+        alternate = dict(MODEL, model_id="muq-v4", recipe="v4")
+        repository.import_embeddings([embedding(), embedding("other", (1, 0), "b" * 64)], **alternate)
+        assert repository.similar(SEED)["model_id"] == "muq-v3"
+        assert repository.similar(SEED, model_id="muq-v4")["results"][0]["distance"] == 0.0
+
+
 def test_real_v7_database_upgrades_with_data_intact(tmp_path):
     database = tmp_path / "v7.sqlite"
     with sqlite3.connect(database) as connection:
@@ -133,6 +177,8 @@ def test_real_v7_database_upgrades_with_data_intact(tmp_path):
             "INSERT INTO recording(id, canonical_title, normalized_title, audio_sha256) "
             "VALUES ('legacy', 'Legacy song', 'legacy song', ?)", ("b" * 64,)
         )
+    with pytest.raises(DatabaseNotInitializedError, match="expected 8"):
+        MusicKBRepository(database, read_only=True)
     initialize_database(database)
     with MusicKBRepository(database) as repository:
         assert repository.status()["schema_version"] == 8

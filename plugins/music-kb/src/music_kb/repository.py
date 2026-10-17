@@ -3492,6 +3492,7 @@ class MusicKBRepository:
 
 
 def iter_embedding_file(path: str | Path) -> Iterable[dict[str, Any]]:
+    line_number = 0
     with Path(path).open("rb") as handle:
         for line_number, raw_line in enumerate(handle, 1):
             if b"\r" in raw_line or not raw_line.endswith(b"\n"):
@@ -3507,6 +3508,8 @@ def iter_embedding_file(path: str | Path) -> Iterable[dict[str, Any]]:
             except (ValueError, binascii.Error) as exc:
                 raise ValidationError("Invalid vector_b64", details={"line": line_number}) from exc
             yield entry
+    if line_number == 0:
+        raise ValidationError("Embedding JSONL cannot be empty")
 
 
 def _decode_jsonl_object(raw_line: bytes, line_number: int) -> dict[str, Any]:
