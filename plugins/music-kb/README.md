@@ -11,6 +11,18 @@ this directory or in Git.
 
 ## Audio vectors (publisher, snapshots, CLI and MCP, schema v8)
 
+Natural requests such as “找像《X》的歌”, “找节奏像的” and “找音色像的”
+resolve title/artist first; ambiguous versions require user selection. Channels
+are `overall` (default), `rhythm` and `timbre`, never a blended score.
+The [publisher runner](../../runners/audio-embed/README.md) documents
+`embed_audio.py` and `evaluate_suno.py`: inference stays in an external
+publisher environment; Suno JSON reports stay outside git and never write the KB.
+MuQ-MuLan/MERT weights are CC-BY-NC-4.0; MERIT heads are MIT. Internal
+research only; commercial use requires authorization or replacement.
+Only embedded recordings participate (initially 434/2005); coverage is not
+similarity quality. Produce, verify and install a v8 snapshot before client
+upgrade; local installation does not distribute it to peers.
+
 Upgrade a publisher v7 master explicitly with `music-kb init --db /path/to/master.sqlite`.
 Read-only queries never migrate a client database; v7 clients must receive a
 compatible v8 snapshot before upgrading the plugin. Opening a v7 snapshot fails
