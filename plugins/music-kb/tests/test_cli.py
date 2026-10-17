@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import base64
 import struct
+import os
+import sqlite3
 import pytest
 import subprocess
 import sys
@@ -10,6 +12,7 @@ from pathlib import Path
 
 import music_kb.cli as cli
 from music_kb.repository import MusicKBRepository
+from music_kb.mcp_server import ReadOnlyMusicKB
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "analysis.json"
@@ -19,6 +22,34 @@ def run_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "music_kb.cli", *arguments], text=True, capture_output=True, check=False
     )
+
+
+@pytest.mark.parametrize("channel", ["overall", "rhythm", "timbre"])
+def test_cli_similar_reads_installed_snapshot(embedded_snapshot, channel):
+    database = embedded_snapshot["current_database"]
+    result = run_cli("--json", "similar", "--db", database,
+                     "--recording-id", "rec_neon_night_studio", "--channel", channel, "--limit", "1")
+    assert result.returncode == 0, result.stderr
+    expected = ReadOnlyMusicKB(database).similar(
+        recording_id="rec_neon_night_studio", channel=channel, limit=1,
+    )
+    assert json.loads(result.stdout)["result"] == expected
+    assert expected["results"][0]["recording_id"] == "neighbor"
+
+
+def test_cli_similar_rejects_v7_snapshot(embedded_snapshot):
+    database = embedded_snapshot["current_database"]
+    os.chmod(database, 0o644)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE recording_embedding")
+        connection.execute("DROP TABLE embedding_model")
+        connection.execute("UPDATE meta SET value='7' WHERE key='schema_version'")
+    result = run_cli("--json", "similar", "--db", database,
+                     "--recording-id", "rec_neon_night_studio")
+    assert result.returncode == 2
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] == "database_not_initialized"
+    assert error["message"] == "Unsupported schema version 7; expected 8."
 
 
 def test_cli_embedding_import_similar_and_doctor(master_database, tmp_path):

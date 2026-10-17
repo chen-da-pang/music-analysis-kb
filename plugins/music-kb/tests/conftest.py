@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import struct
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
 from music_kb.repository import MusicKBRepository
 from music_kb.schema import initialize_database
+from music_kb.snapshot import create_snapshot, install_snapshot
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "analysis.json"
@@ -86,6 +89,35 @@ def lyric_seed():
     """Expose the focused synthetic seed to integration tests with custom DBs."""
 
     return seed_available_lyrics
+
+
+@pytest.fixture()
+def embedded_snapshot(master_database, fixture_payload, tmp_path):
+    with MusicKBRepository(master_database) as repository:
+        for recording_id, canonical, digit in [("neighbor", True, "b"), ("excluded", False, "c")]:
+            payload = deepcopy(fixture_payload)
+            payload["recording"].update(id=recording_id, title=recording_id, audio_sha256=digit * 64)
+            payload["source_tracks"][0]["source_track_id"] = recording_id
+            payload["canonical"] = canonical
+            repository.import_analysis(payload)
+        seed_available_lyrics(repository)
+        entries = [
+            {"recording_id": recording_id, "audio_sha256": digit * 64,
+             "vector": struct.pack("<ff", *vector)}
+            for recording_id, digit, vector in [
+                ("rec_neon_night_studio", "a", (1, 0)),
+                ("neighbor", "b", (3, 4)),
+                ("excluded", "c", (1, 0)),
+            ]
+        ]
+        for factor in ("", "rhythm", "timbre"):
+            repository.import_embeddings(
+                entries, model_id="fixture-audio", model_name="fixture", recipe="v1",
+                dim=2, metric="cosine", weight_license="fixture", factor=factor,
+            )
+    release = create_snapshot(master_database, tmp_path / "published", release_name="embedded")
+    installed = install_snapshot(release["release_dir"], tmp_path / "client")
+    return {**release, **installed}
 
 
 @pytest.fixture()
