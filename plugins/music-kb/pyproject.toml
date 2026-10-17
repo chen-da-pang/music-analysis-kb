@@ -12,6 +12,7 @@ license = { text = "UNLICENSED" }
 authors = [{ name = "Wuyou Music" }]
 dependencies = [
   "mcp>=1.12,<2",
+  "numpy>=2.4.6",
 ]
 
 [project.scripts]
