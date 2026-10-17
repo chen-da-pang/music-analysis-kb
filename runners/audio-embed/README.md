@@ -167,3 +167,39 @@ uv sync --all-groups
 ```
 
 The tests use fake embedders and explicitly block model imports.
+
+## Initial bootstrap acceptance (2026-10-18 Asia/Shanghai)
+
+- Master migrated v7 → v8; 2005 recordings preserved. The verified 67,563,520
+  byte backup is
+  `~/.music-kb/backups/music-master.pre-v8-20261017T185847Z.sqlite`.
+  All 22 preexisting non-meta tables remain content-identical to that backup.
+- 390 historical MuQ vectors were reused byte-for-byte, excluding the guest
+  track; exactly 44 additional OGG recordings were computed. Both MERIT heads
+  completed all 434 recordings. Total: 1302 rows, two registered models, three
+  channels, coverage 434/2005. No inference failures.
+- Real initial MPS runs completed in about 8m09s (MuQ) and 9m00s (MERIT), running
+  concurrently. Resuming both channels wrote zero additional rows. The final
+  pinned runner was also checked against one stored song: overall cosine
+  1.000000, rhythm/timbre bit-identical.
+- `doctor` reports the expected coverage; `validate` reports zero issues;
+  SQLite integrity and foreign-key checks pass. The full plugin suite passes
+  **406 tests** (370 existing + 36 model-free runner tests).
+- Overall query seed `后来的我们`
+  (`rec_kugou_ab956965cc25d2d3198143047d1859d5f35f0c2ee7675744e0b8a7ea204383e0`)
+  returns distances 0.033, 0.035, 0.040, 0.041, 0.044, 0.047, 0.048, 0.048,
+  0.050, 0.053. The 434-song all-pair mean is 0.303111, consistent in scale with
+  the original 391-song mean independently recomputed as 0.303264. The historical
+  26-pair multi-version mean 0.0714 remains reference context, not a threshold.
+- Each channel contains 434 recording rows but 433 distinct vectors. Independent
+  whole-song decoding confirmed that `你有没有真的爱过我` and its `合唱版` entry
+  have different file SHA256s but identical decoded audio. Both original
+  recording identities are intentionally retained; no records were merged or
+  deleted. This is a source-library duplicate, not failed embedding coverage.
+- All JSONL, manifests, receipts, three Top-10 query results and verification
+  details are outside git under
+  `/Users/wycm/Documents/网易云热榜抓取/research/music-kb-similarity/bootstrap/`.
+  Key evidence: `verification.json`, `migration.json`, `receipt-*.initial.json`,
+  `receipt-reused.json`, `final-runner-smoke.json`, `duplicate-audio-check.json`,
+  `sanity-*.json`, `doctor.json`, `validate.json`, and `pytest-final.log`.
+  No snapshots, MCP, weekly orchestration, Suno evaluation or pushes were done.
