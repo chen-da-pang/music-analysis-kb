@@ -16,12 +16,103 @@ from .campaign_delivery import load_campaign_delivery_file
 from .lyrics import load_lyric_receipts
 from .operation_context import RunContext, atom, atomic_write_json
 from .preflight import run_preflight
-from .repository import MusicKBRepository
+from .repository import MusicKBRepository, iter_embedding_file
 from .snapshot import create_snapshot, current_snapshot_target, install_snapshot, verify_snapshot
 
 
 DEFAULT_CHART_PROFILE = Path(__file__).resolve().parents[2] / "references" / "kugou-chart-profile.json"
 DEFAULT_CNB_STORAGE_POLICY = Path(__file__).resolve().parents[2] / "references" / "cnb-storage-policy.json"
+DEFAULT_EMBED_PYTHON = "/Users/wycm/Documents/克莱儿/.scratch/mir-song-description/bakeoff/venv-muq/bin/python"
+
+
+def _audio_embedding(
+    *, database: Path, audio_root: Path, delivery: Path, run_dir: Path,
+    embed_python: str, workspace: Path, timeout_seconds: int, outputs: dict[str, Any],
+) -> None:
+    outputs.update({"commands": [], "imports": [], "rows_written": 0, "failures": []})
+    runner_path = Path(__file__).resolve().parents[4] / "runners" / "audio-embed" / "embed_audio.py"
+    previous_environment = {key: os.environ.get(key) for key in ("NUMBA_CACHE_DIR", "HF_HUB_OFFLINE")}
+    try:
+        runner = _load_script_module(runner_path, "weekly_audio_embed")
+    finally:
+        for key, value in previous_environment.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    source_hashes = {entry.source_sha256 for entry in load_campaign_delivery_file(delivery)}
+    local_hashes = set()
+    for path in sorted(audio_root.rglob("*")):
+        if path.is_file():
+            local_hashes.add(runner.sha256_file(path))
+    with MusicKBRepository(database, read_only=False) as repository:
+        canonical = {
+            row["id"]: row["audio_sha256"] for row in repository.connection.execute(
+                "SELECT id, audio_sha256 FROM recording WHERE canonical_analysis_id IS NOT NULL"
+            )
+        }
+        targets = {identity for identity, sha in canonical.items() if sha in source_hashes & local_hashes}
+        run_canonical = sum(sha in source_hashes for sha in canonical.values())
+        outputs["coverage"] = {
+            "run_canonical": run_canonical, "run_local_audio": len(targets),
+            "run_without_local_audio": run_canonical - len(targets),
+            "canonical_without_local_audio": sum(sha not in local_hashes for sha in canonical.values()),
+            "channels": {},
+        }
+        if targets:
+            output_dir = run_dir / "audio-embedding"
+            for channel in ("overall", "merit"):
+                command = [embed_python, str(runner_path), "--channel", channel,
+                           "--audio-root", str(audio_root), "--db", str(database),
+                           "--output-dir", str(output_dir), "--resume"]
+                outputs["commands"].append(command)
+                try:
+                    result, completed = _json_command_allow_failure(
+                        command, cwd=workspace, timeout_seconds=timeout_seconds,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    outputs["failures"].append({"channel": channel, "error": str(exc)})
+                    raise RuntimeError(f"audio embedding runner failed: {exc}") from exc
+                outputs["failures"].extend(result.get("failures", []))
+                receipt_path = output_dir / f"receipt-{channel}.json"
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8")) if receipt_path.is_file() else {}
+                expected_channels = ("overall",) if channel == "overall" else ("rhythm", "timbre")
+                if completed.returncode != 0 or receipt.get("status") != "complete":
+                    outputs["failures"].append({"channel": channel, "result": result, "receipt": receipt})
+                for name in expected_channels:
+                    model = runner.CHANNELS[name]
+                    input_path = output_dir / f"{name}.jsonl"
+                    if not input_path.is_file():
+                        outputs["failures"].append({"channel": name, "error": "missing JSONL"})
+                        continue
+                    try:
+                        imported = repository.import_embeddings(
+                            iter_embedding_file(input_path) if input_path.stat().st_size else [],
+                            **model, metric="cosine",
+                            weight_license="CC-BY-NC-4.0" if name == "overall" else "CC-BY-NC-4.0 (MERT); MIT (heads)",
+                        )
+                    except Exception as exc:
+                        outputs["failures"].append({"channel": name, "error": str(exc)})
+                        raise RuntimeError(f"audio embedding import failed: {exc}") from exc
+                    outputs["imports"].append(imported)
+                    outputs["rows_written"] += imported["imported"]
+        missing = []
+        for name, model in runner.CHANNELS.items():
+            covered = {row[0] for row in repository.connection.execute(
+                "SELECT recording_id FROM recording_embedding WHERE model_id=? AND factor=? "
+                "AND source_audio_sha256=(SELECT audio_sha256 FROM recording WHERE id=recording_id)",
+                (model["model_id"], model["factor"]),
+            )}
+            absent = sorted(targets - covered)
+            missing.extend({"channel": name, "recording_id": identity} for identity in absent)
+            outputs["coverage"]["channels"][name] = {
+                "canonical_total": len(canonical), "covered": len(covered & canonical.keys()),
+                "run_local_audio": len(targets), "run_covered": len(targets & covered), "missing": absent,
+            }
+        outputs["coverage"]["status"] = repository.status()["embedding_coverage"]
+        outputs["failures"].extend(missing)
+    if outputs["failures"]:
+        raise RuntimeError(f"audio embedding gate failed: {outputs['failures']}")
 
 
 def _json_command(
@@ -496,6 +587,8 @@ def run_weekly_run(
     cnb_github_commit: str | None = None,
     cnb_campaign_work_dir: str | Path | None = None,
     retained_campaign_receipt: str | Path | None = None,
+    embed_python: str | Path | None = None,
+    skip_audio_embedding: bool = False,
 ) -> dict[str, Any]:
     """Run all safe publisher stages and stop at the first failed atom."""
 
@@ -1339,6 +1432,21 @@ def run_weekly_run(
                 )
                 if not lyric_validation["valid"]:
                     raise RuntimeError(f"lyric coverage gate failed: {lyric_validation}")
+
+        with atom(context, "audio_embedding", inputs={"database": str(database_path), "audio_root": str(audio_path)}) as outputs:
+            if skip_audio_embedding or download_dry_run or cnb_campaign_dry_run or delivery_path is None or not delivery_path.is_file():
+                outputs.update({"status": "skipped", "reason": "explicit skip, dry-run, or no delivery"})
+            else:
+                try:
+                    _audio_embedding(
+                        database=database_path, audio_root=audio_path, delivery=delivery_path,
+                        run_dir=run_dir, workspace=root, timeout_seconds=timeout_seconds, outputs=outputs,
+                        embed_python=str(embed_python or os.environ.get("MUSIC_KB_EMBED_PYTHON") or DEFAULT_EMBED_PYTHON),
+                    )
+                except Exception as exc:
+                    if not outputs.get("failures"):
+                        outputs.setdefault("failures", []).append({"error": str(exc)})
+                    raise
 
         release_result: dict[str, Any] | None = None
         release_verification: dict[str, Any] | None = None
