@@ -157,12 +157,74 @@ query outside the repository. Historical overall-distance baselines are mean
 and not calibrated MERIT baselines. Top-10 distances naturally skew lower than
 all-pair distances and do not prove listening quality.
 
-## Model-free tests
+## Suno evaluation (publisher-local, no database writes)
+
+Run from the repository root, using the same external model environment and
+cached weights as the embedding runner. No model dependencies are added to the
+plugin. Input audio must be at least 10 seconds (the MuQ v3 requirement).
+The database must already have the registered production model/recipe identities
+and embeddings; mismatched identities fail before inference. Missing channel
+coverage produces an empty result list, not a fabricated comparison.
+
+```sh
+export PY='/Users/wycm/Documents/克莱儿/.scratch/mir-song-description/bakeoff/venv-muq/bin/python'
+export MASTER="$HOME/.music-kb/music-master.sqlite"
+export AUDIO='/absolute/path/to/suno-song.wav'
+export EVAL_OUT="$HOME/music-kb-evaluations/suno-$(date +%Y%m%d-%H%M%S)"
+
+# Default full mode: three Top-10s and empirical library baselines.
+"$PY" runners/audio-embed/evaluate_suno.py \
+  --audio "$AUDIO" --db "$MASTER" --output-dir "$EVAL_OUT" --device mps
+
+# Simple mode: still computes all three query vectors, but skips pairwise baselines.
+"$PY" runners/audio-embed/evaluate_suno.py \
+  --audio "$AUDIO" --db "$MASTER" --output-dir "${EVAL_OUT}-simple" --simple --device mps
+```
+
+Use `--device cpu` only when explicitly intended. Overall inference directly
+reuses `embed_audio.load_embedder("overall", device)` (whole-song MuQ v3), then
+`load_embedder("merit", device)` supplies both MERIT factors in one forward pass.
+Both modes print distances to three decimal places and canonical summaries.
+Neither mode assesses model quality or labels anything above/below a threshold.
+
+Output contract: a fresh caller-provided directory **outside all repository
+worktrees** contains `suno-evaluation.json`, written atomically. An existing
+report is never overwritten. The database is opened read-only with one read
+transaction; evaluation never imports vectors or changes canonical analyses.
+
+- `schema_version: 1`, `mode: "full" | "simple"`.
+- `query`: filename, duration in seconds, file SHA256, UTC ISO timestamp, and
+  `channels` containing model IDs, model names, recipe IDs, dimensions and factors
+  from the existing runner's pinned configuration.
+- `channels.overall`, `.rhythm`, `.timbre`: `model_id`, `channel`, `count`, and
+  up to ten `results`. Each result includes `recording_id`, `title`,
+  `version_label`, `artists`, `listen_url`, cosine `distance` (0–2, three decimal
+  places), `more_versions`, and `canonical_analysis: {analysis_id, summary}`.
+  Summaries come directly from the selected recording's canonical analysis;
+  an empty stored summary stays empty. Versions collapse by normalized title,
+  selecting the closest recording with recording-ID tie breaks, just as `similar`.
+  Unlike a recording-seeded query, no recording is excluded.
+- Full mode adds per-channel `baseline`: recording/pair counts, mean, quantiles
+  at 0/0.25/0.5/0.75/1, unrounded best distance, and empirical percentile.
+  Population is **every unordered pair of embedded recordings in that channel**,
+  before title/version collapse, with no self-pairs; duplicate vectors remain.
+  Percentile is `100 * count(pair_distance <= unrounded_best_distance) / pair_count`.
+  Lower means closer relative to that population, **not similarity percent**.
+  With fewer than two vectors, distribution statistics/percentile are null;
+  with no results, best distance is also null. This exact baseline uses quadratic
+  time and memory and is intended for the current publisher-sized library.
+- Full mode adds `historical_context`: MuQ v3 multi-version mean `0.0714` and
+  approximate historical all-pair mean `0.3033`, explicitly context only—not
+  thresholds, not MERIT calibration. Simple mode omits this and all baselines.
+- Failures print an error to stderr and exit nonzero without writing a report.
+  Completed JSON files are outside git; no production audio or data is copied in.
+
+### Model-free test commands
 
 ```sh
 cd plugins/music-kb
 uv sync --all-groups
-.venv/bin/python -m pytest -q tests/test_audio_embed_runner.py
+.venv/bin/python -m pytest -q tests/test_audio_embed_runner.py tests/test_suno_evaluation.py tests/test_embeddings.py
 .venv/bin/python -m pytest -q
 ```
 
