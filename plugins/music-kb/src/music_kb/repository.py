@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import json
 import sqlite3
 import math
@@ -14,7 +16,7 @@ from urllib.parse import urlsplit
 import numpy as np
 
 from .campaign_delivery import CampaignDeliveryEntry, group_campaign_delivery, to_import_payload
-from .errors import NotFoundError, ValidationError
+from .errors import NotFoundError, ReadOnlyError, ValidationError
 from .lyrics import (
     LYRIC_NORMALIZER_VERSION,
     LYRIC_STATUS_AVAILABLE,
@@ -174,8 +176,14 @@ class MusicKBRepository:
 
     # -- importer ---------------------------------------------------------
 
-    def register_embedding_model(self, **model: Any) -> dict[str, Any]:
+    def _require_embedding_publisher(self) -> None:
         self._require_writer()
+        kind = self.connection.execute("SELECT value FROM meta WHERE key='database_kind'").fetchone()
+        if kind is None or kind[0] != "master":
+            raise ReadOnlyError("Embedding writes require the publisher master database")
+
+    def register_embedding_model(self, **model: Any) -> dict[str, Any]:
+        self._require_embedding_publisher()
         with self.connection:
             return self._register_embedding_model(**model)
 
@@ -214,7 +222,7 @@ class MusicKBRepository:
         self, entries: Iterable[Mapping[str, Any]], *, model_id: str,
         factor: str = "", **model: Any,
     ) -> dict[str, Any]:
-        self._require_writer()
+        self._require_embedding_publisher()
         if factor not in {"", "rhythm", "timbre"}:
             raise ValidationError("Embedding factor must be empty, rhythm, or timbre")
         imported = 0
@@ -227,7 +235,9 @@ class MusicKBRepository:
             if registered is None:
                 raise ValidationError("Embedding model is not registered", details={"model_id": model_id})
             for entry in entries:
-                recording_id = entry.get("recording_id")
+                if not isinstance(entry, Mapping):
+                    raise ValidationError("Each embedding must be an object")
+                recording_id = require_text(entry.get("recording_id"), "recording_id")
                 recording = self.connection.execute(
                     "SELECT audio_sha256 FROM recording WHERE id = ?", (recording_id,)
                 ).fetchone()
@@ -3326,6 +3336,22 @@ class MusicKBRepository:
 
     def validate(self, *, require_lyrics: bool = False) -> dict[str, Any]:
         issues: list[dict[str, Any]] = []
+        for row in self.connection.execute(
+            "SELECT e.*, m.dim, r.audio_sha256 FROM recording_embedding e "
+            "JOIN embedding_model m ON m.id=e.model_id JOIN recording r ON r.id=e.recording_id"
+        ):
+            identity = {"recording_id": row["recording_id"], "model_id": row["model_id"], "factor": row["factor"]}
+            if not row["audio_sha256"] or row["source_audio_sha256"] != row["audio_sha256"]:
+                issues.append({"code": "embedding_audio_sha256_mismatch", **identity})
+            try:
+                actual_norm = self._embedding_norm(row["vector"], row["dim"])
+            except ValidationError:
+                issues.append({"code": "embedding_vector_invalid", **identity})
+                continue
+            if not isinstance(row["norm"], (int, float)) or not math.isclose(
+                row["norm"], actual_norm, rel_tol=1e-5, abs_tol=1e-6
+            ):
+                issues.append({"code": "embedding_norm_mismatch", **identity})
         projection_state = self.connection.execute(
             "SELECT value FROM meta WHERE key = ?", (SEARCH_PROJECTION_STATE_KEY,)
         ).fetchone()
@@ -3463,6 +3489,24 @@ class MusicKBRepository:
             "issue_count": len(issues),
             "lyrics_coverage": lyric_coverage,
         }
+
+
+def iter_embedding_file(path: str | Path) -> Iterable[dict[str, Any]]:
+    with Path(path).open("rb") as handle:
+        for line_number, raw_line in enumerate(handle, 1):
+            if b"\r" in raw_line or not raw_line.endswith(b"\n"):
+                raise ValidationError("Embedding JSONL requires physical LF line endings and a final LF", details={"line": line_number})
+            if not raw_line.strip():
+                raise ValidationError("Embedding JSONL cannot contain blank lines", details={"line": line_number})
+            entry = _decode_jsonl_object(raw_line, line_number)
+            encoded = entry.get("vector_b64")
+            if not isinstance(encoded, str):
+                raise ValidationError("vector_b64 must be a base64 string", details={"line": line_number})
+            try:
+                entry["vector"] = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise ValidationError("Invalid vector_b64", details={"line": line_number}) from exc
+            yield entry
 
 
 def _decode_jsonl_object(raw_line: bytes, line_number: int) -> dict[str, Any]:

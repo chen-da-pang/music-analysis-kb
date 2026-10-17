@@ -81,7 +81,49 @@ def test_channels_are_separate_and_model_selection_is_explicit(master_database, 
             repository.similar("missing")
 
 
-def test_real_v7_database_upgrades_with_data_intact(tmp_path, fixture_payload):
+def test_validate_detects_corrupt_vector_norm_length_and_identity(master_database):
+    with MusicKBRepository(master_database) as repository:
+        repository.import_embeddings([embedding()], **MODEL)
+        for column, value, code in [
+            ("norm", 7.0, "embedding_norm_mismatch"),
+            ("vector", b"bad", "embedding_vector_invalid"),
+            ("source_audio_sha256", "b" * 64, "embedding_audio_sha256_mismatch"),
+        ]:
+            with repository.connection:
+                repository.connection.execute(f"UPDATE recording_embedding SET {column}=?", (value,))
+            report = repository.validate()
+            assert not report["valid"]
+            assert code in {issue["code"] for issue in report["issues"]}
+            repository.import_embeddings([embedding()], **MODEL)
+        assert repository.validate()["valid"]
+
+
+@pytest.mark.parametrize("bad", [
+    embedding(vector=(1.0,)), embedding(vector=(0.0, 0.0)),
+    embedding(vector=(float("nan"), 1.0)), embedding(vector=(float("inf"), 0.0)),
+    embedding(norm=2.0), embedding(sha="b" * 64), embedding(recording_id="missing"),
+    {"recording_id": SEED, "audio_sha256": "a" * 64, "vector": "not bytes"},
+    None,
+])
+def test_bad_embedding_rolls_back_whole_batch_and_model(master_database, bad):
+    with MusicKBRepository(master_database) as repository:
+        with pytest.raises(ValidationError):
+            repository.import_embeddings([embedding(), bad], **MODEL)
+        assert repository.status()["counts"]["embedding_models"] == 0
+        assert repository.status()["counts"]["recordings_with_embeddings"] == 0
+        assert repository.status()["metadata"]["default_embedding_model"] == ""
+
+
+def test_embeddings_are_publisher_only_even_with_snapshot_write_override(master_database):
+    with MusicKBRepository(master_database) as repository:
+        with repository.connection:
+            repository.connection.execute("UPDATE meta SET value='snapshot' WHERE key='database_kind'")
+    with MusicKBRepository(master_database, allow_snapshot_write=True) as repository:
+        with pytest.raises(ReadOnlyError):
+            repository.import_embeddings([embedding()], **MODEL)
+
+
+def test_real_v7_database_upgrades_with_data_intact(tmp_path):
     database = tmp_path / "v7.sqlite"
     with sqlite3.connect(database) as connection:
         connection.executescript(
@@ -95,10 +137,13 @@ def test_real_v7_database_upgrades_with_data_intact(tmp_path, fixture_payload):
     with MusicKBRepository(database) as repository:
         assert repository.status()["schema_version"] == 8
         assert repository.status()["counts"]["embedding_models"] == 0
-        assert repository.status()["counts"]["recordings"] == 1
-        repository.import_analysis(fixture_payload)
+        assert repository.status()["counts"]["recordings"] == 2
         assert repository.search(title="Legacy song") == []
         assert len(repository.search(title="霓虹夜航")) == 1
+        assert repository.search(tags=["颗粒人声切片"])[0]["recording_id"] == SEED
+        assert repository.search(artist="SLYD")[0]["artists"] == ["示例乐队"]
+        assert repository.get_canonical_analysis(SEED)["listen_url"] == "https://music.example/listen/fixture-001"
+        assert repository.status()["counts"]["lyrics_available"] == 1
         assert repository.validate()["valid"]
     with sqlite3.connect(database) as connection:
         assert connection.execute(

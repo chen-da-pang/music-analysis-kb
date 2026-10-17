@@ -18,7 +18,7 @@ def test_plugin_manifest_and_mcp_config_are_present() -> None:
     assert manifest["name"] == "music-kb"
     assert manifest["version"] == "0.8.5"
     assert _current_plugin_version() == manifest["version"]
-    assert SCHEMA_VERSION == 7
+    assert SCHEMA_VERSION == 8
     assert "suno" not in json.dumps(manifest, ensure_ascii=False).casefold()
     assert manifest["mcpServers"] == "./.mcp.json"
     assert mcp["mcpServers"]["music-kb"]["command"] == "uv"
