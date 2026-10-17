@@ -81,6 +81,52 @@ def test_channels_are_separate_and_model_selection_is_explicit(master_database, 
             repository.similar("missing")
 
 
+def test_external_vector_order_collapse_limits_and_no_exclusion(master_database, fixture_payload):
+    with MusicKBRepository(master_database) as repository:
+        entries = [embedding()]
+        for recording_id, title, vector, digit in [
+            ("close", "Other", (3, 4), "b"),
+            ("version", "other", (0, 1), "c"),
+            ("tie_a", "Tie A", (0, 1), "d"),
+            ("tie_b", "Tie B", (0, 1), "e"),
+        ]:
+            payload = deepcopy(fixture_payload)
+            payload["recording"].update(id=recording_id, title=title, audio_sha256=digit * 64)
+            payload["source_tracks"] = []
+            repository.import_analysis(payload)
+            entries.append(embedding(recording_id, vector, digit * 64))
+        repository.import_embeddings(entries, **MODEL)
+    with MusicKBRepository(master_database, read_only=True) as repository:
+        query = struct.pack("<2f", 2, 0)
+        result = repository.similar_to_vector(query, model_id=MODEL["model_id"])
+        assert [row["recording_id"] for row in result["results"]] == [SEED, "close", "tie_a", "tie_b"]
+        assert [row["distance"] for row in result["results"]] == [0, 0.4, 1, 1]
+        assert result["results"][1]["more_versions"] == 1
+        assert result["results"][1]["artists"] == ["示例乐队"]
+        for limit, expected in [(0, 1), (1, 1), (2, 2), (10000, 4)]:
+            assert repository.similar_to_vector(query, model_id=MODEL["model_id"], limit=limit)["count"] == expected
+        assert repository.similar_to_vector(query, model_id=MODEL["model_id"], factor="rhythm")["results"] == []
+        assert repository.similar(SEED)["results"] == result["results"][1:]
+
+
+@pytest.mark.parametrize("vector", [b"", b"bad", struct.pack("<2f", 0, 0),
+                                     struct.pack("<2f", float("nan"), 1),
+                                     struct.pack("<2f", float("inf"), 1), [1, 0]])
+def test_external_vector_rejects_invalid_vectors(master_database, vector):
+    with MusicKBRepository(master_database) as repository:
+        repository.import_embeddings([embedding()], **MODEL)
+        with pytest.raises(ValidationError):
+            repository.similar_to_vector(vector, model_id=MODEL["model_id"])
+
+
+def test_external_vector_rejects_unknown_model_and_factor(master_database):
+    with MusicKBRepository(master_database) as repository:
+        with pytest.raises(ValidationError, match="not registered"):
+            repository.similar_to_vector(embedding()["vector"], model_id="missing")
+        with pytest.raises(ValidationError, match="factor"):
+            repository.similar_to_vector(embedding()["vector"], model_id="missing", factor="melody")
+
+
 def test_validate_detects_corrupt_vector_norm_length_and_identity(master_database):
     with MusicKBRepository(master_database) as repository:
         repository.import_embeddings([embedding()], **MODEL)

@@ -306,14 +306,40 @@ class MusicKBRepository:
                 "recording_id": recording_id, "channel": channel, "model_id": model_id,
             })
         seed_norm = self._embedding_norm(seed["vector"], seed["dim"])
-        seed_vector = np.frombuffer(seed["vector"], dtype="<f4").astype(np.float64) / seed_norm
+        results = self._rank_vector(seed["vector"], seed_norm, seed["dim"], model_id, factor, limit,
+                                    exclude_recording_id=recording_id)
+        return {"recording_id": recording_id, "channel": channel, "model_id": model_id,
+                "results": results, "count": len(results)}
+
+    def similar_to_vector(
+        self, vector_bytes: bytes, *, model_id: str, factor: str = "", limit: int = 10,
+    ) -> dict[str, Any]:
+        """Rank library recordings against an external audio vector without exclusions."""
+        if factor not in {"", "rhythm", "timbre"}:
+            raise ValidationError("Unknown embedding factor", details={"factor": factor})
+        model = self.connection.execute(
+            "SELECT dim FROM embedding_model WHERE id=? AND modality='audio'", (model_id,)
+        ).fetchone()
+        if model is None:
+            raise ValidationError("Audio embedding model not registered", details={"model_id": model_id})
+        norm = self._embedding_norm(vector_bytes, model["dim"])
+        results = self._rank_vector(vector_bytes, norm, model["dim"], model_id, factor, limit)
+        return {"channel": factor or "overall", "model_id": model_id,
+                "results": results, "count": len(results)}
+
+    def _rank_vector(
+        self, vector: bytes, vector_norm: float, dim: int, model_id: str, factor: str,
+        limit: int, *, exclude_recording_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        seed_vector = np.frombuffer(vector, dtype="<f4").astype(np.float64) / vector_norm
         candidates = []
         for row in self.connection.execute(
             "SELECT r.id, r.canonical_title, r.normalized_title, r.version_label, e.vector "
             "FROM recording_embedding e JOIN recording r ON r.id=e.recording_id "
-            "WHERE e.model_id=? AND e.factor=? AND r.id<>?", (model_id, factor, recording_id),
+            "WHERE e.model_id=? AND e.factor=? AND (? IS NULL OR r.id<>?)",
+            (model_id, factor, exclude_recording_id, exclude_recording_id),
         ):
-            norm = self._embedding_norm(row["vector"], seed["dim"])
+            norm = self._embedding_norm(row["vector"], dim)
             values = np.frombuffer(row["vector"], dtype="<f4").astype(np.float64) / norm
             distance = float(np.clip(1.0 - np.dot(seed_vector, values), 0.0, 2.0))
             candidates.append((distance, str(row["id"]), row))
@@ -334,8 +360,7 @@ class MusicKBRepository:
             result["artists"] = self._artist_names(result["recording_id"])
             links = self._source_links(result["recording_id"])
             result["listen_url"] = links[0]["url"] if links else None
-        return {"recording_id": recording_id, "channel": channel, "model_id": model_id,
-                "results": results, "count": len(results)}
+        return results
 
     def import_analysis(
         self,
