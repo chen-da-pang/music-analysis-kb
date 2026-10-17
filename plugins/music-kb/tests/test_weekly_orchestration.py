@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import subprocess
+import base64
+import struct
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,132 @@ def _delivery_lyrics(lyric_receipt_writer, name: str) -> Path:
         name,
         [("kugou", "kg-fixture-0001"), ("kugou", "kg-fixture-0002")],
     )
+
+
+@pytest.mark.parametrize("mode", ["success", "missing", "runner_failure", "missing_operation", "dry_run", "skip", "empty_resume", "timeout", "bad_jsonl", "registered"])
+def test_weekly_audio_embedding_gate(tmp_path, monkeypatch, lyric_receipt_writer, mode):
+    from music_kb import weekly_orchestration
+    from music_kb.repository import MusicKBRepository
+
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    audio = audio_root / "new.ogg"
+    audio.write_bytes(b"fixture audio")
+    sha = hashlib.sha256(audio.read_bytes()).hexdigest()
+    rows = [json.loads(line) for line in FIXTURE.read_text().splitlines() if line]
+    rows[0]["source_sha256"] = sha
+    for row in rows:
+        row["source_url"] = f"https://www.kugou.com/mixsong/{row['id']}.html"
+    delivery = tmp_path / "delivery.jsonl"
+    delivery.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    database = tmp_path / "master.sqlite"
+    initialize_database(database)
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text('{"schema_version":1,"songs":[]}\n')
+    progress = tmp_path / "progress.json"
+    progress.write_text("{}\n")
+    operations = tmp_path / "operations.json"
+    registry = json.loads(OPERATIONS.read_text())
+    if mode == "missing_operation":
+        del registry["operations"]["audio_embedding"]
+    operations.write_text(json.dumps(registry))
+    run_dir = tmp_path / "data" / "weekly_runs" / "embedding-test"
+    calls = []
+
+    def fake_runner(command, **kwargs):
+        assert command[0] == "/fake/embed-python"
+        assert command[1].endswith("runners/audio-embed/embed_audio.py")
+        assert command[command.index("--db") + 1] == str(database)
+        assert "--resume" in command
+        if mode == "timeout":
+            raise subprocess.TimeoutExpired(command, 1)
+        channel = command[command.index("--channel") + 1]
+        calls.append(channel)
+        output = Path(command[command.index("--output-dir") + 1])
+        output.mkdir(parents=True, exist_ok=True)
+        with MusicKBRepository(database, read_only=True) as repository:
+            identity = repository.connection.execute("SELECT id FROM recording WHERE audio_sha256=?", (sha,)).fetchone()[0]
+        for name, dim in ([("overall", 512)] if channel == "overall" else [("rhythm", 128), ("timbre", 128)]):
+            vector = base64.b64encode(struct.pack(f"<{dim}f", *([1.0] + [0.0] * (dim - 1)))).decode()
+            payload = {"recording_id": identity, "audio_sha256": sha, "vector_b64": vector}
+            content = "" if mode == "missing" and name == "timbre" else json.dumps(payload) + "\n"
+            if mode in {"empty_resume", "registered"}:
+                model = weekly_orchestration._load_script_module(Path(command[1]), "test_runner_metadata").CHANNELS[name]
+                with MusicKBRepository(database, read_only=False) as repository:
+                    repository.import_embeddings(
+                        [{"recording_id": identity, "audio_sha256": sha, "vector": base64.b64decode(vector)}] if mode == "empty_resume" else [],
+                        **model, metric="cosine",
+                        weight_license="CC-BY-NC-4.0" if name == "overall" else "CC-BY-NC-4.0 (MERT); MIT (heads)",
+                    )
+                if mode == "empty_resume":
+                    content = ""
+            if mode == "bad_jsonl" and name == "timbre":
+                content = "not json\n"
+            (output / f"{name}.jsonl").write_text(content)
+        failed = mode == "runner_failure"
+        (output / f"receipt-{channel}.json").write_text(json.dumps({"status": "failed" if failed else "complete"}))
+        return {"failures": []}, subprocess.CompletedProcess(command, int(failed), "", "")
+
+    monkeypatch.setattr(weekly_orchestration, "_json_command_allow_failure", fake_runner)
+    original_snapshot = weekly_orchestration.create_snapshot
+    snapshots = []
+
+    def snapshot_after_embedding(*args, **kwargs):
+        receipt = json.loads((run_dir / "atoms" / "audio_embedding.json").read_text())
+        assert receipt["status"] == "succeeded"
+        snapshots.append(True)
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(weekly_orchestration, "create_snapshot", snapshot_after_embedding)
+    arguments = dict(
+        workspace=tmp_path, run_id="embedding-test", rank_ids=(), chart_page=1, chart_size=100,
+        chart_profile=None, database=database, inventory=inventory, audio_root=audio_root,
+        legacy_progress=progress, operations_file=operations, output_dir=tmp_path / "releases",
+        release_name="embedding-release", peers_file=None, peer_names=(), publish=False,
+        delivery=delivery, lyric_receipt_paths=[_delivery_lyrics(lyric_receipt_writer, "embedding")],
+        cnb_command=None, chart_database=None, state_file=tmp_path / "publish-state.json",
+        expected_count=2, skip_peers=True, embed_python="/fake/embed-python",
+        download_dry_run=mode == "dry_run", skip_audio_embedding=mode == "skip",
+    )
+    if mode == "registered":
+        monkeypatch.setenv("MUSIC_KB_EMBED_PYTHON", "/fake/embed-python")
+        arguments["embed_python"] = None
+    if mode in {"missing", "runner_failure", "missing_operation", "timeout", "bad_jsonl"}:
+        with pytest.raises((RuntimeError, ValueError), match="audio.embedding"):
+            run_weekly_run(**arguments)
+        state = json.loads((run_dir / "run-state.json").read_text())
+        assert state["status"] == "failed"
+        assert "snapshot" not in state["atoms"]
+        assert "audio_cleanup" not in state["atoms"]
+        assert not snapshots
+        assert audio.exists()
+        if mode != "missing_operation":
+            assert state["atoms"]["audio_embedding"]["outputs"]["failures"]
+            mode = "success"
+            run_weekly_run(**arguments)
+            resumed = json.loads((run_dir / "run-state.json").read_text())
+            assert resumed["resume_count"] == 1
+            assert resumed["status"] == "succeeded"
+            with MusicKBRepository(database, read_only=True) as repository:
+                assert repository.connection.execute("SELECT count(*) FROM recording_embedding").fetchone()[0] == 3
+        return
+    run_weekly_run(**arguments)
+    state = json.loads((run_dir / "run-state.json").read_text())
+    receipt = state["atoms"]["audio_embedding"]["outputs"]
+    assert snapshots
+    if mode in {"dry_run", "skip"}:
+        assert receipt["status"] == "skipped"
+        assert not calls
+        return
+    assert calls == ["overall", "merit"]
+    assert receipt["rows_written"] == (0 if mode == "empty_resume" else 3)
+    assert receipt["coverage"]["run_canonical"] == 2
+    assert receipt["coverage"]["run_local_audio"] == 1
+    assert receipt["coverage"]["run_without_local_audio"] == 1
+    assert receipt["coverage"]["canonical_without_local_audio"] == 1
+    assert all(value["run_covered"] == 1 for value in receipt["coverage"]["channels"].values())
+    with MusicKBRepository(database, read_only=True) as repository:
+        assert repository.connection.execute("SELECT count(*) FROM recording_embedding").fetchone()[0] == 3
 
 
 def test_resolve_campaign_repository_root_from_nested_data_workspace(
@@ -762,9 +890,11 @@ def test_weekly_run_resumes_disk_campaign_receipt_without_recapturing(
         def validate_campaign_receipt_binding(*_args, **_kwargs):
             return {"valid": True, "errors": []}
 
+    from music_kb.weekly_orchestration import _load_script_module
+
     monkeypatch.setattr(
         "music_kb.weekly_orchestration._load_script_module",
-        lambda _path, module_name: FakeCampaignAdapter if module_name == "music_kb_campaign_resume" else (_ for _ in ()).throw(AssertionError(module_name)),
+        lambda path, module_name: FakeCampaignAdapter if module_name == "music_kb_campaign_resume" else _load_script_module(path, module_name),
     )
     preflight_commands: list[tuple[str, ...]] = []
 

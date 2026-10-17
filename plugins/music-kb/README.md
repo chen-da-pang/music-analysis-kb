@@ -238,6 +238,24 @@ organization-volume, and protected-runtime verification before the run may
 succeed. `--cnb-transport` is passed to the disposable campaign and final
 storage-cleanup atoms; `git-objects` is accepted only under its policy gates.
 
+After `lyrics_coverage` and before `snapshot`, `audio_embedding` runs the existing
+publisher runner sequentially for `overall` and `merit`, then imports each
+model/factor into the master using the `import-embeddings` repository path.
+Use `--embed-python` or `MUSIC_KB_EMBED_PYTHON` to select the external model
+environment; the default is the verified publisher `venv-muq/bin/python` under
+`/Users/wycm/Documents/克莱儿/.scratch/mir-song-description/bakeoff/`.
+Runner JSONL/receipts live in `data/weekly_runs/<run-id>/audio-embedding/`;
+the atom receipt records commands, imported rows, failures and per-channel
+coverage. Every canonical recording in this delivery with local SHA256-matched
+audio must have all three current vectors. Historical recordings without local
+audio only lower reported coverage, not the publication gate. A failure stops
+before snapshot and audio cleanup; retain the audio and retry the same run ID
+(`--resume` is passed to the runner). The runner's size/format restrictions still
+apply: an unsupported or too-small local file cannot silently pass the gate.
+Download/CNB dry-runs and runs without a delivery skip embedding automatically;
+`--skip-audio-embedding` is an explicit bypass for controlled runs, not a production
+coverage guarantee. No local audio from this delivery means no inference is needed.
+
 On a real publish run, the verified release is also installed atomically as the
 publisher's local `~/.music-kb/current.sqlite` (or `--local-snapshot-dir`),
 independently of whether peer SSH is explicitly skipped. Dry-runs leave the
