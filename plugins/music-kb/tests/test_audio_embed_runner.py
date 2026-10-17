@@ -9,6 +9,7 @@ import sqlite3
 import struct
 import sys
 from argparse import Namespace
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -64,7 +65,7 @@ def library(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         digest = hashlib.sha256(content).hexdigest()
-        with sqlite3.connect(database) as connection:
+        with closing(sqlite3.connect(database)) as connection, connection:
             connection.execute(
                 "INSERT INTO recording(id, canonical_title, normalized_title, audio_sha256) "
                 "VALUES (?, ?, ?, ?)",
@@ -131,11 +132,11 @@ def test_scan_matches_hash_recursively_and_leaves_database_unchanged(runner, lib
     assert args.db.read_bytes() == before
 
 
-def test_scan_excludes_unsupported_tiny_and_unmatched_audio(runner, library):
+def test_scan_excludes_unsupported_empty_and_unmatched_audio(runner, library):
     args, add = library
     good, _ = add("good")
     add("unsupported", filename="notes.txt")
-    add("tiny", content=b"x")
+    add("empty", content=b"")
     (args.audio_root / "unknown.mp3").write_bytes(b"unknown" * 262144)
     candidates, rejected = runner.scan_audio(args.audio_root, args.db)
     assert {Path(row["path"]) for row in candidates} == {good}
@@ -444,6 +445,51 @@ def test_scan_hash_failure_is_reported(runner, library, monkeypatch):
     candidates, failures = runner.scan_audio(args.audio_root, args.db)
     assert candidates == []
     assert failures == [{"path": str(path), "error": "synthetic unreadable audio"}]
+
+
+def test_small_supported_audio_is_embedded(runner, library):
+    args, add = library
+    path, digest = add("small", filename="small.ogg", content=b"OggS tiny stub")
+    candidates, failures = runner.scan_audio(args.audio_root, args.db)
+    assert failures == []
+    assert candidates == [{"recording_id": "small", "audio_sha256": digest, "path": str(path.resolve())}]
+    receipt = runner.run(args, embedder=lambda path: {"": fake_vector(512)})
+    assert receipt["written"] == {"overall": 1}
+
+
+def test_scan_stat_error_is_reported(runner, library, monkeypatch):
+    args, add = library
+    path, _ = add("unreadable", content=b"small audio")
+    original_stat = Path.stat
+
+    def unreadable(candidate, *arguments, **options):
+        if candidate == path:
+            raise PermissionError("cannot stat audio")
+        return original_stat(candidate, *arguments, **options)
+
+    monkeypatch.setattr(Path, "stat", unreadable)
+    candidates, failures = runner.scan_audio(args.audio_root, args.db)
+    assert candidates == []
+    assert failures == [{"path": str(path), "error": "cannot stat audio"}]
+
+
+def test_scan_directory_error_is_reported(runner, library, monkeypatch):
+    args, add = library
+    nested = args.audio_root / "denied"
+    nested.mkdir()
+    original_scandir = runner.os.scandir
+
+    def denied(path):
+        if Path(path) == nested:
+            raise PermissionError(13, "cannot scan directory", str(path))
+        return original_scandir(path)
+
+    monkeypatch.setattr(runner.os, "scandir", denied)
+    candidates, failures = runner.scan_audio(args.audio_root, args.db)
+    assert candidates == []
+    assert len(failures) == 1
+    assert failures[0]["path"] == str(nested)
+    assert "cannot scan directory" in failures[0]["error"]
 
 
 def test_resume_null_unknown_identity_rejected(runner, tmp_path):

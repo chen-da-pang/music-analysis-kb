@@ -18,6 +18,14 @@ from music_kb.mcp_server import ReadOnlyMusicKB
 FIXTURE = Path(__file__).parent / "fixtures" / "analysis.json"
 
 
+def test_weekly_run_has_no_embedding_bypass():
+    help_result = run_cli("weekly-run", "--help")
+    assert help_result.returncode == 0
+    assert "--skip-audio-embedding" not in help_result.stdout
+    rejected = run_cli("weekly-run", "--skip-audio-embedding")
+    assert rejected.returncode != 0
+
+
 def run_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "music_kb.cli", *arguments], text=True, capture_output=True, check=False

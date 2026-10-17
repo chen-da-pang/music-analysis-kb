@@ -1,6 +1,7 @@
 """Publisher-local, read-only three-channel evaluation of an external audio file."""
 
 import argparse
+from collections import defaultdict
 from datetime import datetime, timezone
 import math
 from pathlib import Path
@@ -16,24 +17,34 @@ from music_kb.repository import MusicKBRepository
 
 
 def pairwise_baseline(repository, *, model_id, factor, best_distance):
-    model = repository.connection.execute(
-        "SELECT dim FROM embedding_model WHERE id=?", (model_id,)
-    ).fetchone()
-    vectors = []
-    for row in repository.connection.execute(
-        "SELECT vector FROM recording_embedding WHERE model_id=? AND factor=? ORDER BY recording_id",
-        (model_id, factor),
-    ):
-        norm = repository._embedding_norm(row[0], model["dim"])
-        vectors.append(np.frombuffer(row[0], dtype="<f4").astype(np.float64) / norm)
-    distances = []
-    for index, vector in enumerate(vectors):
-        distances.extend(float(np.clip(1 - np.dot(vector, other), 0, 2))
-                         for other in vectors[index + 1:])
+    rows = list(repository.iter_normalized_embeddings(model_id, factor))
+    groups = defaultdict(list)
+    for recording_id, title, vector in rows:
+        groups[title].append(vector)
+    versions = [vectors for vectors in groups.values() if len(vectors) >= 2]
+    multi_distances = [repository.cosine_distance(vector, other)
+                       for vectors in versions for index, vector in enumerate(vectors)
+                       for other in vectors[index + 1:]]
+    all_distances = [repository.cosine_distance(vector, other)
+                     for index, (_, _, vector) in enumerate(rows)
+                     for _, _, other in rows[index + 1:]]
+    all_pairs = distribution_summary(all_distances, best_distance)
+    all_pairs.update(scope="all_pairs", recording_count=len(rows))
+    fallback = len(multi_distances) < 10
+    multi_version = distribution_summary(all_distances if fallback else multi_distances, best_distance)
+    multi_version.update(
+        scope="all_pairs_fallback" if fallback else "multi_version",
+        group_count=len(versions), multi_version_pair_count=len(multi_distances),
+    )
+    if fallback:
+        multi_version["reason"] = f"fewer than 10 multi-version pairs ({len(multi_distances)} available)"
+    return {"multi_version": multi_version, "all_pairs": all_pairs}
+
+
+def distribution_summary(distances, best_distance):
     values = np.asarray(distances, dtype=np.float64)
     return {
-        "recording_count": len(vectors), "pair_count": len(distances),
-        "population": "all unordered recording pairs, excluding self, before version collapse",
+        "pair_count": len(distances),
         "mean": float(values.mean()) if values.size else None,
         "quantiles": {str(quantile): float(np.quantile(values, quantile)) if values.size else None
                       for quantile in (0, 0.25, 0.5, 0.75, 1)},
@@ -83,14 +94,10 @@ def run(args, *, embedder=None, duration_reader=audio_duration):
                   "channels": CHANNELS},
         "channels": {},
     }
-    with MusicKBRepository(args.db, read_only=True) as repository:
-        repository.connection.execute("BEGIN")
+    with MusicKBRepository(args.db, read_only=True) as repository, repository.read_snapshot():
         for config in CHANNELS.values():
-            registered = repository.connection.execute(
-                "SELECT * FROM embedding_model WHERE id=?", (config["model_id"],)
-            ).fetchone()
-            if registered is None or any(registered[key] != config[key]
-                                         for key in ("model_name", "recipe", "dim")):
+            registered = repository.embedding_model(config["model_id"])
+            if any(registered[key] != config[key] for key in ("model_name", "recipe", "dim")):
                 raise ValueError(f"Registered model identity differs: {config['model_id']}")
         for group, names in (("overall", ("overall",)), ("merit", ("rhythm", "timbre"))):
             active_embedder = embedder if embedder is not None else load_embedder(group, args.device)
@@ -112,14 +119,10 @@ def run(args, *, embedder=None, duration_reader=audio_duration):
                 if not args.simple:
                     best = None
                     if result["results"]:
-                        winner = repository.connection.execute(
-                            "SELECT vector FROM recording_embedding WHERE recording_id=? AND model_id=? AND factor=?",
-                            (result["results"][0]["recording_id"], config["model_id"], config["factor"]),
-                        ).fetchone()[0]
+                        target = repository.normalized_embedding(
+                            result["results"][0]["recording_id"], config["model_id"], config["factor"])
                         query = np.frombuffer(payload, dtype="<f4").astype(np.float64)
-                        target = np.frombuffer(winner, dtype="<f4").astype(np.float64)
-                        best = float(np.clip(1 - np.dot(query / np.linalg.norm(query),
-                                                     target / np.linalg.norm(target)), 0, 2))
+                        best = repository.cosine_distance(query / np.linalg.norm(query), target)
                     result["baseline"] = pairwise_baseline(
                         repository, model_id=config["model_id"], factor=config["factor"], best_distance=best)
                 report["channels"][name] = result
@@ -138,7 +141,12 @@ def run(args, *, embedder=None, duration_reader=audio_duration):
             print(f"  {row['distance']:.3f} {row['title']} [{row['version_label']}] "
                   f"(+{row['more_versions']} versions): {analysis_brief(row)}")
         if "baseline" in result:
-            print(f"  Best-distance empirical percentile: {result['baseline']['best_distance_percentile']}")
+            baseline = result["baseline"]["multi_version"]
+            print(f"  Best-distance empirical percentile ({baseline['scope']}, "
+                  f"{baseline['pair_count']} pairs, {baseline['group_count']} version groups): "
+                  f"{baseline['best_distance_percentile']}")
+            if "reason" in baseline:
+                print(f"  Baseline fallback reason: {baseline['reason']}")
     print(f"Report: {destination}")
     return report
 

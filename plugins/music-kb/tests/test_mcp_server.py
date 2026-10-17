@@ -10,6 +10,37 @@ from music_kb.mcp_server import ReadOnlyMusicKB, create_server
 from music_kb.errors import DatabaseNotInitializedError, ValidationError
 
 
+def test_mcp_ambiguous_rhythm_requires_explicit_model(embedded_snapshot, master_database, tmp_path):
+    from music_kb.repository import MusicKBRepository
+    from music_kb.snapshot import create_snapshot
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    with MusicKBRepository(master_database) as repository:
+        original = repository.connection.execute("SELECT * FROM embedding_model").fetchone()
+        model = {key: original[key] for key in
+                 ("model_name", "dim", "metric", "weight_license", "modality")}
+        repository.register_embedding_model(model_id="alternative", recipe="alternative", **model)
+        with repository.connection:
+            repository.connection.execute(
+                "INSERT INTO recording_embedding SELECT recording_id, 'alternative', factor, vector, "
+                "norm, source_audio_sha256, created_at FROM recording_embedding WHERE factor='rhythm'"
+            )
+    release = create_snapshot(master_database, tmp_path / "ambiguous", release_name="ambiguous")
+    database = release["database"]
+    api = ReadOnlyMusicKB(database)
+    with pytest.raises(ValidationError, match="Multiple models.*model_id"):
+        api.similar(recording_id="rec_neon_night_studio", channel="rhythm")
+    server = create_server(database)
+    arguments = {"recording_id": "rec_neon_night_studio", "channel": "rhythm"}
+    with pytest.raises(ToolError, match="Multiple models.*model_id"):
+        asyncio.run(server.call_tool("music_kb_similar", arguments))
+    arguments["model_id"] = "alternative"
+    _, result = asyncio.run(server.call_tool("music_kb_similar", arguments))
+    assert result["model_id"] == "alternative"
+    assert result["results"][0]["recording_id"] == "neighbor"
+    assert api.similar(**arguments) == result
+
+
 @pytest.mark.parametrize("channel", ["overall", "rhythm", "timbre"])
 def test_mcp_similar_reads_installed_snapshot(embedded_snapshot, channel):
     database = embedded_snapshot["current_database"]

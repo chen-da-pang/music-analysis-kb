@@ -32,7 +32,7 @@ def _delivery_lyrics(lyric_receipt_writer, name: str) -> Path:
     )
 
 
-@pytest.mark.parametrize("mode", ["success", "missing", "runner_failure", "missing_operation", "dry_run", "skip", "empty_resume", "timeout", "bad_jsonl", "registered"])
+@pytest.mark.parametrize("mode", ["success", "missing", "runner_failure", "missing_operation", "dry_run", "empty_resume", "timeout", "bad_jsonl", "registered", "unsupported", "empty", "scan_failure"])
 def test_weekly_audio_embedding_gate(tmp_path, monkeypatch, lyric_receipt_writer, mode):
     from music_kb import weekly_orchestration
     from music_kb.repository import MusicKBRepository
@@ -41,6 +41,12 @@ def test_weekly_audio_embedding_gate(tmp_path, monkeypatch, lyric_receipt_writer
     audio_root.mkdir()
     audio = audio_root / "new.ogg"
     audio.write_bytes(b"fixture audio")
+    if mode == "unsupported":
+        audio = audio.rename(audio.with_suffix(".txt"))
+    if mode == "empty":
+        audio.write_bytes(b"")
+    if mode == "scan_failure":
+        (audio_root / "broken.ogg").symlink_to(audio_root / "missing")
     sha = hashlib.sha256(audio.read_bytes()).hexdigest()
     rows = [json.loads(line) for line in FIXTURE.read_text().splitlines() if line]
     rows[0]["source_sha256"] = sha
@@ -115,12 +121,12 @@ def test_weekly_audio_embedding_gate(tmp_path, monkeypatch, lyric_receipt_writer
         delivery=delivery, lyric_receipt_paths=[_delivery_lyrics(lyric_receipt_writer, "embedding")],
         cnb_command=None, chart_database=None, state_file=tmp_path / "publish-state.json",
         expected_count=2, skip_peers=True, embed_python="/fake/embed-python",
-        download_dry_run=mode == "dry_run", skip_audio_embedding=mode == "skip",
+        download_dry_run=mode == "dry_run",
     )
     if mode == "registered":
         monkeypatch.setenv("MUSIC_KB_EMBED_PYTHON", "/fake/embed-python")
         arguments["embed_python"] = None
-    if mode in {"missing", "runner_failure", "missing_operation", "timeout", "bad_jsonl"}:
+    if mode in {"missing", "runner_failure", "missing_operation", "timeout", "bad_jsonl", "scan_failure"}:
         with pytest.raises((RuntimeError, ValueError), match="audio.embedding"):
             run_weekly_run(**arguments)
         state = json.loads((run_dir / "run-state.json").read_text())
@@ -131,6 +137,8 @@ def test_weekly_audio_embedding_gate(tmp_path, monkeypatch, lyric_receipt_writer
         assert audio.exists()
         if mode != "missing_operation":
             assert state["atoms"]["audio_embedding"]["outputs"]["failures"]
+            if mode == "scan_failure":
+                (audio_root / "broken.ogg").unlink()
             mode = "success"
             run_weekly_run(**arguments)
             resumed = json.loads((run_dir / "run-state.json").read_text())
@@ -143,9 +151,13 @@ def test_weekly_audio_embedding_gate(tmp_path, monkeypatch, lyric_receipt_writer
     state = json.loads((run_dir / "run-state.json").read_text())
     receipt = state["atoms"]["audio_embedding"]["outputs"]
     assert snapshots
-    if mode in {"dry_run", "skip"}:
+    if mode == "dry_run":
         assert receipt["status"] == "skipped"
         assert not calls
+        return
+    if mode in {"unsupported", "empty"}:
+        assert not calls
+        assert receipt["coverage"]["run_local_audio"] == 0
         return
     assert calls == ["overall", "merit"]
     assert receipt["rows_written"] == (0 if mode == "empty_resume" else 3)

@@ -17,6 +17,30 @@ MODEL = dict(model_id="muq-v3", model_name="MuQ-MuLan", recipe="v3", dim=2,
 SEED = "rec_neon_night_studio"
 
 
+def test_public_normalized_embedding_helpers(master_database):
+    with MusicKBRepository(master_database) as repository:
+        repository.import_embeddings([embedding(vector=(3, 4))], **MODEL)
+    with MusicKBRepository(master_database, read_only=True) as repository:
+        with repository.read_snapshot():
+            assert repository.embedding_model(MODEL["model_id"])["dim"] == 2
+        with pytest.raises(NotFoundError):
+            repository.embedding_model("missing")
+        vector = repository.normalized_embedding(SEED, MODEL["model_id"], "")
+        assert vector.tolist() == pytest.approx([0.6, 0.8])
+        rows = list(repository.iter_normalized_embeddings(MODEL["model_id"], ""))
+        assert len(rows) == 1
+        assert rows[0][0] == SEED
+        assert rows[0][1]
+        assert rows[0][2].tolist() == pytest.approx([0.6, 0.8])
+        assert repository.cosine_distance(vector, vector) == pytest.approx(0)
+        assert repository.cosine_distance(vector, -vector) == pytest.approx(2)
+        assert repository.cosine_distance([1, 0], [0, 1]) == 1
+        assert repository.cosine_distance([-1.0000001, 0], [1, 0]) == 2
+        assert repository.cosine_distance([1.0000001, 0], [1, 0]) == 0
+        with pytest.raises(NotFoundError):
+            repository.normalized_embedding("missing", MODEL["model_id"], "")
+
+
 def embedding(recording_id=SEED, vector=(1.0, 0.0), sha="a" * 64, **extra):
     return dict(recording_id=recording_id, audio_sha256=sha,
                 vector=struct.pack("<" + "f" * len(vector), *vector), **extra)

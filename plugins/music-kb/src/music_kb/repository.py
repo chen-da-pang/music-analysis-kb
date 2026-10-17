@@ -8,7 +8,7 @@ import sqlite3
 import math
 from collections import Counter, OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -274,6 +274,49 @@ class MusicKBRepository:
             raise ValidationError("Embedding vector must be finite and nonzero")
         return norm
 
+    @contextmanager
+    def read_snapshot(self):
+        """Keep a consistent read view for a multi-query report."""
+        self.connection.execute("BEGIN")
+        try:
+            yield self
+        finally:
+            self.connection.rollback()
+
+    def embedding_model(self, model_id: str) -> dict[str, Any]:
+        row = self.connection.execute("SELECT * FROM embedding_model WHERE id=?", (model_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("Embedding model not registered", details={"model_id": model_id})
+        return dict(row)
+
+    @staticmethod
+    def cosine_distance(left, right) -> float:
+        """Cosine distance between normalized vectors, clipped for floating-point drift."""
+        return float(np.clip(1.0 - np.dot(left, right), 0.0, 2.0))
+
+    def normalized_embedding(self, recording_id: str, model_id: str, factor: str) -> np.ndarray:
+        row = self.connection.execute(
+            "SELECT e.vector, m.dim FROM recording_embedding e JOIN embedding_model m ON m.id=e.model_id "
+            "WHERE e.recording_id=? AND e.model_id=? AND e.factor=?", (recording_id, model_id, factor),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("Recording has no vector for this channel", details={
+                "recording_id": recording_id, "model_id": model_id, "factor": factor,
+            })
+        norm = self._embedding_norm(row["vector"], row["dim"])
+        return np.frombuffer(row["vector"], dtype="<f4").astype(np.float64) / norm
+
+    def iter_normalized_embeddings(self, model_id: str, factor: str):
+        """Yield recording identity, normalized title and normalized vector in ID order."""
+        for row in self.connection.execute(
+            "SELECT r.id, r.normalized_title, e.vector, m.dim FROM recording_embedding e "
+            "JOIN recording r ON r.id=e.recording_id JOIN embedding_model m ON m.id=e.model_id "
+            "WHERE e.model_id=? AND e.factor=? ORDER BY r.id", (model_id, factor),
+        ):
+            norm = self._embedding_norm(row["vector"], row["dim"])
+            yield str(row["id"]), row["normalized_title"], np.frombuffer(
+                row["vector"], dtype="<f4").astype(np.float64) / norm
+
     def similar(
         self, recording_id: str, *, channel: str = "overall",
         model_id: str | None = None, limit: int = 10,
@@ -305,8 +348,8 @@ class MusicKBRepository:
             raise NotFoundError("Recording has no vector for this channel", details={
                 "recording_id": recording_id, "channel": channel, "model_id": model_id,
             })
-        seed_norm = self._embedding_norm(seed["vector"], seed["dim"])
-        results = self._rank_vector(seed["vector"], seed_norm, seed["dim"], model_id, factor, limit,
+        seed_vector = self.normalized_embedding(recording_id, model_id, factor)
+        results = self._rank_vector(seed_vector, seed["dim"], model_id, factor, limit,
                                     exclude_recording_id=recording_id)
         return {"recording_id": recording_id, "channel": channel, "model_id": model_id,
                 "results": results, "count": len(results)}
@@ -323,15 +366,15 @@ class MusicKBRepository:
         if model is None:
             raise ValidationError("Audio embedding model not registered", details={"model_id": model_id})
         norm = self._embedding_norm(vector_bytes, model["dim"])
-        results = self._rank_vector(vector_bytes, norm, model["dim"], model_id, factor, limit)
+        vector = np.frombuffer(vector_bytes, dtype="<f4").astype(np.float64) / norm
+        results = self._rank_vector(vector, model["dim"], model_id, factor, limit)
         return {"channel": factor or "overall", "model_id": model_id,
                 "results": results, "count": len(results)}
 
     def _rank_vector(
-        self, vector: bytes, vector_norm: float, dim: int, model_id: str, factor: str,
+        self, seed_vector: np.ndarray, dim: int, model_id: str, factor: str,
         limit: int, *, exclude_recording_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        seed_vector = np.frombuffer(vector, dtype="<f4").astype(np.float64) / vector_norm
         candidates = []
         for row in self.connection.execute(
             "SELECT r.id, r.canonical_title, r.normalized_title, r.version_label, e.vector "
@@ -341,7 +384,7 @@ class MusicKBRepository:
         ):
             norm = self._embedding_norm(row["vector"], dim)
             values = np.frombuffer(row["vector"], dtype="<f4").astype(np.float64) / norm
-            distance = float(np.clip(1.0 - np.dot(seed_vector, values), 0.0, 2.0))
+            distance = self.cosine_distance(seed_vector, values)
             candidates.append((distance, str(row["id"]), row))
         candidates.sort(key=lambda item: (item[0], item[1]))
         groups: dict[str, dict[str, Any]] = {}
