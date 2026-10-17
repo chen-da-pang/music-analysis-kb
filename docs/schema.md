@@ -44,6 +44,23 @@ snapshots read-only through CLI `similar` or MCP `music_kb_similar`; MCP status
 includes embedding counts and coverage. Old v7 snapshots fail the strict schema
 version check rather than being migrated by a query.
 
+## Audio import and client compatibility
+
+`import-embeddings` transactionally imports model metadata and SHA-bound JSONL
+vectors; it performs no inference. `overall` uses MuQ-MuLan v3 (512d), while
+`rhythm` and `timbre` use independent MERIT/MERT heads (128d each). Results
+fold normalized titles, expose `more_versions`, and display distance to three
+decimals, never percentages or threshold judgments. Only recordings with
+vectors participate; status counts `recordings_with_embeddings / recordings`
+describe coverage (initially 434/2005), not quality.
+
+Migrate/bootstrap the master, create/verify and install a v8 snapshot **before**
+upgrading clients: new clients cannot open v7 snapshots. The external
+[audio runner and Suno evaluation scripts](../runners/audio-embed/README.md)
+keep inference outside plugin dependencies. MuQ-MuLan/MERT weights are
+CC-BY-NC-4.0 and MERIT heads MIT; internal research only until authorization
+or replacement for commercial use.
+
 ## Scale notes
 
 - Keep direct lookup indexes on normalized tag names/aliases, title aliases,
@@ -68,8 +85,8 @@ version check rather than being migrated by a query.
 - The deterministic `music_flamingo_parser_v1` source can backfill rich
   analysis tags without changing canonical raw text. It replaces only its own
   assignments, so manual editorial tags remain durable across parser reruns.
-- Schema v7 accepts publisher databases created by every released prior schema
-  (v1–v4). Upgrading a v4 publisher master with `music-kb init --db ...` is a
+- Schema v8 accepts publisher databases created by prior schemas (v1–v7).
+  Upgrading a v4 publisher master with `music-kb init --db ...` is a
   required one-time gate before the new 100k paths are used: it installs the
   canonical-switch and exact-tag indexes and records the FTS projection state.
   Existing numeric measurements are labelled `legacy` during migration; new
