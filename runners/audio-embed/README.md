@@ -200,8 +200,10 @@ transaction; evaluation never imports vectors or changes canonical analyses.
   up to ten `results`. Each result includes `recording_id`, `title`,
   `version_label`, `artists`, `listen_url`, cosine `distance` (0–2, three decimal
   places), `more_versions`, and `canonical_analysis: {analysis_id, summary}`.
-  Summaries come directly from the selected recording's canonical analysis;
-  an empty stored summary stays empty. Versions collapse by normalized title,
+  Summaries come directly from the selected recording's canonical analysis.
+  When the stored summary is empty (the current campaign imports store none),
+  the object also carries `raw_text_excerpt`: the first 600 characters of the
+  canonical raw text, used as the terminal brief. Versions collapse by normalized title,
   selecting the closest recording with recording-ID tie breaks, just as `similar`.
   Unlike a recording-seeded query, no recording is excluded.
 - Full mode adds per-channel `baseline`: recording/pair counts, mean, quantiles

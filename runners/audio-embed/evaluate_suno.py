@@ -50,6 +50,14 @@ def audio_duration(path):
     return float(librosa.get_duration(path=path))
 
 
+def analysis_brief(row):
+    """One-line brief for the terminal: stored summary, else canonical text excerpt."""
+
+    analysis = row["canonical_analysis"]
+    text = analysis.get("summary") or analysis.get("raw_text_excerpt") or ""
+    return " ".join(text.split())[:120]
+
+
 def run(args, *, embedder=None, duration_reader=audio_duration):
     audio = Path(args.audio).resolve(strict=True)
     output_dir = Path(args.output_dir).resolve()
@@ -93,9 +101,14 @@ def run(args, *, embedder=None, duration_reader=audio_duration):
                 result = repository.similar_to_vector(
                     payload, model_id=config["model_id"], factor=config["factor"], limit=10)
                 for row in result["results"]:
-                    canonical = repository.get_canonical_analysis(row["recording_id"])["analysis"]
+                    canonical = repository.get_canonical_analysis(
+                        row["recording_id"], max_chars=600)["analysis"]
                     row["canonical_analysis"] = {
                         "analysis_id": canonical["id"], "summary": canonical["summary"]}
+                    if not canonical["summary"]:
+                        # Stored summaries can be empty on campaign imports; the
+                        # canonical raw text is the only available brief.
+                        row["canonical_analysis"]["raw_text_excerpt"] = canonical["raw_text"]
                 if not args.simple:
                     best = None
                     if result["results"]:
@@ -123,7 +136,7 @@ def run(args, *, embedder=None, duration_reader=audio_duration):
         print(f"{name}: {result['count']} results (cosine distance; lower is closer)")
         for row in result["results"]:
             print(f"  {row['distance']:.3f} {row['title']} [{row['version_label']}] "
-                  f"(+{row['more_versions']} versions): {row['canonical_analysis']['summary']}")
+                  f"(+{row['more_versions']} versions): {analysis_brief(row)}")
         if "baseline" in result:
             print(f"  Best-distance empirical percentile: {result['baseline']['best_distance_percentile']}")
     print(f"Report: {destination}")

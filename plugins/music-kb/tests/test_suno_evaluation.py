@@ -173,3 +173,21 @@ def test_mismatched_recipe_and_existing_output_fail_before_inference(evaluator, 
     with pytest.raises(ValueError, match="identity differs"):
         evaluator.run(args, duration_reader=lambda path: 20,
                       embedder=lambda *args: pytest.fail("must not infer"))
+
+
+def test_empty_summary_falls_back_to_canonical_raw_text(evaluator, evaluation_library):
+    args = evaluation_library
+    with MusicKBRepository(args.db) as repository:
+        with repository.connection:
+            repository.connection.execute("UPDATE analysis_revision SET summary=''")
+
+    def embedder(group, path):
+        names = ("overall",) if group == "overall" else ("rhythm", "timbre")
+        return {evaluator.CHANNELS[name]["factor"]: [1, 0] + [0] * (evaluator.CHANNELS[name]["dim"] - 2)
+                for name in names}
+
+    report = evaluator.run(args, embedder=embedder, duration_reader=lambda path: 20)
+    for channel in report["channels"].values():
+        analysis = channel["results"][0]["canonical_analysis"]
+        assert analysis["summary"] == ""
+        assert analysis["raw_text_excerpt"].strip()
