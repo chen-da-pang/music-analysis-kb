@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import base64
+import struct
+import pytest
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +19,76 @@ def run_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "music_kb.cli", *arguments], text=True, capture_output=True, check=False
     )
+
+
+def test_cli_embedding_import_similar_and_doctor(master_database, tmp_path):
+    source = tmp_path / "vectors.jsonl"
+    source.write_text(json.dumps({
+        "recording_id": "rec_neon_night_studio", "audio_sha256": "a" * 64,
+        "vector_b64": base64.b64encode(struct.pack("<ff", 1, 0)).decode(),
+    }) + "\n", encoding="utf-8")
+    arguments = ["--json", "import-embeddings", "--db", str(master_database),
+                 "--input", str(source), "--model-id", "muq-v3", "--model-name", "MuQ-MuLan",
+                 "--recipe", "v3", "--dim", "2", "--metric", "cosine", "--license", "CC-BY-NC-4.0"]
+    for _ in range(2):
+        imported = run_cli(*arguments)
+        assert imported.returncode == 0, imported.stderr
+        assert json.loads(imported.stdout)["result"]["imported"] == 1
+    similar = run_cli("similar", "--json", "--db", str(master_database),
+                      "--recording-id", "rec_neon_night_studio", "--channel", "overall")
+    assert similar.returncode == 0, similar.stderr
+    assert json.loads(similar.stdout)["result"]["results"] == []
+    doctor = run_cli("--json", "doctor", "--db", str(master_database))
+    result = json.loads(doctor.stdout)["result"]
+    assert result["counts"]["embedding_models"] == 1
+    assert result["counts"]["recordings_with_embeddings"] == 1
+    assert result["embedding_coverage"]["ratio"] == 1.0
+
+
+def test_cli_similar_missing_vector_and_bad_channel_are_structured(master_database):
+    for channel, code in [("overall", "not_found"), ("melody", "validation_error")]:
+        result = run_cli("--json", "similar", "--db", str(master_database),
+                         "--recording-id", "rec_neon_night_studio", "--channel", channel)
+        assert result.returncode == 2
+        error = json.loads(result.stderr)
+        assert error["ok"] is False
+        assert error["error"]["code"] == code
+        assert error["error"]["details"]["channel"] == channel
+
+
+def test_cli_similar_human_distance_has_three_decimals(master_database, fixture_payload):
+    from copy import deepcopy
+
+    with MusicKBRepository(master_database) as repository:
+        payload = deepcopy(fixture_payload)
+        payload["recording"].update(id="other", title="Other", audio_sha256="b" * 64)
+        payload["source_tracks"] = []
+        repository.import_analysis(payload)
+        repository.import_embeddings([
+            dict(recording_id="rec_neon_night_studio", audio_sha256="a" * 64, vector=struct.pack("<ff", 1, 0)),
+            dict(recording_id="other", audio_sha256="b" * 64, vector=struct.pack("<ff", 3, 4)),
+        ], model_id="muq-v3", model_name="MuQ-MuLan", recipe="v3", dim=2,
+            metric="cosine", weight_license="CC-BY-NC-4.0")
+    result = run_cli("similar", "--db", str(master_database), "--recording-id", "rec_neon_night_studio")
+    assert result.returncode == 0, result.stderr
+    assert "0.400" in result.stdout
+    assert "Other" in result.stdout
+
+
+@pytest.mark.parametrize("suffix", [b"\r\n", b"", b"\n\n", b"\n{bad}\n", None])
+def test_cli_embedding_jsonl_failure_rolls_back(master_database, tmp_path, suffix):
+    source = tmp_path / "bad.jsonl"
+    line = json.dumps({"recording_id": "rec_neon_night_studio", "audio_sha256": "a" * 64,
+                       "vector_b64": base64.b64encode(struct.pack("<ff", 1, 0)).decode()}).encode()
+    source.write_bytes(line + suffix if suffix is not None else b"")
+    result = run_cli("--json", "import-embeddings", "--db", str(master_database),
+                     "--input", str(source), "--model-id", "muq-v3", "--model-name", "MuQ-MuLan",
+                     "--recipe", "v3", "--dim", "2", "--metric", "cosine", "--license", "CC-BY-NC-4.0")
+    assert result.returncode == 2
+    assert json.loads(result.stderr)["error"]["code"] == "validation_error"
+    with MusicKBRepository(master_database, read_only=True) as repository:
+        assert repository.status()["counts"]["embedding_models"] == 0
+        assert repository.status()["counts"]["recordings_with_embeddings"] == 0
 
 
 def test_cli_json_lifecycle(tmp_path: Path) -> None:

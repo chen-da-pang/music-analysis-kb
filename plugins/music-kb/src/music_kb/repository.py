@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import json
 import sqlite3
+import math
 from collections import Counter, OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
@@ -10,8 +13,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import numpy as np
+
 from .campaign_delivery import CampaignDeliveryEntry, group_campaign_delivery, to_import_payload
-from .errors import NotFoundError, ValidationError
+from .errors import NotFoundError, ReadOnlyError, ValidationError
 from .lyrics import (
     LYRIC_NORMALIZER_VERSION,
     LYRIC_STATUS_AVAILABLE,
@@ -170,6 +175,167 @@ class MusicKBRepository:
             raise ReadOnlyError("Client snapshots are never valid write targets; use the publisher master database.")
 
     # -- importer ---------------------------------------------------------
+
+    def _require_embedding_publisher(self) -> None:
+        self._require_writer()
+        kind = self.connection.execute("SELECT value FROM meta WHERE key='database_kind'").fetchone()
+        if kind is None or kind[0] != "master":
+            raise ReadOnlyError("Embedding writes require the publisher master database")
+
+    def register_embedding_model(self, **model: Any) -> dict[str, Any]:
+        self._require_embedding_publisher()
+        with self.connection:
+            return self._register_embedding_model(**model)
+
+    def _register_embedding_model(
+        self, *, model_id: str, model_name: str, recipe: str, dim: int,
+        metric: str = "cosine", weight_license: str, modality: str = "audio",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        values = (
+            require_text(model_id, "model_id"), require_text(model_name, "model_name"),
+            require_text(recipe, "recipe"), modality, dim, metric,
+            require_text(weight_license, "weight_license"),
+            json.dumps(dict(metadata or {}), sort_keys=True, allow_nan=False),
+        )
+        if modality not in {"audio", "lyrics"} or metric != "cosine":
+            raise ValidationError("Embedding models require audio/lyrics modality and cosine metric")
+        if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+            raise ValidationError("Embedding dimension must be a positive integer")
+        existing = self.connection.execute("SELECT * FROM embedding_model WHERE id = ?", (model_id,)).fetchone()
+        if existing:
+            if tuple(existing[key] for key in (
+                "id", "model_name", "recipe", "modality", "dim", "metric", "weight_license", "metadata_json"
+            )) != values:
+                raise ValidationError("Model id already registered with different metadata")
+        else:
+            try:
+                self.connection.execute(
+                    "INSERT INTO embedding_model(id, model_name, recipe, modality, dim, metric, "
+                    "weight_license, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", values,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValidationError("Model/recipe/modality already registered under another id") from exc
+        return dict(self.connection.execute("SELECT * FROM embedding_model WHERE id = ?", (model_id,)).fetchone())
+
+    def import_embeddings(
+        self, entries: Iterable[Mapping[str, Any]], *, model_id: str,
+        factor: str = "", **model: Any,
+    ) -> dict[str, Any]:
+        self._require_embedding_publisher()
+        if factor not in {"", "rhythm", "timbre"}:
+            raise ValidationError("Embedding factor must be empty, rhythm, or timbre")
+        imported = 0
+        with self.connection:
+            if model:
+                self._register_embedding_model(model_id=model_id, **model)
+            registered = self.connection.execute(
+                "SELECT * FROM embedding_model WHERE id = ?", (model_id,)
+            ).fetchone()
+            if registered is None:
+                raise ValidationError("Embedding model is not registered", details={"model_id": model_id})
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    raise ValidationError("Each embedding must be an object")
+                recording_id = require_text(entry.get("recording_id"), "recording_id")
+                recording = self.connection.execute(
+                    "SELECT audio_sha256 FROM recording WHERE id = ?", (recording_id,)
+                ).fetchone()
+                if recording is None:
+                    raise ValidationError("Embedding recording does not exist", details={"recording_id": recording_id})
+                sha = entry.get("audio_sha256")
+                if not sha or sha != recording["audio_sha256"]:
+                    raise ValidationError("Embedding audio sha256 does not match recording")
+                vector = entry.get("vector")
+                actual_norm = self._embedding_norm(vector, registered["dim"])
+                norm = entry.get("norm", actual_norm)
+                if not isinstance(norm, (int, float)) or not math.isclose(norm, actual_norm, rel_tol=1e-5, abs_tol=1e-6):
+                    raise ValidationError("Embedding norm does not match vector")
+                self.connection.execute(
+                    "INSERT INTO recording_embedding(recording_id, model_id, factor, vector, norm, source_audio_sha256) "
+                    "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(recording_id, model_id, factor) DO UPDATE SET "
+                    "vector=excluded.vector, norm=excluded.norm, source_audio_sha256=excluded.source_audio_sha256",
+                    (recording_id, model_id, factor, vector, actual_norm, sha),
+                )
+                imported += 1
+            if imported and factor == "" and registered["modality"] == "audio":
+                self.connection.execute(
+                    "UPDATE meta SET value = ? WHERE key = 'default_embedding_model' AND value = ''", (model_id,)
+                )
+        return {"imported": imported, "model_id": model_id, "factor": factor}
+
+    @staticmethod
+    def _embedding_norm(vector: Any, dim: int) -> float:
+        if not isinstance(vector, bytes) or len(vector) != dim * 4:
+            raise ValidationError("Embedding vector byte length must equal model dimension * 4")
+        values = np.frombuffer(vector, dtype="<f4").astype(np.float64)
+        norm = float(np.linalg.norm(values))
+        if not np.isfinite(values).all() or not math.isfinite(norm) or norm <= 0:
+            raise ValidationError("Embedding vector must be finite and nonzero")
+        return norm
+
+    def similar(
+        self, recording_id: str, *, channel: str = "overall",
+        model_id: str | None = None, limit: int = 10,
+    ) -> dict[str, Any]:
+        if channel not in {"overall", "rhythm", "timbre"}:
+            raise ValidationError("Unknown embedding channel", details={"channel": channel})
+        factor = "" if channel == "overall" else channel
+        if model_id is None and channel == "overall":
+            model_id = self.connection.execute(
+                "SELECT value FROM meta WHERE key = 'default_embedding_model'"
+            ).fetchone()[0]
+        if model_id is None:
+            models = [row[0] for row in self.connection.execute(
+                "SELECT DISTINCT e.model_id FROM recording_embedding e "
+                "JOIN embedding_model m ON m.id=e.model_id "
+                "WHERE e.factor=? AND m.modality='audio' ORDER BY e.model_id", (factor,)
+            )]
+            if len(models) > 1:
+                raise ValidationError("Multiple models for channel; specify model_id", details={
+                    "channel": channel, "model_ids": models,
+                })
+            model_id = models[0] if models else None
+        seed = self.connection.execute(
+            "SELECT e.*, m.dim FROM recording_embedding e JOIN embedding_model m ON m.id=e.model_id "
+            "WHERE e.recording_id = ? AND e.model_id = ? AND e.factor = ? AND m.modality = 'audio'",
+            (recording_id, model_id, factor),
+        ).fetchone()
+        if seed is None:
+            raise NotFoundError("Recording has no vector for this channel", details={
+                "recording_id": recording_id, "channel": channel, "model_id": model_id,
+            })
+        seed_norm = self._embedding_norm(seed["vector"], seed["dim"])
+        seed_vector = np.frombuffer(seed["vector"], dtype="<f4").astype(np.float64) / seed_norm
+        candidates = []
+        for row in self.connection.execute(
+            "SELECT r.id, r.canonical_title, r.normalized_title, r.version_label, e.vector "
+            "FROM recording_embedding e JOIN recording r ON r.id=e.recording_id "
+            "WHERE e.model_id=? AND e.factor=? AND r.id<>?", (model_id, factor, recording_id),
+        ):
+            norm = self._embedding_norm(row["vector"], seed["dim"])
+            values = np.frombuffer(row["vector"], dtype="<f4").astype(np.float64) / norm
+            distance = float(np.clip(1.0 - np.dot(seed_vector, values), 0.0, 2.0))
+            candidates.append((distance, str(row["id"]), row))
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        groups: dict[str, dict[str, Any]] = {}
+        for distance, candidate_id, row in candidates:
+            title_key = row["normalized_title"]
+            if title_key in groups:
+                groups[title_key]["more_versions"] += 1
+                continue
+            groups[title_key] = {
+                "recording_id": candidate_id, "title": row["canonical_title"],
+                "version_label": row["version_label"], "distance": round(distance, 3),
+                "more_versions": 0,
+            }
+        results = list(groups.values())[:max(1, min(int(limit), MAX_SEARCH_LIMIT))]
+        for result in results:
+            result["artists"] = self._artist_names(result["recording_id"])
+            links = self._source_links(result["recording_id"])
+            result["listen_url"] = links[0]["url"] if links else None
+        return {"recording_id": recording_id, "channel": channel, "model_id": model_id,
+                "results": results, "count": len(results)}
 
     def import_analysis(
         self,
@@ -2345,6 +2511,10 @@ class MusicKBRepository:
         }
         lyric_coverage = self.lyric_coverage()
         counts = {
+            "embedding_models": self.connection.execute("SELECT COUNT(*) FROM embedding_model").fetchone()[0],
+            "recordings_with_embeddings": self.connection.execute(
+                "SELECT COUNT(DISTINCT recording_id) FROM recording_embedding"
+            ).fetchone()[0],
             "recordings": self.connection.execute("SELECT COUNT(*) FROM recording").fetchone()[0],
             "canonical_analyses": self.connection.execute(
                 "SELECT COUNT(*) FROM recording WHERE canonical_analysis_id IS NOT NULL"
@@ -2372,6 +2542,11 @@ class MusicKBRepository:
             "schema_version": SCHEMA_VERSION,
             "metadata": metadata,
             "counts": counts,
+            "embedding_coverage": {
+                "recordings_with_embeddings": counts["recordings_with_embeddings"],
+                "recordings": counts["recordings"],
+                "ratio": counts["recordings_with_embeddings"] / counts["recordings"] if counts["recordings"] else 0.0,
+            },
         }
 
     def _search_filters(
@@ -3161,6 +3336,22 @@ class MusicKBRepository:
 
     def validate(self, *, require_lyrics: bool = False) -> dict[str, Any]:
         issues: list[dict[str, Any]] = []
+        for row in self.connection.execute(
+            "SELECT e.*, m.dim, r.audio_sha256 FROM recording_embedding e "
+            "JOIN embedding_model m ON m.id=e.model_id JOIN recording r ON r.id=e.recording_id"
+        ):
+            identity = {"recording_id": row["recording_id"], "model_id": row["model_id"], "factor": row["factor"]}
+            if not row["audio_sha256"] or row["source_audio_sha256"] != row["audio_sha256"]:
+                issues.append({"code": "embedding_audio_sha256_mismatch", **identity})
+            try:
+                actual_norm = self._embedding_norm(row["vector"], row["dim"])
+            except ValidationError:
+                issues.append({"code": "embedding_vector_invalid", **identity})
+                continue
+            if not isinstance(row["norm"], (int, float)) or not math.isclose(
+                row["norm"], actual_norm, rel_tol=1e-5, abs_tol=1e-6
+            ):
+                issues.append({"code": "embedding_norm_mismatch", **identity})
         projection_state = self.connection.execute(
             "SELECT value FROM meta WHERE key = ?", (SEARCH_PROJECTION_STATE_KEY,)
         ).fetchone()
@@ -3298,6 +3489,27 @@ class MusicKBRepository:
             "issue_count": len(issues),
             "lyrics_coverage": lyric_coverage,
         }
+
+
+def iter_embedding_file(path: str | Path) -> Iterable[dict[str, Any]]:
+    line_number = 0
+    with Path(path).open("rb") as handle:
+        for line_number, raw_line in enumerate(handle, 1):
+            if b"\r" in raw_line or not raw_line.endswith(b"\n"):
+                raise ValidationError("Embedding JSONL requires physical LF line endings and a final LF", details={"line": line_number})
+            if not raw_line.strip():
+                raise ValidationError("Embedding JSONL cannot contain blank lines", details={"line": line_number})
+            entry = _decode_jsonl_object(raw_line, line_number)
+            encoded = entry.get("vector_b64")
+            if not isinstance(encoded, str):
+                raise ValidationError("vector_b64 must be a base64 string", details={"line": line_number})
+            try:
+                entry["vector"] = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise ValidationError("Invalid vector_b64", details={"line": line_number}) from exc
+            yield entry
+    if line_number == 0:
+        raise ValidationError("Embedding JSONL cannot be empty")
 
 
 def _decode_jsonl_object(raw_line: bytes, line_number: int) -> dict[str, Any]:

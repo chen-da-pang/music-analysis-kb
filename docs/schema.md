@@ -18,6 +18,8 @@ at 100k-recording scale.
 | `tag_namespace`, `tag`, `tag_alias` | Namespaced, hierarchical tags and aliases without an arbitrary quantity cap. |
 | `analysis_tag`, `recording_tag` | Analysis-derived tags plus first-class title/artist identity tags. |
 | `numeric_feature` | BPM, duration, energy, and other numeric values, including a source label so parser backfills cannot overwrite manual/editorial measurements. |
+| `embedding_model` | Versioned model/recipe/modality identity, dimension, cosine metric, weight license and JSON metadata (schema v8). |
+| `recording_embedding` | Audio-SHA-bound little-endian float32 BLOB and norm, keyed by recording/model/factor; cascade on recording deletion, restrict on model deletion. |
 | `search_fts` | FTS5 projection of only the canonical public analysis. |
 
 ## Search order
@@ -26,10 +28,13 @@ at 100k-recording scale.
 2. Title/artist alias matching.
 3. FTS5 across title, artist aliases, tags, summary, and canonical analysis
    text.
-4. Optional vector retrieval later, only for intentionally fuzzy queries.
+4. Independent audio nearest-neighbor retrieval via `similar`, not mixed into the first three paths.
 
 The first three are deterministic. Vector search is not a substitute for rare
-tag retrieval and is not part of this first release.
+tag retrieval. Schema v8 stores independent overall, rhythm and timbre channels;
+cosine distance is ordered ascending with recording ID as the tie breaker.
+`meta.default_embedding_model` selects the overall model. No melody vectors or
+fused scores are stored. See ADR-0003 for migration and license boundaries.
 
 ## Scale notes
 

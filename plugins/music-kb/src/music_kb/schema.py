@@ -6,7 +6,36 @@ from pathlib import Path
 from .errors import DatabaseNotInitializedError, MusicKBError, ReadOnlyError
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
+
+
+EMBEDDING_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS embedding_model (
+    id TEXT PRIMARY KEY,
+    model_name TEXT NOT NULL,
+    recipe TEXT NOT NULL,
+    modality TEXT NOT NULL CHECK (modality IN ('audio', 'lyrics')),
+    dim INTEGER NOT NULL CHECK (dim > 0),
+    metric TEXT NOT NULL CHECK (metric = 'cosine'),
+    weight_license TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (model_name, recipe, modality)
+);
+CREATE TABLE IF NOT EXISTS recording_embedding (
+    recording_id TEXT NOT NULL REFERENCES recording(id) ON DELETE CASCADE,
+    model_id TEXT NOT NULL REFERENCES embedding_model(id) ON DELETE RESTRICT,
+    factor TEXT NOT NULL DEFAULT '' CHECK (factor IN ('', 'rhythm', 'timbre')),
+    vector BLOB NOT NULL,
+    norm REAL NOT NULL CHECK (norm > 0),
+    source_audio_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (recording_id, model_id, factor)
+);
+CREATE INDEX IF NOT EXISTS idx_embedding_model_factor
+    ON recording_embedding(model_id, factor, recording_id);
+INSERT OR IGNORE INTO meta(key, value) VALUES ('default_embedding_model', '');
+"""
 
 
 SCHEMA_SQL = """
@@ -477,6 +506,10 @@ def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v7_to_v8(connection: sqlite3.Connection) -> None:
+    connection.executescript(EMBEDDING_SCHEMA_SQL)
+
+
 def initialize_database(path: str | Path) -> Path:
     database = _path(path)
     version: int | None = None
@@ -519,7 +552,10 @@ def initialize_database(path: str | Path) -> Path:
             if version == 6:
                 _migrate_v6_to_v7(connection)
                 version = 7
+            if version == 7:
+                _migrate_v7_to_v8(connection)
             connection.executescript(SCHEMA_SQL)
+            connection.executescript(EMBEDDING_SCHEMA_SQL)
         except sqlite3.OperationalError as exc:
             if "fts5" in str(exc).casefold():
                 raise MusicKBError(
