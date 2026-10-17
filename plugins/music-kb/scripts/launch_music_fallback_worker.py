@@ -233,7 +233,7 @@ def main() -> int:
     parser.add_argument("--completion-receipt", type=Path, required=True)
     parser.add_argument("--worker-log", type=Path, required=True)
     parser.add_argument("--worker-python", required=True, help="Python interpreter already verified to import musicdl")
-    parser.add_argument("--parallelism", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--parallelism", type=int, choices=(1, 2, 3, 4, 5, 6), default=2)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--proxy")
     parser.add_argument("--dry-run", action="store_true")
