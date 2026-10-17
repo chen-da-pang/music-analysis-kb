@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,46 @@ import pytest
 from music_kb.errors import ReadOnlyError, SnapshotVerificationError, ValidationError
 from music_kb.repository import MusicKBRepository
 from music_kb.snapshot import create_snapshot, install_snapshot, verify_snapshot
+from music_kb.snapshot import sha256_file
+
+
+def test_embedding_snapshot_roundtrip_prunes_vectors_and_rejects_writes(embedded_snapshot):
+    verified = verify_snapshot(embedded_snapshot["manifest"])
+    assert verified["status"]["counts"]["embedding_models"] == 1
+    assert verified["status"]["counts"]["recordings_with_embeddings"] == 2
+    manifest = json.loads(Path(embedded_snapshot["manifest"]).read_text())
+    assert manifest["counts"] == verified["status"]["counts"]
+    with MusicKBRepository(embedded_snapshot["current_database"], read_only=True) as snapshot:
+        assert snapshot.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert snapshot.connection.execute("SELECT COUNT(*) FROM recording_embedding").fetchone()[0] == 6
+        assert snapshot.connection.execute(
+            "SELECT COUNT(*) FROM recording_embedding WHERE recording_id='excluded'"
+        ).fetchone()[0] == 0
+        assert list(snapshot.connection.execute("PRAGMA foreign_key_check")) == []
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            snapshot.connection.execute("DELETE FROM recording_embedding")
+    os.chmod(embedded_snapshot["current_database"], 0o644)
+    with MusicKBRepository(embedded_snapshot["current_database"]) as snapshot:
+        with pytest.raises(ReadOnlyError, match="never valid write targets"):
+            snapshot.import_embeddings(
+                [], model_id="blocked", model_name="blocked", recipe="v1", dim=2,
+                metric="cosine", weight_license="fixture",
+            )
+
+
+def test_snapshot_verify_audits_embedding_integrity_after_hash_check(embedded_snapshot):
+    database = Path(embedded_snapshot["database"])
+    os.chmod(database, 0o644)
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE recording_embedding SET vector = ?", (b"bad",))
+    manifest_path = Path(embedded_snapshot["manifest"])
+    manifest = json.loads(manifest_path.read_text())
+    manifest["database"]["sha256"] = sha256_file(database)
+    os.chmod(manifest_path, 0o644)
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(SnapshotVerificationError, match="Snapshot invariants failed") as error:
+        verify_snapshot(manifest_path)
+    assert "embedding_vector_invalid" in {issue["code"] for issue in error.value.details["issues"]}
 
 
 def test_snapshot_is_canonical_only_and_installs_atomically(master_database, fixture_payload, tmp_path: Path) -> None:

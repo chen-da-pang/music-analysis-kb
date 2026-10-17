@@ -1,8 +1,47 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sqlite3
+
+import pytest
 
 from music_kb.mcp_server import ReadOnlyMusicKB, create_server
+from music_kb.errors import DatabaseNotInitializedError, ValidationError
+
+
+@pytest.mark.parametrize("channel", ["overall", "rhythm", "timbre"])
+def test_mcp_similar_reads_installed_snapshot(embedded_snapshot, channel):
+    database = embedded_snapshot["current_database"]
+    api = ReadOnlyMusicKB(database)
+    result = api.similar(recording_id="rec_neon_night_studio", channel=channel, limit=1)
+    assert result["results"][0]["recording_id"] == "neighbor"
+    assert result["results"][0]["distance"] == 0.4
+    server = create_server(database)
+    _, structured = asyncio.run(server.call_tool("music_kb_similar", {
+        "recording_id": "rec_neon_night_studio", "channel": channel, "limit": 1,
+    }))
+    assert structured == result
+    status = api.status()
+    assert status["counts"]["embedding_models"] == 1
+    assert status["embedding_coverage"] == {
+        "recordings_with_embeddings": 2, "recordings": 2, "ratio": 1.0,
+    }
+    with pytest.raises(ValidationError, match="Unknown embedding channel"):
+        api.similar(recording_id="rec_neon_night_studio", channel="melody")
+
+
+def test_mcp_rejects_v7_snapshot(embedded_snapshot):
+    database = embedded_snapshot["current_database"]
+    os.chmod(database, 0o644)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE recording_embedding")
+        connection.execute("DROP TABLE embedding_model")
+        connection.execute("UPDATE meta SET value='7' WHERE key='schema_version'")
+    api = ReadOnlyMusicKB(database)
+    for operation in (api.status, lambda: api.similar(recording_id="rec_neon_night_studio")):
+        with pytest.raises(DatabaseNotInitializedError, match="Unsupported schema version 7; expected 8"):
+            operation()
 
 
 def test_read_only_mcp_facade_searches_canonical_data(master_database) -> None:
@@ -53,6 +92,7 @@ def test_mcp_server_exposes_only_retrieval_tools(master_database) -> None:
     server = create_server(master_database)
     assert [tool.name for tool in asyncio.run(server.list_tools())] == [
         "music_kb_status",
+        "music_kb_similar",
         "music_kb_search",
         "music_kb_discover",
         "music_kb_recommend",

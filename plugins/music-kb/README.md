@@ -9,12 +9,13 @@ this directory or in Git.
 
 > **运行时状态（2026-09，ADR-0001）**：CNB 云端 Music Flamingo 分析运行时已退役——CNB 平台开始收费，不再作为默认或回退链路；本节及 weekly-run 中所有 `cnb_*` 原子仅作历史参考保留。默认分析路径正迁移至本机 MOSS-Music（MLX 8-bit，见 ADR-0001 与 issue #111）。fresh 周更若要触达 CNB 计费入口，现在必须显式传 `--confirm-cnb-analysis`，否则快速失败。现状分析续跑（`--delivery`）不受影响。
 
-## Audio vectors (publisher/CLI foundation, schema v8)
+## Audio vectors (publisher, snapshots, CLI and MCP, schema v8)
 
 Upgrade a publisher v7 master explicitly with `music-kb init --db /path/to/master.sqlite`.
 Read-only queries never migrate a client database; v7 clients must receive a
-compatible v8 database separately. MCP, snapshot distribution and model runners
-are separate work; these commands do not compute vectors or download weights.
+compatible v8 snapshot before upgrading the plugin. Opening a v7 snapshot fails
+with `Unsupported schema version 7; expected 8.` No client query migrates it.
+These commands do not compute vectors or download weights.
 
 ```bash
 music-kb --json import-embeddings --db /path/to/master.sqlite \
@@ -55,6 +56,18 @@ the command name.
 `recordings_with_embeddings`, and `embedding_coverage` with a 0–1 coverage
 ratio (not a similarity score). `validate` audits vector lengths, norms, audio
 ownership and foreign keys. Existing tag retrieval contracts are unchanged.
+`music_kb_status` exposes the same counts and coverage. The read-only MCP tool
+`music_kb_similar(recording_id, channel="overall", limit=10)` returns the same
+compact result as CLI `similar`; it loads no model and requires no write access.
+For ambiguous rhythm/timbre recipes, use CLI `--model-id` to select explicitly.
+
+`snapshot create` carries model metadata and vectors in its SQLite backup;
+canonical-only pruning cascades deletion of excluded recordings' vectors.
+The manifest counts include `embedding_models` and `recordings_with_embeddings`.
+`snapshot verify` audits embedding integrity through `validate`, and installation
+verifies before switching `current.sqlite`. Installed snapshots remain read-only,
+including for embedding imports, even if their file permissions are changed.
+
 MuQ-MuLan/MERT weights are CC-BY-NC-4.0; MERIT heads are MIT. Use internally
 for research only until commercial rights are resolved (ADR-0003).
 

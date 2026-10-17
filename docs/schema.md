@@ -36,6 +36,14 @@ cosine distance is ordered ascending with recording ID as the tie breaker.
 `meta.default_embedding_model` selects the overall model. No melody vectors or
 fused scores are stored. See ADR-0003 for migration and license boundaries.
 
+SQLite snapshots include both embedding tables. Canonical-only pruning removes
+excluded recordings' vectors via foreign-key cascade; snapshot verification runs
+the embedding integrity checks in `validate`. Manifest counts include embedding
+models and distinct recordings with embeddings. Clients query installed v8
+snapshots read-only through CLI `similar` or MCP `music_kb_similar`; MCP status
+includes embedding counts and coverage. Old v7 snapshots fail the strict schema
+version check rather than being migrated by a query.
+
 ## Scale notes
 
 - Keep direct lookup indexes on normalized tag names/aliases, title aliases,
