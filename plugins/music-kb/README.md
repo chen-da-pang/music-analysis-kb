@@ -69,9 +69,10 @@ the command name.
 ratio (not a similarity score). `validate` audits vector lengths, norms, audio
 ownership and foreign keys. Existing tag retrieval contracts are unchanged.
 `music_kb_status` exposes the same counts and coverage. The read-only MCP tool
-`music_kb_similar(recording_id, channel="overall", limit=10)` returns the same
+`music_kb_similar(recording_id, channel="overall", limit=10, model_id=None)` returns the same
 compact result as CLI `similar`; it loads no model and requires no write access.
-For ambiguous rhythm/timbre recipes, use CLI `--model-id` to select explicitly.
+For ambiguous rhythm/timbre recipes, select explicitly with MCP `model_id` or
+CLI `--model-id`; omitting the model fails clearly rather than choosing a recipe.
 
 `snapshot create` carries model metadata and vectors in its SQLite backup;
 canonical-only pruning cascades deletion of excluded recordings' vectors.
@@ -262,11 +263,12 @@ coverage. Every canonical recording in this delivery with local SHA256-matched
 audio must have all three current vectors. Historical recordings without local
 audio only lower reported coverage, not the publication gate. A failure stops
 before snapshot and audio cleanup; retain the audio and retry the same run ID
-(`--resume` is passed to the runner). The runner's size/format restrictions still
-apply: an unsupported or too-small local file cannot silently pass the gate.
+(`--resume` is passed to the runner). Local-audio coverage and the runner use the
+same eligibility rule: nonempty `.flac`, `.mp3`, `.ogg`, or `.m4a` files, with no
+minimum byte size beyond zero. Scan/hash errors fail rather than disappear.
 Download/CNB dry-runs and runs without a delivery skip embedding automatically;
-`--skip-audio-embedding` is an explicit bypass for controlled runs, not a production
-coverage guarantee. No local audio from this delivery means no inference is needed.
+real runs have no embedding bypass. No eligible local audio from this delivery
+means no inference is needed.
 
 On a real publish run, the verified release is also installed atomically as the
 publisher's local `~/.music-kb/current.sqlite` (or `--local-snapshot-dir`),

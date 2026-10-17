@@ -81,7 +81,9 @@ For restart, repeat the relevant invocation with `--resume` and append its log
 using `>>`. Never run two writers for the same channel/output directory.
 
 The recursive scan accepts case-insensitive `.flac/.mp3/.ogg/.m4a` files of at
-least **1,000,000 bytes**. Unknown hashes are ignored; same-name files never
+least **1 byte**, with no other size cutoff. Unreadable files, stat/hash errors,
+and directory scan errors are recorded in the failure receipt, not silently
+skipped. Unknown hashes are ignored; same-name files never
 establish identity. Each matching recording is included once even if its audio
 occurs at several paths. Only the first sorted matching path is used.
 The master is opened with SQLite `mode=ro`; an absent database is not created.
@@ -206,12 +208,22 @@ transaction; evaluation never imports vectors or changes canonical analyses.
   canonical raw text, used as the terminal brief. Versions collapse by normalized title,
   selecting the closest recording with recording-ID tie breaks, just as `similar`.
   Unlike a recording-seeded query, no recording is excluded.
-- Full mode adds per-channel `baseline`: recording/pair counts, mean, quantiles
-  at 0/0.25/0.5/0.75/1, unrounded best distance, and empirical percentile.
-  Population is **every unordered pair of embedded recordings in that channel**,
-  before title/version collapse, with no self-pairs; duplicate vectors remain.
+- Full mode adds per-channel `baseline.multi_version`: `scope`, `pair_count`,
+  `group_count`, `multi_version_pair_count`, mean, quantiles at 0/0.25/0.5/0.75/1,
+  `best_distance_unrounded`, and `best_distance_percentile`.
+  The spec baseline (`scope: "multi_version"`) comprises **all unordered pairs
+  within each shared normalized-title group of size >= 2**, using normalized
+  vectors for this channel's exact model/factor, before version collapse.
+  There are no self-pairs; duplicate vectors remain.
   Percentile is `100 * count(pair_distance <= unrounded_best_distance) / pair_count`.
   Lower means closer relative to that population, **not similarity percent**.
+  If fewer than 10 multi-version pairs exist, `baseline.multi_version` uses
+  `scope: "all_pairs_fallback"` and a `reason`; its statistics and `pair_count`
+  then describe all unordered library pairs, while `group_count` and
+  `multi_version_pair_count` retain the actual version-group coverage.
+  `baseline.all_pairs` provides separately labelled all-pairs context, including
+  `recording_count`; it is not the spec baseline. Terminal summaries name the
+  selected scope, pair/group counts and any fallback reason explicitly.
   With fewer than two vectors, distribution statistics/percentile are null;
   with no results, best distance is also null. This exact baseline uses quadratic
   time and memory and is intended for the current publisher-sized library.

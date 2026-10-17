@@ -345,7 +345,6 @@ def build_parser() -> argparse.ArgumentParser:
     weekly_run.add_argument("--download-dry-run", action="store_true")
     weekly_run.add_argument("--download-max-items", type=int)
     weekly_run.add_argument("--embed-python", type=Path, help="External model interpreter (or MUSIC_KB_EMBED_PYTHON)")
-    weekly_run.add_argument("--skip-audio-embedding", action="store_true", help="Explicitly skip audio vectors for controlled runs")
     weekly_run.add_argument("--confirm-delete-audio", action="store_true")
     weekly_run.add_argument(
         "--confirm-cnb-analysis",
@@ -633,7 +632,6 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             cnb_campaign_work_dir=args.cnb_campaign_work_dir,
             retained_campaign_receipt=args.retained_campaign_receipt,
             embed_python=args.embed_python,
-            skip_audio_embedding=args.skip_audio_embedding,
         )
         return 0, result
     raise AssertionError("unhandled command")

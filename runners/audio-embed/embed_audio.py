@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import struct
 import sys
 from datetime import datetime, timezone
@@ -26,7 +27,6 @@ CHANNELS = {
 MERT_REVISION = "5240c2708a5acaee1007f43fb9735c7dcd0b78c9"
 MERIT_REVISION = "a85df30eca1ba112eb594285f3ba1d96488e7883"
 MUQ_REVISION = "2e01c796b71dca71b45251384c04cd7b237c9020"
-MIN_BYTES = 1_000_000
 EXTENSIONS = {".flac", ".mp3", ".ogg", ".m4a"}
 
 
@@ -51,11 +51,18 @@ def scan_audio(root, db):
         for recording_id, audio_sha256 in connection.execute("SELECT id, audio_sha256 FROM recording"):
             identities.setdefault(audio_sha256, []).append(recording_id)
     candidates, failures, seen = [], [], set()
-    for path in sorted(root.rglob("*")):
+
+    def scan_error(error):
+        failures.append({"path": str(error.filename), "error": str(error)})
+
+    paths = sorted(Path(directory) / name
+                   for directory, _, names in os.walk(root, onerror=scan_error) for name in names)
+    for path in paths:
         if path.suffix.lower() not in EXTENSIONS:
             continue
         try:
-            if not path.is_file() or path.stat().st_size < MIN_BYTES:
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
                 continue
             audio_sha256 = sha256_file(path)
             for recording_id in identities.get(audio_sha256, []):

@@ -41,10 +41,11 @@ def _audio_embedding(
             else:
                 os.environ[key] = value
     source_hashes = {entry.source_sha256 for entry in load_campaign_delivery_file(delivery)}
-    local_hashes = set()
-    for path in sorted(audio_root.rglob("*")):
-        if path.is_file():
-            local_hashes.add(runner.sha256_file(path))
+    candidates, scan_failures = runner.scan_audio(audio_root, database) if audio_root.exists() else ([], [])
+    outputs["failures"].extend(scan_failures)
+    if scan_failures:
+        raise RuntimeError("audio embedding local audio scan failed")
+    local_hashes = {candidate["audio_sha256"] for candidate in candidates}
     with MusicKBRepository(database, read_only=False) as repository:
         canonical = {
             row["id"]: row["audio_sha256"] for row in repository.connection.execute(
@@ -588,7 +589,6 @@ def run_weekly_run(
     cnb_campaign_work_dir: str | Path | None = None,
     retained_campaign_receipt: str | Path | None = None,
     embed_python: str | Path | None = None,
-    skip_audio_embedding: bool = False,
 ) -> dict[str, Any]:
     """Run all safe publisher stages and stop at the first failed atom."""
 
@@ -1434,8 +1434,8 @@ def run_weekly_run(
                     raise RuntimeError(f"lyric coverage gate failed: {lyric_validation}")
 
         with atom(context, "audio_embedding", inputs={"database": str(database_path), "audio_root": str(audio_path)}) as outputs:
-            if skip_audio_embedding or download_dry_run or cnb_campaign_dry_run or delivery_path is None or not delivery_path.is_file():
-                outputs.update({"status": "skipped", "reason": "explicit skip, dry-run, or no delivery"})
+            if download_dry_run or cnb_campaign_dry_run or delivery_path is None or not delivery_path.is_file():
+                outputs.update({"status": "skipped", "reason": "dry-run or no delivery"})
             else:
                 try:
                     _audio_embedding(

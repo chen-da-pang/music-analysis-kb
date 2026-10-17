@@ -25,9 +25,10 @@ class ReadOnlyMusicKB:
     def status(self) -> dict[str, Any]:
         return self._call(lambda repository: repository.status())
 
-    def similar(self, *, recording_id: str, channel: str = "overall", limit: int = 10) -> dict[str, Any]:
+    def similar(self, *, recording_id: str, channel: str = "overall", limit: int = 10,
+                model_id: str | None = None) -> dict[str, Any]:
         return self._call(
-            lambda repository: repository.similar(recording_id, channel=channel, limit=limit)
+            lambda repository: repository.similar(recording_id, channel=channel, limit=limit, model_id=model_id)
         )
 
     def search(
@@ -132,8 +133,9 @@ def create_server(database: str | Path | None = None) -> Any:
         name="music_kb_similar",
         description="Find compact audio neighbors by overall, rhythm, or timbre channel. Cosine distance is 0–2, smaller is closer; no models are loaded or data written.",
     )
-    def music_kb_similar(recording_id: str, channel: str = "overall", limit: int = 10) -> dict[str, Any]:
-        return api.similar(recording_id=recording_id, channel=channel, limit=limit)
+    def music_kb_similar(recording_id: str, channel: str = "overall", limit: int = 10,
+                         model_id: str | None = None) -> dict[str, Any]:
+        return api.similar(recording_id=recording_id, channel=channel, limit=limit, model_id=model_id)
 
     @server.tool(
         name="music_kb_search",

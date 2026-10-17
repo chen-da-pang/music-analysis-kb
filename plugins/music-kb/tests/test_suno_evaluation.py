@@ -87,25 +87,75 @@ def test_report_contract_readonly_and_modes(evaluator, evaluation_library, simpl
         assert {"title", "version_label", "artists", "more_versions"} <= first.keys()
         assert ("baseline" in result) == (not simple)
         if not simple:
-            baseline = result["baseline"]
+            baseline = result["baseline"]["multi_version"]
             assert baseline["pair_count"] == 3
             assert baseline["mean"] == pytest.approx(4 / 3)
             assert baseline["best_distance_percentile"] == 0
     assert ("historical_context" in report) == (not simple)
-    assert "0.000" in capsys.readouterr().out
+    terminal = capsys.readouterr().out
+    assert "0.000" in terminal
+    if not simple:
+        assert "all_pairs_fallback" in terminal
+        assert "fewer than 10" in terminal
 
 
 def test_percentile_known_population_and_empty(evaluator, evaluation_library):
     with MusicKBRepository(evaluation_library.db, read_only=True) as repository:
         options = dict(model_id="muq-mulan-v3", factor="", best_distance=1)
-        baseline = evaluator.pairwise_baseline(repository, **options)
+        baseline = evaluator.pairwise_baseline(repository, **options)["multi_version"]
         assert baseline["best_distance_percentile"] == pytest.approx(200 / 3)
         assert baseline["quantiles"]["0.5"] == 1
         options["factor"] = "rhythm"
-        empty = evaluator.pairwise_baseline(repository, **options)
+        empty = evaluator.pairwise_baseline(repository, **options)["multi_version"]
         assert empty["pair_count"] == 0
         assert empty["mean"] is None
         assert empty["best_distance_percentile"] is None
+
+
+def test_multi_version_population_not_all_pairs(evaluator, evaluation_library, fixture_payload):
+    args = evaluation_library
+    with MusicKBRepository(args.db) as repository:
+        entries = []
+        for index in range(5):
+            recording_id = f"version-{index}"
+            digest = f"{index + 1:064x}"
+            payload = deepcopy(fixture_payload)
+            payload["recording"].update(id=recording_id, title="Version group", audio_sha256=digest)
+            payload["source_tracks"] = []
+            repository.import_analysis(payload)
+            entries.append(dict(recording_id=recording_id, audio_sha256=digest,
+                                vector=evaluator.vector_bytes(([0, 5] if index == 4 else [3, 4]) + [0] * 510, 512)))
+        repository.import_embeddings(entries, model_id="muq-mulan-v3")
+    with MusicKBRepository(args.db, read_only=True) as repository:
+        baseline = evaluator.pairwise_baseline(repository, model_id="muq-mulan-v3", factor="", best_distance=0.1)
+        versions = baseline["multi_version"]
+        assert versions["scope"] == "multi_version"
+        assert versions["pair_count"] == 10
+        assert versions["group_count"] == 1
+        assert versions["mean"] == pytest.approx(0.08)
+        assert list(versions["quantiles"]) == ["0", "0.25", "0.5", "0.75", "1"]
+        assert list(versions["quantiles"].values()) == pytest.approx([0, 0, 0, 0.2, 0.2])
+        assert versions["best_distance_unrounded"] == 0.1
+        assert versions["best_distance_percentile"] == 60
+        assert baseline["all_pairs"]["pair_count"] == 28
+        assert baseline["all_pairs"]["best_distance_percentile"] == pytest.approx(700 / 28)
+
+
+def test_multi_version_fallback_explicit(evaluator, evaluation_library):
+    with MusicKBRepository(evaluation_library.db) as repository:
+        with repository.connection:
+            repository.connection.execute(
+                "UPDATE recording SET normalized_title='versions' "
+                "WHERE id IN ('rec_neon_night_studio', 'other')")
+    with MusicKBRepository(evaluation_library.db, read_only=True) as repository:
+        baseline = evaluator.pairwise_baseline(repository, model_id="muq-mulan-v3", factor="", best_distance=1)
+    versions = baseline["multi_version"]
+    assert versions["scope"] == "all_pairs_fallback"
+    assert versions["multi_version_pair_count"] == 1
+    assert versions["group_count"] == 1
+    assert "fewer than 10" in versions["reason"]
+    assert versions["pair_count"] == 3
+    assert versions["best_distance_percentile"] == pytest.approx(200 / 3)
 
 
 def test_percentile_uses_unrounded_best_distance(evaluator, evaluation_library):
@@ -116,8 +166,8 @@ def test_percentile_uses_unrounded_best_distance(evaluator, evaluation_library):
     })
     for channel in report["channels"].values():
         assert channel["results"][0]["distance"] == 1.0
-        assert channel["baseline"]["best_distance_unrounded"] < 1
-        assert channel["baseline"]["best_distance_percentile"] == 0
+        assert channel["baseline"]["multi_version"]["best_distance_unrounded"] < 1
+        assert channel["baseline"]["multi_version"]["best_distance_percentile"] == 0
 
 
 def test_reject_output_inside_worktree_before_inference(evaluator, evaluation_library):
@@ -144,7 +194,8 @@ def test_single_recording_baseline_and_no_results(evaluator, evaluation_library)
             repository.connection.execute("DELETE FROM recording_embedding WHERE recording_id IN ('other', 'opposite')")
     with MusicKBRepository(args.db, read_only=True) as repository:
         baseline = evaluator.pairwise_baseline(repository, model_id="muq-mulan-v3", factor="", best_distance=0)
-        assert baseline["recording_count"] == 1
+        assert baseline["all_pairs"]["recording_count"] == 1
+        baseline = baseline["multi_version"]
         assert baseline["pair_count"] == 0
         assert baseline["best_distance_percentile"] is None
     with MusicKBRepository(args.db) as repository:
@@ -155,7 +206,7 @@ def test_single_recording_baseline_and_no_results(evaluator, evaluation_library)
     })
     for channel in report["channels"].values():
         assert channel["results"] == []
-        assert channel["baseline"]["best_distance_unrounded"] is None
+        assert channel["baseline"]["multi_version"]["best_distance_unrounded"] is None
 
 
 def test_mismatched_recipe_and_existing_output_fail_before_inference(evaluator, evaluation_library):
