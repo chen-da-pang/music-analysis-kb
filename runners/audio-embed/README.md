@@ -29,19 +29,26 @@ export http_proxy=http://127.0.0.1:7890
 | Channel | Model ID / factor | Recipe / dimension |
 | --- | --- | --- |
 | Overall | `muq-mulan-v3` / empty string | `OpenMuQ/MuQ-MuLan-large`, `v3`, 512d |
-| Rhythm | `merit-mert330m-v1` / `rhythm` | `amaai-lab/merit`, `mert330m-l3-4-5-6-23-30s-v1`, 128d |
-| Timbre | `merit-mert330m-v1` / `timbre` | Same model/recipe as rhythm, independent head, 128d |
+| Rhythm | `merit-mert330m-w3-v2` / `rhythm` | `amaai-lab/merit`, `mert330m-l3-4-5-6-23-window3-v2`, 128d |
+| Timbre | `merit-mert330m-w3-v2` / `timbre` | Same model/recipe as rhythm, independent head, 128d |
 
 - Overall: librosa decodes **the whole song**, 24 kHz mono float32. Exact 10s
   clips, tail wrapped from the beginning (no discarded samples); each clip is
   L2 normalized, then their mean is L2 normalized. Under-10s audio fails rather
   than silently changing the v3 recipe.
-- MERIT: librosa decodes the first 30s at 24 kHz mono, truncates/zero-pads to
-  720,000 samples, then uses the MERT feature extractor. Frozen MERT hidden
-  states `(3,4,5,6,23)` are mean-pooled in time and concatenated (5120d).
-  `head_rhy/best_head.pt` and `head_tim/best_head.pt` each project to an
-  L2-normalized 128d vector. Both heads share one backbone forward per song.
-  No melody vector is calculated or stored. `torchaudio.load` is not used.
+- MERIT (recipe v2): librosa decodes the whole song at 24 kHz mono. Three
+  30s windows cover the start, middle and end (`0`, `(duration-30)/2`,
+  `duration-30`; tracks at most 30s use one window). Each window is
+  zero-padded to 720,000 samples and passed through the MERT feature
+  extractor. Frozen MERT hidden states `(3,4,5,6,23)` are mean-pooled in time
+  and concatenated (5120d); `head_rhy/best_head.pt` and
+  `head_tim/best_head.pt` each project to an L2-normalized 128d vector. The
+  per-window head vectors are averaged and renormalized. No melody vector is
+  calculated or stored. `torchaudio.load` is not used.
+- Recipe v2 replaces the first-30s-only v1: a single intro window gave a
+  different vector from the song body (measured cosine 0.59-0.68 on a probe
+  song), which made rhythm/timbre neighbors feel wrong when listening to
+  other sections.
 - Cached revisions are pinned in `embed_audio.py`: MuQ
   `2e01c796b71dca71b45251384c04cd7b237c9020`, MERT
   `5240c2708a5acaee1007f43fb9735c7dcd0b78c9`, MERIT
@@ -143,8 +150,8 @@ After the runner completes, import its newly computed rows (44 overall and
   --metric cosine --license CC-BY-NC-4.0
 for factor in rhythm timbre; do
   "$KB" --json import-embeddings --db "$MASTER" \
-    --input "$OUT/$factor.jsonl" --model-id merit-mert330m-v1 \
-    --model-name amaai-lab/merit --recipe mert330m-l3-4-5-6-23-30s-v1 \
+    --input "$OUT/$factor.jsonl" --model-id merit-mert330m-w3-v2 \
+    --model-name amaai-lab/merit --recipe mert330m-l3-4-5-6-23-window3-v2 \
     --dim 128 --factor "$factor" --metric cosine --license 'CC-BY-NC-4.0 (MERT); MIT (heads)'
 done
 "$KB" --json doctor --db "$MASTER"

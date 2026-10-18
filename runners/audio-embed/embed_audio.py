@@ -19,10 +19,10 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 CHANNELS = {
     "overall": {"model_id": "muq-mulan-v3", "model_name": "OpenMuQ/MuQ-MuLan-large",
                 "recipe": "v3", "dim": 512, "factor": ""},
-    "rhythm": {"model_id": "merit-mert330m-v1", "model_name": "amaai-lab/merit",
-               "recipe": "mert330m-l3-4-5-6-23-30s-v1", "dim": 128, "factor": "rhythm"},
-    "timbre": {"model_id": "merit-mert330m-v1", "model_name": "amaai-lab/merit",
-               "recipe": "mert330m-l3-4-5-6-23-30s-v1", "dim": 128, "factor": "timbre"},
+    "rhythm": {"model_id": "merit-mert330m-w3-v2", "model_name": "amaai-lab/merit",
+               "recipe": "mert330m-l3-4-5-6-23-window3-v2", "dim": 128, "factor": "rhythm"},
+    "timbre": {"model_id": "merit-mert330m-w3-v2", "model_name": "amaai-lab/merit",
+               "recipe": "mert330m-l3-4-5-6-23-window3-v2", "dim": 128, "factor": "timbre"},
 }
 MERT_REVISION = "5240c2708a5acaee1007f43fb9735c7dcd0b78c9"
 MERIT_REVISION = "a85df30eca1ba112eb594285f3ba1d96488e7883"
@@ -144,6 +144,33 @@ def all_clips(audio):
     return clips
 
 
+MERIT_WINDOW_SECONDS = 30.0
+
+
+def merit_window_starts(duration):
+    """Return the 30s window starts (seconds) covering start, middle and end.
+
+    MERIT was trained on 30s clips. Using only the first clip biases every
+    vector toward the intro, so we average the head outputs of three windows:
+    the first, the middle and the last 30 seconds. Short tracks use one window.
+    """
+
+    if duration <= MERIT_WINDOW_SECONDS:
+        return [0.0]
+    last = duration - MERIT_WINDOW_SECONDS
+    return sorted({0.0, round(last / 2, 3), round(last, 3)})
+
+
+def _normalized_average(vectors):
+    import numpy as np
+
+    total = np.sum(np.stack(vectors), axis=0)
+    norm = float(np.linalg.norm(total))
+    if norm <= 0:
+        raise ValueError("MERIT window vectors cancel out")
+    return total / norm
+
+
 def load_embedder(channel, device):
     import librosa
     import numpy as np
@@ -191,16 +218,23 @@ def load_embedder(channel, device):
             heads[factor] = head.to(device).eval().requires_grad_(False)
 
         def embed(path):
-            audio, _ = librosa.load(path, sr=24000, mono=True, duration=30)
-            audio = np.pad(audio[:720_000], (0, max(0, 720_000 - len(audio))))
-            inputs = processor(audio, sampling_rate=24000, return_tensors="pt")
-            with torch.inference_mode():
-                output = model(**{key: value.to(device) for key, value in inputs.items()},
-                               output_hidden_states=True)
-                pooled = torch.cat([output.hidden_states[layer].mean(dim=1)
-                                    for layer in (3, 4, 5, 6, 23)], dim=-1)
-                return {factor: torch.nn.functional.normalize(head(pooled), dim=-1)[0].float().cpu().numpy()
-                        for factor, head in heads.items()}
+            audio, _ = librosa.load(path, sr=24000, mono=True)
+            duration = len(audio) / 24000
+            collected = {factor: [] for factor in heads}
+            for start in merit_window_starts(duration):
+                segment = audio[int(start * 24000):int(start * 24000) + 720_000]
+                segment = np.pad(segment, (0, max(0, 720_000 - len(segment))))
+                inputs = processor(segment, sampling_rate=24000, return_tensors="pt")
+                with torch.inference_mode():
+                    output = model(**{key: value.to(device) for key, value in inputs.items()},
+                                   output_hidden_states=True)
+                    pooled = torch.cat([output.hidden_states[layer].mean(dim=1)
+                                        for layer in (3, 4, 5, 6, 23)], dim=-1)
+                    for factor, head in heads.items():
+                        collected[factor].append(torch.nn.functional.normalize(
+                            head(pooled), dim=-1)[0].float().cpu().numpy())
+            return {factor: _normalized_average(vectors)
+                    for factor, vectors in collected.items()}
 
     if device == "mps":
         torch.mps.empty_cache()

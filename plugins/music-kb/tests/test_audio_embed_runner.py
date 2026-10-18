@@ -499,3 +499,18 @@ def test_resume_null_unknown_identity_rejected(runner, tmp_path):
     path.write_text(json.dumps(row) + "\n")
     with pytest.raises(ValueError):
         runner.read_resume(path, 2, {})
+
+
+def test_merit_window_starts_cover_start_middle_end(runner):
+    assert runner.merit_window_starts(20) == [0.0]
+    assert runner.merit_window_starts(30) == [0.0]
+    assert runner.merit_window_starts(90) == [0.0, 30.0, 60.0]
+    assert runner.merit_window_starts(300) == [0.0, 135.0, 270.0]
+
+
+def test_merit_normalized_average_is_unit_vector(runner):
+    first = np.array([1.0, 0.0], dtype=np.float32)
+    second = np.array([0.0, 1.0], dtype=np.float32)
+    averaged = runner._normalized_average([first, second])
+    assert abs(float(np.linalg.norm(averaged)) - 1.0) < 1e-6
+    assert np.allclose(averaged, [2 ** -0.5, 2 ** -0.5])
