@@ -37,11 +37,9 @@ def test_top_neighbors_orders_by_cosine_distance(viz):
     assert all(index != 0 for index, _ in neighbors[0])
 
 
-def test_clip_start_keeps_window_inside_track(viz):
-    assert viz.clip_start(10) == 0.0
-    assert viz.clip_start(100) == 25.0
-    assert viz.clip_start(20) == 0.0
-    assert viz.clip_start(21) == 1.0
+def test_audio_target_name_preserves_extension(viz):
+    assert viz.audio_target_name(7, ".FLAC") == "0007.flac"
+    assert viz.audio_target_name(434, ".ogg") == "0434.ogg"
 
 
 def test_normalize_2d_centers_and_scales(viz):

@@ -20,8 +20,6 @@ import json
 import os
 import shutil
 import sqlite3
-import subprocess
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -33,8 +31,6 @@ PALETTE = [
     "#7ed6e0", "#b0b8c4", "#9fa8da", "#f5a6c8", "#a7d66e", "#e0b0ff",
 ]
 NOISE_COLOR = "#4a505a"
-CLIP_SECONDS = 20
-CLIP_BITRATE = "96k"
 UMAP_SEED = 42
 
 
@@ -174,37 +170,20 @@ def audio_index(shas: set[str], roots: list[Path]) -> dict[str, Path]:
     return found
 
 
-def clip_start(duration: float) -> float:
-    if duration <= CLIP_SECONDS:
-        return 0.0
-    return min(duration * 0.25, duration - CLIP_SECONDS)
+def audio_target_name(index: int, suffix: str) -> str:
+    return f"{index:04d}{suffix.lower()}"
 
 
-def media_duration(path: Path) -> float:
-    result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=nw=1:nk=1", str(path)],
-        capture_output=True, text=True)
-    try:
-        return float(result.stdout.strip())
-    except ValueError:
-        return 0.0
+def load_lyrics(connection: sqlite3.Connection, ids: set[str]) -> dict[str, dict]:
+    placeholders = ",".join("?" for _ in ids)
+    rows = connection.execute(
+        f"SELECT recording_id, status, lyric_text FROM recording_lyric "
+        f"WHERE recording_id IN ({placeholders})", tuple(sorted(ids))).fetchall()
+    return {str(row["recording_id"]): {"status": str(row["status"]),
+                                       "text": str(row["lyric_text"] or "")} for row in rows}
 
 
-def make_clip(source: Path, target: Path) -> bool:
-    total = media_duration(source)
-    if total <= 1:
-        return False
-    target.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        ["ffmpeg", "-v", "error", "-y", "-ss", f"{clip_start(total):.2f}",
-         "-t", str(CLIP_SECONDS), "-i", str(source), "-vn", "-ac", "1",
-         "-ar", "44100", "-b:a", CLIP_BITRATE, str(target)],
-        capture_output=True)
-    return result.returncode == 0 and target.is_file() and target.stat().st_size > 5_000
-
-
-def build(database: Path, output_dir: Path, audio_roots: list[Path], reuse_clips: bool = False) -> dict:
+def build(database: Path, output_dir: Path, audio_roots: list[Path]) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     audio_dir = output_dir / "audio"
     shutil.rmtree(audio_dir, ignore_errors=True)
@@ -219,39 +198,36 @@ def build(database: Path, output_dir: Path, audio_roots: list[Path], reuse_clips
             recipes[channel] = str(row["recipe"]) if row else ""
 
         loaded = {}
-        clip_names: dict[str, str] = {}
+        audio_refs: dict[str, str] = {}
         for channel, _, factor in CHANNELS:
             ids, titles, artists, shas, vectors = load_channel(connection, models[channel], factor)
             loaded[channel] = {"ids": ids, "titles": titles, "artists": artists,
                                "shas": shas, "vectors": vectors}
             for recording_id in ids:
-                clip_names.setdefault(recording_id, "")
+                audio_refs.setdefault(recording_id, "")
         needed = {sha for data in loaded.values() for sha in data["shas"] if sha}
 
+    lyrics = load_lyrics(connection, set(audio_refs))
     found = audio_index(needed, audio_roots)
-    ordered_ids = sorted(clip_names)
-    jobs = []
+    ordered_ids = sorted(audio_refs)
+    sha_by_id = {}
+    for data in loaded.values():
+        for recording_id, sha in zip(data["ids"], data["shas"]):
+            sha_by_id.setdefault(recording_id, sha)
+    linked = 0
     for index, recording_id in enumerate(ordered_ids, 1):
-        clip_name = f"{index:04d}.mp3"
-        clip_names[recording_id] = f"audio/{clip_name}"
-        info = None
-        for data in loaded.values():
-            if recording_id in data["ids"]:
-                data_index = data["ids"].index(recording_id)
-                info = data["shas"][data_index]
-                break
-        source = found.get(info or "")
-        jobs.append((source, audio_dir / clip_name))
-    existing_clips = len(list(audio_dir.glob("*.mp3")))
-    if reuse_clips and existing_clips >= len(jobs):
-        made = existing_clips
-        print(f"reusing {existing_clips} audio clips", flush=True)
-    else:
-        made = 0
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            for ok in pool.map(lambda job: make_clip(job[0], job[1]) if job[0] else False, jobs):
-                made += int(bool(ok))
-    missing = [str(source) for source, _ in jobs if source is None]
+        source = found.get(sha_by_id.get(recording_id, ""))
+        if source is None:
+            audio_refs[recording_id] = ""
+            continue
+        link_name = audio_target_name(index, source.suffix)
+        target = audio_dir / link_name
+        if target.is_symlink() or target.exists():
+            target.unlink()
+        target.symlink_to(source)
+        audio_refs[recording_id] = f"audio/{link_name}"
+        linked += 1
+    missing = [recording_id for recording_id in ordered_ids if not audio_refs.get(recording_id)]
 
     channels_payload = []
     for channel, label, _ in CHANNELS:
@@ -269,7 +245,9 @@ def build(database: Path, output_dir: Path, audio_roots: list[Path], reuse_clips
                 "cluster": int(labels[index]),
                 "x": round(float(points_2d[index, 0]), 5),
                 "y": round(float(points_2d[index, 1]), 5),
-                "clip": clip_names.get(recording_id, ""),
+                "full": audio_refs.get(recording_id, ""),
+                "lyric": lyrics.get(recording_id, {}).get("text", ""),
+                "lyric_status": lyrics.get(recording_id, {}).get("status", "missing"),
                 "neighbors": neighbors[index],
             })
         channels_payload.append({
@@ -294,7 +272,7 @@ def build(database: Path, output_dir: Path, audio_roots: list[Path], reuse_clips
     serve = output_dir / "serve.sh"
     serve.write_text("#!/bin/sh\ncd \"$(dirname \"$0\")\" || exit 1\nexec python3 serve.py\n")
     serve.chmod(0o755)
-    return {"songs": len(ordered_ids), "clips": made, "missing_clips": len(missing),
+    return {"songs": len(ordered_ids), "full_songs": linked, "missing_audio": len(missing),
             "channels": {item["key"]: len(item["songs"]) for item in channels_payload}}
 
 
@@ -304,11 +282,9 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--audio-root", type=Path, action="append",
                         default=[Path("/Users/wycm/Documents/网易云热榜抓取/music_downloads/KugouMusicClient")])
-    parser.add_argument("--reuse-clips", action="store_true", help="Reuse existing audio in the output dir")
     args = parser.parse_args()
     print("building library map ...", flush=True)
-    summary = build(args.db.expanduser(), args.output_dir.expanduser(), args.audio_root,
-                    reuse_clips=args.reuse_clips)
+    summary = build(args.db.expanduser(), args.output_dir.expanduser(), args.audio_root)
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 

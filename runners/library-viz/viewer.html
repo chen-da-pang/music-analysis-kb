@@ -69,6 +69,12 @@
   .nb .t div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .nb .t span { color: var(--muted); font-size: 12px; }
   .note { color: var(--muted); font-size: 12px; line-height: 1.7; }
+  details.lyrics { margin: 8px 0 4px; border: 1px solid var(--line); border-radius: 8px;
+    background: #12151a; }
+  details.lyrics summary { cursor: pointer; padding: 8px 10px; color: var(--muted); font-size: 12px; }
+  details.lyrics pre { margin: 0; padding: 0 12px 12px; white-space: pre-wrap; word-break: break-word;
+    font: 13px/1.75 inherit; color: var(--ink); max-height: 260px; overflow: auto; }
+  .filelink { display: inline-block; margin: 0 0 10px; color: var(--accent); font-size: 12px; }
   .empty { color: var(--muted); font-size: 13px; line-height: 1.8; }
   .empty b { color: var(--ink); }
   kbd { background: var(--soft); border: 1px solid var(--line); border-radius: 4px;
@@ -88,7 +94,7 @@
   <div id="mapwrap">
     <canvas id="map"></canvas>
     <div id="legend"></div>
-    <div id="hint">滚轮缩放 · 拖拽平移 · 单击查看 · 双击重置</div>
+    <div id="hint">滚轮缩放 · 拖拽平移 · 单击查看（完整播放 + 歌词） · 双击重置</div>
     <div id="tooltip"></div>
   </div>
   <aside id="panel"></aside>
@@ -274,7 +280,7 @@
           ${clusters.filter(c => c.id >= 0).length} 个浏览用簇${noise ? `，${noise.size} 首散点` : ""}。
           <div class="section-title">怎么用</div>
           · 滚轮缩放、拖拽平移、双击重置<br>
-          · 点击任意点查看歌曲与${channel().label}最近 5 首<br>
+          · 点击任意点：完整播放、查看歌词、看${channel().label}最近 5 首<br>
           · 顶部切换整体听感 / 节奏 / 音色，布局会重算<br>
           · 搜索会高亮匹配点，簇图例可隐藏
           <div class="section-title">注意</div>
@@ -294,8 +300,13 @@
       <div class="badge"><i style="background:${cluster ? cluster.color : "#4a505a"}"></i>
         ${cluster ? cluster.name : "未分簇"} · ${channel().label}</div>
       <div class="meta">${channel().model_id} · ${channel().recipe}</div>
-      ${song.clip ? `<audio controls preload="none" src="${escapeHtml(song.clip)}"></audio>`
+      ${song.full ? `<audio controls preload="none" src="${escapeHtml(song.full)}"></audio>
+        <a class="filelink" href="${escapeHtml(song.full)}" target="_blank" rel="noopener">在新标签播放完整音频</a>`
                   : `<div class="note">本地音频缺失，无法试听。</div>`}
+      ${song.lyric ? `<details class="lyrics" open><summary>歌词${
+          song.lyric_status === "available" ? "" : "（" + song.lyric_status + "）"
+        }</summary><pre>${escapeHtml(song.lyric)}</pre></details>`
+        : `<div class="note">无歌词（${song.lyric_status || "missing"}）</div>`}
       <div class="section-title">${channel().label}最近 5 首</div>
       ${neighbors.map(item => `
         <div class="nb" data-index="${item.index}">
