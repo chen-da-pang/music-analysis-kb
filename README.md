@@ -66,14 +66,59 @@ not full-library recall. Publisher `import-embeddings` imports SHA-bound JSONL;
 clients load no models. See [plugin commands](plugins/music-kb/README.md) and
 [runner and Suno evaluation scripts](runners/audio-embed/README.md).
 
-**Upgrade order:** migrate/bootstrap the publisher, produce and verify a v8
-snapshot, install/distribute it, then upgrade clients. The new plugin cannot
-open v7 snapshots and never migrates them on read. Peer distribution is a
-separate explicit operation; a local release does not push to peers.
+**Upgrade order:** upgrade clients/peers first, then migrate/bootstrap the
+publisher master, validate, rebuild and verify a v9 snapshot, and finally
+install/distribute it. A v8 client cannot open a v9 snapshot and queries never
+migrate a read-only database, so the peer/plugin version must be at least the
+publisher version before distribution. Peer distribution is a separate explicit
+operation; a local release does not push to peers.
 
 MuQ-MuLan and MERT weights are **CC-BY-NC-4.0**; MERIT heads are MIT.
 This feature is for internal research; commercial use requires authorization
 or replacement of restricted weights.
+
+## Audience records (schema v9)
+
+Audience evidence is stored next to — never inside — the canonical analysis.
+Two producers write the same four additive tables (`audience_source`,
+`audience_profile`, `audience_observation`, `audience_entry`): SOP research
+profiles (`import-audience --kind profile`, target platform `douyin`) and
+weekly chart evidence (`--kind chart_evidence`, target platform `unspecified`,
+`chart_snapshot` time window). Chart evidence records only *which
+generation/scene/tribe charts a song entered* (with rank, `3_proxy` evidence,
+and a source row per chart snapshot); it never carries audience share.
+Research inference may store 0–1 intervals marked `4_inferred`; gaps are
+written to `coverage_note` instead of fabricated observations.
+
+The reader groups one recording's evidence into 「调研画像」 and 「榜单证据」:
+
+```bash
+cd plugins/music-kb
+uv run music-kb --json get-audience rec_example
+uv run music-kb --json get-audience rec_example --window full_lifecycle --method version-matrix
+```
+
+Every successful import also projects the directional conclusions into
+recording-level tags (`recording_tag(role='audience')`, never `analysis_tag`):
+research buckets into the `audience` namespace and the newest chart snapshot into
+`audience-hint`. The full public prefix is a `tag_alias`, so the existing exact
+`--tag` retrieval hits both without a new query syntax; percentages/ranks are
+never projected. A re-import replaces the previous projection, and a recording
+absent from the newest chart snapshot loses its old hint.
+
+```bash
+uv run music-kb search --tag audience/age/31-40
+uv run music-kb search --tag audience-hint/gen/00后
+uv run music-kb recommend --tag audience/city-tier/low   # --tag works on recommend/discover too
+```
+
+Snapshots stay client-safe: only the newest profile per
+`(recording, target_platform, time_window, method_id)` ships, all canonical
+recordings' version entries ship, orphan sources are pruned, `local_path` is
+cleared, and manifest counts include the four `audience_*` values. Audience
+coverage is never a release gate. See
+[ADR-0005](docs/adr/0005-audience-records-main-schema.md) and the
+[audience import contract](docs/import-contract.md#audience-import-contract).
 
 ## Quick start (publisher)
 
@@ -107,6 +152,18 @@ uv run music-kb import-campaign-delivery \
 # Run a coverage check first; the write command is publisher-only and idempotent.
 uv run music-kb enrich-campaign-tags --db "$HOME/.music-kb/music-master.sqlite" --dry-run
 uv run music-kb enrich-campaign-tags --db "$HOME/.music-kb/music-master.sqlite" --batch-size 500
+
+# Import audience evidence: SOP research profiles and, when captured, the
+# weekly chart snapshot. Failed records are reported per line and never block
+# a release; see docs/import-contract.md for both contracts.
+uv run music-kb import-audience \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --input /secure/path/audience-profiles.jsonl \
+  --kind profile
+uv run music-kb import-audience \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --input /secure/path/chart-evidence.jsonl \
+  --kind chart_evidence
 
 uv run music-kb validate --db "$HOME/.music-kb/music-master.sqlite"
 uv run music-kb snapshot create \
@@ -164,12 +221,17 @@ uv run music-kb --json doctor
 uv run music-kb search --tag "granular vocal chop" --limit 10
 uv run music-kb get rec_example
 uv run music-kb get-lyrics rec_example
+uv run music-kb get-audience rec_example
 ```
 
 The current MCP workflow uses read tools for status, search, title/artist
 resolution, canonical analysis retrieval, selected-recording full lyrics, and
 tag facets. Candidate search stays compact; full lyrics are returned only for
-an explicitly selected recording ID.
+an explicitly selected recording ID. Audience records are available through the
+CLI `get-audience` reader and as the `audience` summary on `get` /
+`music_kb_get_canonical_analysis`; the same `--tag` filters by the projected
+`audience/*` and `audience-hint/*` tags, and the library map's detail panel shows
+the same research/chart evidence with its sources and non-share disclaimer.
 
 Campaign analyses receive deterministic, versioned tags for title, artist,
 section, genre, tempo/meter, rhythm, instrumentation, production/mix, harmony,

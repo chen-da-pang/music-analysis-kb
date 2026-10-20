@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .campaign_delivery import load_campaign_delivery_file
+from .audience_charts import (
+    DEFAULT_AUDIENCE_CHART_PROFILE,
+    import_audience_inputs,
+    precaptured_audience_chart_summary,
+)
 from .lyrics import load_lyric_receipts
 from .operation_context import RunContext, atom, atomic_write_json
 from .preflight import run_preflight
@@ -589,6 +594,9 @@ def run_weekly_run(
     cnb_campaign_work_dir: str | Path | None = None,
     retained_campaign_receipt: str | Path | None = None,
     embed_python: str | Path | None = None,
+    audience_input: str | Path | None = None,
+    audience_charts: str | Path | None = None,
+    audience_chart_profile: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run all safe publisher stages and stop at the first failed atom."""
 
@@ -613,6 +621,19 @@ def run_weekly_run(
     peers_path = _resolve_workspace_path(peers_file, root) if peers_file else None
     state_path = _resolve_workspace_path(state_file, root)
     chart_db_path = _resolve_workspace_path(chart_database, root) if chart_database else None
+    audience_profiles_path = (
+        _resolve_workspace_path(audience_input, root) if audience_input else None
+    )
+    audience_charts_path = (
+        _resolve_workspace_path(audience_charts, root)
+        if audience_charts is not None
+        else run_dir / "audience-charts"
+    )
+    audience_chart_profile_path = (
+        Path(audience_chart_profile).expanduser().resolve()
+        if audience_chart_profile is not None
+        else DEFAULT_AUDIENCE_CHART_PROFILE
+    )
     campaign_repository_root = _resolve_campaign_repository_root(root, cnb_github_commit)
     cnb_storage_policy_path = Path(cnb_storage_policy).expanduser().resolve()
     retained_campaign_receipt_path = (
@@ -958,6 +979,85 @@ def run_weekly_run(
                         "source_records": total_source_records,
                     }
                 )
+
+        with atom(
+            context,
+            "audience_chart_capture",
+            inputs={
+                "output_dir": str(audience_charts_path),
+                "profile": str(audience_chart_profile_path),
+                "reuse_directory": str(chart_dir),
+                "dry_run": False,
+            },
+        ) as outputs:
+            if delivery_supplied or campaign_resume:
+                outputs.update({"status": "skipped", "reason": resume_reason})
+            else:
+                # A manual-gate run may pre-capture the 24 audience charts via
+                # the same capture script and pass the directory here; reuse it
+                # instead of hitting kugou-cli again in this run.
+                try:
+                    precaptured = precaptured_audience_chart_summary(
+                        audience_charts_path,
+                        chart_profile=audience_chart_profile_path,
+                    )
+                except Exception as error:  # enrichment must not block publication
+                    outputs.update(
+                        {
+                            "status": "failed",
+                            "reason": "audience chart reuse check failed; publication continues",
+                            "error": str(error),
+                            "coverage_gaps": [
+                                {
+                                    "source": "chart_capture",
+                                    "reason": f"audience chart reuse check failed: {error}",
+                                }
+                            ],
+                        }
+                    )
+                else:
+                    if precaptured is not None:
+                        outputs.update(precaptured)
+                    else:
+                        command = [
+                            sys.executable,
+                            str(scripts_dir / "capture_kugou_audience_charts.py"),
+                            "--run-id",
+                            run_id,
+                            "--output-dir",
+                            str(audience_charts_path),
+                            "--profile",
+                            str(audience_chart_profile_path),
+                            "--reuse-directory",
+                            str(chart_dir),
+                            "--operations-file",
+                            str(operations_path),
+                        ]
+                        if proxy:
+                            command.extend(["--proxy", proxy])
+                        try:
+                            payload, _ = _json_command(
+                                command, cwd=root, timeout_seconds=min(timeout_seconds, 900)
+                            )
+                        except RuntimeError as error:
+                            # Audience charts are an enrichment producer: a
+                            # capture failure is a recorded coverage gap, not a
+                            # publication gate.
+                            outputs.update(
+                                {
+                                    "status": "failed",
+                                    "reason": "audience chart capture failed; publication continues",
+                                    "error": str(error),
+                                    "coverage_gaps": [
+                                        {
+                                            "source": "chart_capture",
+                                            "reason": f"audience chart capture failed: {error}",
+                                        }
+                                    ],
+                                }
+                            )
+                        else:
+                            outputs.update(payload)
 
         merged_chart = run_dir / "chart-songs.json"
         with atom(context, "chart_dedupe", inputs={"captures": [item["songs"] for item in capture_results]}) as outputs:
@@ -1369,6 +1469,46 @@ def run_weekly_run(
                 import_result = {"import": import_result, "links": link_result, "tags": tag_result, "validation": validation, "status": status}
                 outputs.update(import_result)
 
+        audience_result: dict[str, Any] = {}
+        with atom(
+            context,
+            "audience_import",
+            inputs={
+                "database": str(database_path),
+                "profiles": str(audience_profiles_path) if audience_profiles_path else None,
+                "charts": str(audience_charts_path),
+                "chart_profile": str(audience_chart_profile_path),
+                "delivery_resume": delivery_supplied,
+            },
+        ) as outputs:
+            if delivery_path is None or not delivery_path.is_file():
+                outputs.update({"status": "skipped", "reason": "no delivery in dry-run"})
+            else:
+                try:
+                    audience_result = import_audience_inputs(
+                        database=database_path,
+                        chart_directory=audience_charts_path,
+                        chart_profile=audience_chart_profile_path,
+                        audience_profiles=audience_profiles_path,
+                        delivery_resume=delivery_supplied,
+                    )
+                except Exception as error:  # enrichment must not block publication
+                    outputs.update(
+                        {
+                            "status": "failed",
+                            "reason": "audience import failed; publication continues",
+                            "error": str(error),
+                            "coverage_gaps": [
+                                {
+                                    "source": "audience_import",
+                                    "reason": f"audience import failed: {error}",
+                                }
+                            ],
+                        }
+                    )
+                else:
+                    outputs.update(audience_result)
+
         receipt_paths: list[Path] = []
         seen_receipt_paths: set[Path] = set()
         for candidate in explicit_lyric_receipt_paths:
@@ -1757,4 +1897,5 @@ def run_weekly_run(
         "state": str(run_dir / "run-state.json"),
         "local_install": local_install_result,
         "publish": publish_result,
+        "audience": audience_result,
     }

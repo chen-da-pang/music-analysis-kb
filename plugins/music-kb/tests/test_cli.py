@@ -57,7 +57,7 @@ def test_cli_similar_rejects_v7_snapshot(embedded_snapshot):
     assert result.returncode == 2
     error = json.loads(result.stderr)["error"]
     assert error["code"] == "database_not_initialized"
-    assert error["message"] == "Unsupported schema version 7; expected 8."
+    assert error["message"] == "Unsupported schema version 7; expected 9."
 
 
 def test_cli_embedding_import_similar_and_doctor(master_database, tmp_path):
@@ -459,6 +459,49 @@ def test_weekly_run_exposes_confirm_cnb_analysis_flag() -> None:
     assert parsed.confirm_cnb_analysis is True
     default = parser.parse_args(["weekly-run", "--run-id", "fixture-run"])
     assert default.confirm_cnb_analysis is False
+
+
+def test_weekly_commands_expose_audience_inputs() -> None:
+    parser = cli.build_parser()
+    weekly_run = parser.parse_args(
+        [
+            "weekly-run",
+            "--run-id",
+            "fixture-run",
+            "--audience",
+            "/tmp/audience-profiles.jsonl",
+            "--audience-charts",
+            "/tmp/audience-charts",
+            "--audience-chart-profile",
+            "/tmp/audience-charts-v1.json",
+        ]
+    )
+    assert weekly_run.audience == Path("/tmp/audience-profiles.jsonl")
+    assert weekly_run.audience_charts == Path("/tmp/audience-charts")
+    assert weekly_run.audience_chart_profile == Path("/tmp/audience-charts-v1.json")
+    default = parser.parse_args(["weekly-run", "--run-id", "fixture-run"])
+    assert default.audience is None
+    assert default.audience_charts is None
+    assert default.audience_chart_profile is None
+
+    weekly_update = parser.parse_args(
+        [
+            "weekly-update",
+            "--db",
+            "/tmp/master.sqlite",
+            "--input",
+            "/tmp/input.jsonl",
+            "--output-dir",
+            "/tmp/releases",
+            "--audience",
+            "/tmp/audience-profiles.jsonl",
+            "--audience-charts",
+            "/tmp/audience-charts",
+        ]
+    )
+    assert weekly_update.audience == Path("/tmp/audience-profiles.jsonl")
+    assert weekly_update.audience_charts == Path("/tmp/audience-charts")
+    assert weekly_update.audience_chart_profile is None
 
 
 def test_peer_inventory_environment_override(monkeypatch, tmp_path: Path) -> None:

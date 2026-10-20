@@ -9,7 +9,7 @@ this directory or in Git.
 
 > **运行时状态（2026-09，ADR-0001）**：CNB 云端 Music Flamingo 分析运行时已退役——CNB 平台开始收费，不再作为默认或回退链路；本节及 weekly-run 中所有 `cnb_*` 原子仅作历史参考保留。默认分析路径正迁移至本机 MOSS-Music（MLX 8-bit，见 ADR-0001 与 issue #111）。fresh 周更若要触达 CNB 计费入口，现在必须显式传 `--confirm-cnb-analysis`，否则快速失败。现状分析续跑（`--delivery`）不受影响。
 
-## Audio vectors (publisher, snapshots, CLI and MCP, schema v8)
+## Audio vectors and audience records (publisher, snapshots, CLI and MCP, schema v9)
 
 Natural requests such as “找像《X》的歌”, “找节奏像的” and “找音色像的”
 resolve title/artist first; ambiguous versions require user selection. Channels
@@ -20,13 +20,17 @@ publisher environment; Suno JSON reports stay outside git and never write the KB
 MuQ-MuLan/MERT weights are CC-BY-NC-4.0; MERIT heads are MIT. Internal
 research only; commercial use requires authorization or replacement.
 Only embedded recordings participate (initially 434/2005); coverage is not
-similarity quality. Produce, verify and install a v8 snapshot before client
-upgrade; local installation does not distribute it to peers.
+similarity quality. Schema v9 also carries the `audience_*` four-table
+audience records (research profiles + chart evidence); importing them projects
+recording-level `audience`/`audience-hint` tags and the canonical `get` returns
+an `audience` summary. Upgrade clients/peers first (a v8 client cannot open a
+v9 snapshot), then migrate the publisher and rebuild/verify the v9 snapshot;
+local installation does not distribute it to peers.
 
-Upgrade a publisher v7 master explicitly with `music-kb init --db /path/to/master.sqlite`.
-Read-only queries never migrate a client database; v7 clients must receive a
-compatible v8 snapshot before upgrading the plugin. Opening a v7 snapshot fails
-with `Unsupported schema version 7; expected 8.` No client query migrates it.
+Upgrade a publisher v8 master explicitly with `music-kb init --db /path/to/master.sqlite`.
+Read-only queries never migrate a client database; v8 clients must receive a
+compatible v9 snapshot before upgrading the plugin. Opening a v8 snapshot fails
+with `Unsupported schema version 8; expected 9.` No client query migrates it.
 These commands do not compute vectors or download weights.
 
 ```bash
@@ -36,6 +40,11 @@ music-kb --json import-embeddings --db /path/to/master.sqlite \
   --license CC-BY-NC-4.0
 music-kb --json similar --db /path/to/master.sqlite \
   --recording-id rec_example --channel overall --limit 10
+music-kb --json import-audience --db /path/to/master.sqlite \
+  --input /path/to/audience-profiles.jsonl --kind profile
+music-kb --json import-audience --db /path/to/master.sqlite \
+  --input /path/to/chart-evidence.jsonl --kind chart_evidence
+music-kb --json get-audience --db /path/to/master.sqlite rec_example
 ```
 
 Input is UTF-8 physical-LF JSONL, one object per line, with a final LF and no

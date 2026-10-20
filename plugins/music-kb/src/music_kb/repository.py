@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import base64
 import binascii
+import datetime
 import json
+import re
 import sqlite3
 import math
 from collections import Counter, OrderedDict
@@ -54,6 +56,248 @@ MAX_IMPORT_RESULT_SAMPLE = 1_000
 SEARCH_PROJECTION_STATE_KEY = "search_projection_state"
 SEARCH_PROJECTION_CURRENT = "current"
 SEARCH_PROJECTION_DIRTY = "dirty"
+
+AUDIENCE_IMPORT_KINDS = frozenset({"profile", "chart_evidence"})
+AUDIENCE_SOURCE_PLATFORMS = frozenset({"kugou", "qq", "netease", "bilibili", "qishui", "douyin", "web"})
+AUDIENCE_SOURCE_TYPES = frozenset(
+    {"chart_snapshot", "kugou_album", "kugou_search", "media", "report", "user_export", "other"}
+)
+AUDIENCE_EVIDENCE_LEVELS = frozenset(
+    {"1_platform_public", "2_media", "3_proxy", "4_inferred"}
+)
+AUDIENCE_TIME_WINDOWS = frozenset(
+    {"first_wave", "full_lifecycle", "chart_snapshot", "rolling_30d"}
+)
+AUDIENCE_TARGET_PLATFORMS = frozenset({"douyin", "unspecified"})
+AUDIENCE_PROFILE_STATUSES = frozenset({"available", "unavailable"})
+AUDIENCE_CONFIDENCES = frozenset({"low", "medium", "high"})
+AUDIENCE_DIMENSIONS = frozenset(
+    {
+        "age",
+        "gender",
+        "province",
+        "city_tier",
+        "life_stage",
+        "scene",
+        "creator",
+        "emotion",
+        "generation_hint",
+        "tribe",
+    }
+)
+AUDIENCE_ENTRY_TYPES = frozenset(
+    {
+        "original",
+        "duet",
+        "cover",
+        "dj",
+        "children",
+        "soundtrack",
+        "variety",
+        "ktv",
+        "dialect",
+        "instrumental",
+        "other",
+    }
+)
+AUDIENCE_ENTRY_RELATIONS = frozenset(
+    {"same_master", "alternate_version", "cover_remix", "unknown"}
+)
+CHART_EVIDENCE_METHOD_ID = "chart_signal_v1"
+CHART_EVIDENCE_METHOD_VERSION = "chart-hint-v1"
+CHART_EVIDENCE_TIME_WINDOW = "chart_snapshot"
+CHART_EVIDENCE_TARGET_PLATFORM = "unspecified"
+CHART_EVIDENCE_OBSERVATION_DIMENSIONS = frozenset({"generation_hint", "scene", "tribe"})
+RESEARCH_TARGET_PLATFORM = "douyin"
+DEFAULT_AUDIENCE_BATCH_SIZE = 500
+_AUDIENCE_DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+_AUDIENCE_CHART_KEY_PATTERN = re.compile(r"chart:(\d+):(\d{4}-\d{2}-\d{2})\Z")
+
+# Audience tag projection (schema v9, ticket #140). Research conclusions are
+# projected into the ``audience`` namespace and chart signal into
+# ``audience-hint``; both are recording-level ``recording_tag(role='audience')``
+# rows whose canonical name is a path-style key and whose public prefix is
+# registered as an alias. Retrieval keeps using the existing exact ``--tag``
+# machinery, so ``audience/age/31-40`` resolves through ``tag_alias`` without
+# touching ``_tag_candidate_sql`` or the ``search_fts`` schema.
+AUDIENCE_TAG_NAMESPACE = "audience"
+AUDIENCE_HINT_TAG_NAMESPACE = "audience-hint"
+AUDIENCE_TAG_ROLE = "audience"
+AUDIENCE_TAG_PREFIXES = {"age": "age", "gender": "gender", "city_tier": "city-tier"}
+AUDIENCE_HINT_TAG_PREFIXES = {"generation_hint": "gen", "scene": "scene", "tribe": "tribe"}
+AUDIENCE_TAG_VALUES = {
+    "age": frozenset({"18-23", "24-30", "31-40", "41-50", "50+"}),
+    "gender": frozenset({"male", "female"}),
+    "city-tier": frozenset({"high", "mid", "low"}),
+    "gen": frozenset({"00后", "90后", "80后", "cross-00-90", "cross-80-90"}),
+    "scene": frozenset({"shortvideo", "dj", "variety", "soundtrack", "recognition", "channels"}),
+    "tribe": frozenset(
+        {
+            "acg",
+            "electronic",
+            "rap",
+            "folk",
+            "rock",
+            "rnb",
+            "jazz",
+            "country",
+            "classical",
+            "guofeng",
+            "opera",
+        }
+    ),
+}
+_AUDIENCE_GENERATION_CROSS = {
+    frozenset({"00后", "90后"}): "cross-00-90",
+    frozenset({"80后", "90后"}): "cross-80-90",
+}
+_AUDIENCE_GENDER_ALIASES = {"男": "male", "女": "female", "男性": "male", "女性": "female"}
+_AUDIENCE_CITY_TIER_TOKENS = (
+    ("high", ("一线",)),
+    ("mid", ("二线",)),
+    ("low", ("三线", "四线", "五线", "县域", "乡镇")),
+)
+_AUDIENCE_TRIBE_ALIASES = {
+    "国潮": "guofeng",
+    "国乐": "guofeng",
+    "粤剧": "opera",
+    "京剧": "opera",
+    "南音": "opera",
+    "电子": "electronic",
+    "电音": "electronic",
+    "说唱": "rap",
+    "民谣": "folk",
+    "摇滚": "rock",
+    "爵士": "jazz",
+    "乡村": "country",
+    "乡村音乐": "country",
+    "古典": "classical",
+    "古典音乐": "classical",
+}
+
+
+def _audience_date(value: Any, field: str) -> str:
+    text = require_text(value, field)
+    if not _AUDIENCE_DATE_PATTERN.fullmatch(text):
+        raise ValidationError(
+            f"{field} must be an ISO date (YYYY-MM-DD)", details={"field": field, "value": text}
+        )
+    try:
+        datetime.date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValidationError(
+            f"{field} must be a valid ISO date (YYYY-MM-DD)",
+            details={"field": field, "value": text},
+        ) from exc
+    return text
+
+
+def _audience_share(value: Any, field: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValidationError(f"{field} must be a number between 0 and 1")
+    number = float(value)
+    if not math.isfinite(number) or number < 0 or number > 1:
+        raise ValidationError(
+            f"{field} must be between 0 and 1", details={"field": field, "value": value}
+        )
+    return number
+
+
+def _audience_integer(value: Any, field: str, *, minimum: int = 0) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValidationError(f"{field} must be an integer")
+    if value < minimum:
+        raise ValidationError(
+            f"{field} must be at least {minimum}", details={"field": field, "value": value}
+        )
+    return value
+
+
+def _audience_choice(value: Any, field: str, allowed: frozenset[str]) -> str:
+    text = require_text(value, field)
+    if text not in allowed:
+        raise ValidationError(
+            f"{field} must be one of: {', '.join(sorted(allowed))}",
+            details={"field": field, "value": text},
+        )
+    return text
+
+
+def _audience_optional_text(value: Any, field: str) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValidationError(f"{field} must be a string")
+    return value
+
+
+def _audience_bucket_value(prefix: str, bucket: str) -> str | None:
+    """Normalize one observation bucket to the v1 path key value, or skip it.
+
+    Spec v2.1 §7 writes the projection table down as a closed vocabulary: age
+    five buckets, gender male/female, city tier high/mid/low, generation five
+    values (including the research script's ``cross:00后+90后`` spelling),
+    scene six values (v1 has no KTV chart) and tribe eleven values. Buckets
+    outside that vocabulary are deliberately not projected; the underlying
+    observation stays queryable through ``get-audience``.
+    """
+
+    text = str(bucket).strip().replace("：", ":").replace("＋", "+").replace("–", "-").replace("—", "-")
+    if not text:
+        return None
+    prefix_with_slash = f"{prefix}/"
+    if text.casefold().startswith(prefix_with_slash.casefold()):
+        text = text[len(prefix_with_slash):].strip()
+        if not text:
+            return None
+    allowed = AUDIENCE_TAG_VALUES[prefix]
+    for value in allowed:
+        if text.casefold() == value.casefold():
+            return value
+    if prefix == "gender":
+        return _AUDIENCE_GENDER_ALIASES.get(text)
+    if prefix == "city-tier":
+        for value, tokens in _AUDIENCE_CITY_TIER_TOKENS:
+            if any(token in text for token in tokens):
+                return value
+        return None
+    if prefix == "gen":
+        if text.casefold().startswith("cross:"):
+            members = frozenset(part.strip() for part in text[len("cross:"):].split("+") if part.strip())
+            return _AUDIENCE_GENERATION_CROSS.get(members)
+        return None
+    if prefix == "tribe":
+        return _AUDIENCE_TRIBE_ALIASES.get(text)
+    return None
+
+
+def _audience_tag_name(
+    dimension: str, bucket: str, *, chart_evidence: bool
+) -> tuple[str, str] | None:
+    """Map one observation from its own profile kind to a tag, or skip it.
+
+    Spec v2.1 §7 gives each namespace its own closed projection table, so the
+    profile kind decides the vocabulary: a research profile may only project
+    ``age``/``gender``/``city_tier`` into ``audience`` and a chart profile may
+    only project ``generation_hint``/``scene``/``tribe`` into ``audience-hint``.
+    Looking the dimension up in both tables (the pre-review behavior) let a
+    research ``scene`` observation leak into ``audience-hint/scene/*`` and made
+    a chart-derived hint look like SOP research.
+    """
+
+    prefixes = AUDIENCE_HINT_TAG_PREFIXES if chart_evidence else AUDIENCE_TAG_PREFIXES
+    namespace = AUDIENCE_HINT_TAG_NAMESPACE if chart_evidence else AUDIENCE_TAG_NAMESPACE
+    prefix = prefixes.get(dimension)
+    if prefix is None:
+        return None
+    value = _audience_bucket_value(prefix, bucket)
+    if value is None:
+        return None
+    return namespace, f"{prefix}/{value}"
 
 
 def _optional_source_url(value: Any) -> str | None:
@@ -741,6 +985,1030 @@ class MusicKBRepository:
             "imports_truncated": imports_truncated,
         }
 
+    # -- audience records -------------------------------------------------
+
+    def import_audience(
+        self,
+        entries: Iterable[Mapping[str, Any] | tuple[int, Mapping[str, Any]]],
+        *,
+        kind: str = "profile",
+        batch_size: int = DEFAULT_AUDIENCE_BATCH_SIZE,
+    ) -> dict[str, Any]:
+        """Import one audience JSONL stream of research profiles or chart evidence.
+
+        Every record is one profile plus nested ``sources`` / ``observations`` /
+        optional ``entries``. Malformed or invalid records are reported by their
+        input line and rolled back individually; the rest of the batch stays
+        committed. Sources are upserted by ``(source_platform, source_key)`` so
+        a weekly rerun never accumulates duplicate source rows, while a repeated
+        profile key replaces its observations (and, when the record carries
+        ``entries``, the recording's version entries) instead of duplicating
+        them.
+        """
+
+        self._require_writer()
+        if kind not in AUDIENCE_IMPORT_KINDS:
+            raise ValidationError(
+                "Audience import kind must be profile or chart_evidence",
+                details={"kind": kind},
+            )
+        if (
+            isinstance(batch_size, bool)
+            or not isinstance(batch_size, int)
+            or not 1 <= batch_size <= 5_000
+        ):
+            raise ValidationError("batch_size must be an integer between 1 and 5000")
+
+        stats: dict[str, Any] = {
+            "kind": kind,
+            "profiles": 0,
+            "observations": 0,
+            "sources": 0,
+            "entries": 0,
+            "duplicates": 0,
+            "errors": 0,
+            "error_details": [],
+            "batch_count": 0,
+        }
+        batch: list[tuple[int, Mapping[str, Any]]] = []
+        position = 0
+
+        def import_batch() -> None:
+            nonlocal batch
+            if not batch:
+                return
+            stats["batch_count"] += 1
+            with self.connection:
+                for line_number, payload in batch:
+                    self.connection.execute("SAVEPOINT audience_record")
+                    try:
+                        record = self._import_audience_record(payload, kind=kind)
+                    except ValidationError as error:
+                        self.connection.execute("ROLLBACK TO audience_record")
+                        self.connection.execute("RELEASE audience_record")
+                        stats["errors"] += 1
+                        stats["error_details"].append(
+                            {
+                                "line": line_number,
+                                "code": error.code,
+                                "message": str(error),
+                                "details": error.details,
+                            }
+                        )
+                        continue
+                    except sqlite3.IntegrityError as error:
+                        self.connection.execute("ROLLBACK TO audience_record")
+                        self.connection.execute("RELEASE audience_record")
+                        stats["errors"] += 1
+                        stats["error_details"].append(
+                            {
+                                "line": line_number,
+                                "code": "integrity_error",
+                                "message": str(error),
+                            }
+                        )
+                        continue
+                    self.connection.execute("RELEASE audience_record")
+                    for key in ("profiles", "observations", "sources", "entries", "duplicates"):
+                        stats[key] += record[key]
+            batch = []
+
+        for item in entries:
+            position += 1
+            if isinstance(item, tuple) and len(item) == 2:
+                line_number, payload = item
+            else:
+                line_number, payload = position, item
+            if not isinstance(payload, Mapping):
+                stats["errors"] += 1
+                stats["error_details"].append(
+                    {
+                        "line": int(line_number),
+                        "code": "invalid_record",
+                        "message": "Each audience record must be a JSON object",
+                    }
+                )
+                continue
+            batch.append((int(line_number), payload))
+            if len(batch) >= batch_size:
+                import_batch()
+        import_batch()
+        # Projection is part of the successful import path (ticket #140): the
+        # weekly ``audience_import`` atom and the CLI both get recording-level
+        # audience tags without a second call. A full rebuild is deliberate:
+        # the ``audience-hint`` period is global, so a newer chart snapshot must
+        # also drop stale hints from recordings it did not hit.
+        stats["tags"] = (
+            self.rebuild_audience_tags()
+            if stats["profiles"]
+            else {
+                "recordings": 0,
+                "tags": 0,
+                "research_recordings": 0,
+                "chart_recordings": 0,
+                "namespaces": [],
+                "stale_recordings": 0,
+                "orphan_tags_deleted": 0,
+                "fts_rebuilt": 0,
+            }
+        )
+        return stats
+
+    def _import_audience_record(self, payload: Mapping[str, Any], *, kind: str) -> dict[str, int]:
+        declared_kind = payload.get("kind")
+        if declared_kind is not None and str(declared_kind) != kind:
+            raise ValidationError(
+                "Audience record kind does not match the import kind",
+                details={"record_kind": str(declared_kind), "import_kind": kind},
+            )
+        recording_id = self._resolve_audience_recording(payload.get("recording"))
+        profile = self._validate_audience_profile(payload.get("profile"), kind=kind)
+        _, source_map, source_count, source_duplicates = self._import_audience_sources(
+            payload.get("sources"), kind=kind
+        )
+        observations, observation_duplicates = self._validate_audience_observations(
+            payload.get("observations"),
+            kind=kind,
+            source_map=source_map,
+            profile_scope=_stable_id(
+                "audience_profile_scope",
+                recording_id,
+                profile["target_platform"],
+                profile["time_window"],
+                profile["method_version"],
+                profile["researched_at"],
+            ),
+        )
+        entries_present = "entries" in payload and payload.get("entries") is not None
+        entry_rows, entry_duplicates = (
+            self._validate_audience_entries(
+                payload.get("entries"),
+                recording_id=recording_id,
+                source_map=source_map,
+            )
+            if entries_present
+            else ([], 0)
+        )
+        profile_id = self._upsert_audience_profile(recording_id, profile)
+        self.connection.execute(
+            "DELETE FROM audience_observation WHERE profile_id = ?", (profile_id,)
+        )
+        self.connection.executemany(
+            """
+            INSERT INTO audience_observation(
+                id, profile_id, dimension, bucket, value_low, value_high,
+                value_mid, rank, sample_n, evidence_level, is_proxy, source_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row["id"],
+                    profile_id,
+                    row["dimension"],
+                    row["bucket"],
+                    row["value_low"],
+                    row["value_high"],
+                    row["value_mid"],
+                    row["rank"],
+                    row["sample_n"],
+                    row["evidence_level"],
+                    row["is_proxy"],
+                    row["source_id"],
+                )
+                for row in observations
+            ],
+        )
+        if entries_present:
+            self.connection.execute(
+                "DELETE FROM audience_entry WHERE recording_id = ?", (recording_id,)
+            )
+            self.connection.executemany(
+                """
+                INSERT INTO audience_entry(
+                    id, recording_id, entry_type, performer, released_at,
+                    platform, relation_to_original, weight_basis, source_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row["id"],
+                        recording_id,
+                        row["entry_type"],
+                        row["performer"],
+                        row["released_at"],
+                        row["platform"],
+                        row["relation_to_original"],
+                        row["weight_basis"],
+                        row["source_id"],
+                    )
+                    for row in entry_rows
+                ],
+            )
+        return {
+            "profiles": 1,
+            "observations": len(observations),
+            "sources": source_count,
+            "entries": len(entry_rows) if entries_present else 0,
+            "duplicates": source_duplicates + observation_duplicates + entry_duplicates,
+        }
+
+    def _resolve_audience_recording(self, reference: Any) -> str:
+        recording_id = ""
+        title = ""
+        artist = ""
+        if isinstance(reference, str):
+            recording_id = reference.strip()
+        elif isinstance(reference, Mapping):
+            recording_id = str(
+                reference.get("recording_id") or reference.get("id") or ""
+            ).strip()
+            title = str(
+                reference.get("title") or reference.get("canonical_title") or ""
+            ).strip()
+            artist = str(
+                reference.get("primary_artist") or reference.get("artist") or ""
+            ).strip()
+            artists = reference.get("artists")
+            if not artist and isinstance(artists, Sequence) and artists:
+                first = artists[0]
+                artist = str(
+                    first.get("name") if isinstance(first, Mapping) else first or ""
+                ).strip()
+        if not recording_id and not (title and artist):
+            raise ValidationError(
+                "Audience record requires recording.recording_id or recording.title + recording.primary_artist"
+            )
+        if recording_id:
+            row = self.connection.execute(
+                "SELECT id, canonical_analysis_id FROM recording WHERE id = ?",
+                (recording_id,),
+            ).fetchone()
+            if row is None:
+                raise ValidationError(
+                    "Audience recording does not exist",
+                    details={"recording_id": recording_id},
+                )
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT r.id, r.canonical_analysis_id
+                FROM recording r
+                WHERE r.normalized_title = ?
+                  AND EXISTS (
+                      SELECT 1 FROM recording_artist ra
+                      JOIN artist a ON a.id = ra.artist_id
+                      WHERE ra.recording_id = r.id AND a.normalized_name = ?
+                  )
+                ORDER BY r.id
+                """,
+                (normalized(title), normalized(artist)),
+            ).fetchall()
+            if not rows:
+                raise ValidationError(
+                    "Audience recording was not found by title/artist",
+                    details={"title": title, "primary_artist": artist},
+                )
+            if len(rows) > 1:
+                raise ValidationError(
+                    "Audience recording title/artist is ambiguous; supply recording_id",
+                    details={
+                        "title": title,
+                        "primary_artist": artist,
+                        "matches": [str(match["id"]) for match in rows[:10]],
+                    },
+                )
+            row = rows[0]
+        if row["canonical_analysis_id"] is None:
+            raise ValidationError(
+                "Audience recording has no canonical analysis",
+                details={"recording_id": str(row["id"])},
+            )
+        return str(row["id"])
+
+    def _validate_audience_profile(self, profile: Any, *, kind: str) -> dict[str, Any]:
+        if not isinstance(profile, Mapping):
+            raise ValidationError("Audience record requires a profile object")
+        target_platform = require_text(profile.get("target_platform"), "profile.target_platform")
+        if target_platform not in AUDIENCE_TARGET_PLATFORMS:
+            raise ValidationError(
+                "profile.target_platform must be douyin or unspecified",
+                details={"target_platform": target_platform},
+            )
+        time_window = _audience_choice(
+            profile.get("time_window"), "profile.time_window", AUDIENCE_TIME_WINDOWS
+        )
+        method_id = require_text(profile.get("method_id"), "profile.method_id")
+        method_version = require_text(profile.get("method_version"), "profile.method_version")
+        status = _audience_choice(
+            profile.get("status"), "profile.status", AUDIENCE_PROFILE_STATUSES
+        )
+        confidence = _audience_choice(
+            profile.get("confidence"), "profile.confidence", AUDIENCE_CONFIDENCES
+        )
+        researched_at = _audience_date(profile.get("researched_at"), "profile.researched_at")
+        is_proxy = profile.get("is_proxy", 1)
+        if isinstance(is_proxy, bool) or is_proxy not in (0, 1):
+            raise ValidationError("profile.is_proxy must be 0 or 1")
+        window_start = (
+            _audience_date(profile.get("window_start"), "profile.window_start")
+            if profile.get("window_start") not in (None, "")
+            else None
+        )
+        window_end = (
+            _audience_date(profile.get("window_end"), "profile.window_end")
+            if profile.get("window_end") not in (None, "")
+            else None
+        )
+        if window_start is not None and window_end is not None and window_end < window_start:
+            raise ValidationError(
+                "profile.window_end must not be earlier than profile.window_start",
+                details={"window_start": window_start, "window_end": window_end},
+            )
+        expected_target = (
+            CHART_EVIDENCE_TARGET_PLATFORM
+            if method_id == CHART_EVIDENCE_METHOD_ID
+            else RESEARCH_TARGET_PLATFORM
+        )
+        if target_platform != expected_target:
+            raise ValidationError(
+                "profile.target_platform does not match method_id",
+                details={
+                    "method_id": method_id,
+                    "target_platform": target_platform,
+                    "expected": expected_target,
+                },
+            )
+        if kind == "chart_evidence":
+            if method_id != CHART_EVIDENCE_METHOD_ID:
+                raise ValidationError(
+                    "chart_evidence profiles require method_id=chart_signal_v1",
+                    details={"method_id": method_id},
+                )
+            if method_version != CHART_EVIDENCE_METHOD_VERSION:
+                raise ValidationError(
+                    "chart_evidence profiles require method_version=chart-hint-v1",
+                    details={"method_version": method_version},
+                )
+            if time_window != CHART_EVIDENCE_TIME_WINDOW:
+                raise ValidationError(
+                    "chart_evidence profiles require time_window=chart_snapshot",
+                    details={"time_window": time_window},
+                )
+            if status != "available":
+                raise ValidationError("chart_evidence profiles require status=available")
+            if is_proxy != 1:
+                raise ValidationError("chart_evidence profiles require is_proxy=1")
+        elif method_id == CHART_EVIDENCE_METHOD_ID:
+            raise ValidationError(
+                "chart_signal_v1 profiles must be imported with kind=chart_evidence"
+            )
+        profile_id = str(profile.get("id") or "").strip()
+        return {
+            "id": profile_id or None,
+            "target_platform": target_platform,
+            "time_window": time_window,
+            "window_start": window_start,
+            "window_end": window_end,
+            "method_id": method_id,
+            "method_version": method_version,
+            "status": status,
+            "confidence": confidence,
+            "is_proxy": int(is_proxy),
+            "researched_at": researched_at,
+            "basis_note": _audience_optional_text(profile.get("basis_note"), "profile.basis_note") or None,
+            "coverage_note": _audience_optional_text(profile.get("coverage_note"), "profile.coverage_note") or None,
+            "payload_path": _audience_optional_text(profile.get("payload_path"), "profile.payload_path") or None,
+        }
+
+    def _import_audience_sources(
+        self, sources: Any, *, kind: str
+    ) -> tuple[list[dict[str, Any]], dict[str, str], int, int]:
+        if sources is None:
+            sources = []
+        if not isinstance(sources, Sequence) or isinstance(sources, (str, bytes)):
+            raise ValidationError("sources must be a JSON array")
+        validated: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, source in enumerate(sources):
+            if not isinstance(source, Mapping):
+                raise ValidationError(f"sources[{index}] must be an object")
+            platform = _audience_choice(
+                source.get("source_platform"),
+                f"sources[{index}].source_platform",
+                AUDIENCE_SOURCE_PLATFORMS,
+            )
+            source_key = require_text(source.get("source_key"), f"sources[{index}].source_key")
+            source_type = _audience_choice(
+                source.get("source_type"),
+                f"sources[{index}].source_type",
+                AUDIENCE_SOURCE_TYPES,
+            )
+            fetched_at = require_text(source.get("fetched_at"), f"sources[{index}].fetched_at")
+            evidence_level = _audience_choice(
+                source.get("evidence_level"),
+                f"sources[{index}].evidence_level",
+                AUDIENCE_EVIDENCE_LEVELS,
+            )
+            url = source.get("url")
+            if url is not None and not isinstance(url, str):
+                raise ValidationError(f"sources[{index}].url must be a string")
+            local_path = source.get("local_path")
+            if local_path is not None and not isinstance(local_path, str):
+                raise ValidationError(f"sources[{index}].local_path must be a string")
+            if kind == "chart_evidence":
+                if platform != "kugou":
+                    raise ValidationError(
+                        "chart evidence sources require source_platform=kugou",
+                        details={"source_key": source_key},
+                    )
+                if source_type != "chart_snapshot":
+                    raise ValidationError(
+                        "chart evidence sources require source_type=chart_snapshot",
+                        details={"source_key": source_key},
+                    )
+                if evidence_level != "1_platform_public":
+                    raise ValidationError(
+                        "chart evidence sources require evidence_level=1_platform_public",
+                        details={"source_key": source_key},
+                    )
+                if not _AUDIENCE_CHART_KEY_PATTERN.fullmatch(source_key):
+                    raise ValidationError(
+                        "chart evidence source_key must be chart:<rank_id>:<YYYY-MM-DD>",
+                        details={"source_key": source_key},
+                    )
+                if not (local_path or "").strip():
+                    raise ValidationError(
+                        "chart evidence sources require local_path",
+                        details={"source_key": source_key},
+                    )
+            validated.append(
+                {
+                    "id": str(source.get("id") or "").strip() or None,
+                    "source_platform": platform,
+                    "source_key": source_key,
+                    "url": url or None,
+                    "title": _audience_optional_text(source.get("title"), f"sources[{index}].title") or None,
+                    "source_type": source_type,
+                    "fetched_at": fetched_at,
+                    "evidence_level": evidence_level,
+                    "coverage_note": _audience_optional_text(
+                        source.get("coverage_note"), f"sources[{index}].coverage_note"
+                    ) or None,
+                    "local_path": local_path or None,
+                }
+            )
+            seen.add((platform, source_key))
+        source_map: dict[str, str] = {}
+        duplicates = 0
+        for source in validated:
+            existing = self.connection.execute(
+                "SELECT id FROM audience_source WHERE source_platform = ? AND source_key = ?",
+                (source["source_platform"], source["source_key"]),
+            ).fetchone()
+            if existing is not None:
+                actual_id = str(existing["id"])
+                duplicates += 1
+                self.connection.execute(
+                    """
+                    UPDATE audience_source
+                    SET url = ?, title = ?, source_type = ?, fetched_at = ?,
+                        evidence_level = ?, coverage_note = ?, local_path = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        source["url"],
+                        source["title"],
+                        source["source_type"],
+                        source["fetched_at"],
+                        source["evidence_level"],
+                        source["coverage_note"],
+                        source["local_path"],
+                        actual_id,
+                    ),
+                )
+            else:
+                actual_id = source["id"] or _stable_id(
+                    "audience_source", source["source_platform"], source["source_key"]
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO audience_source(
+                        id, source_platform, source_key, url, title, source_type,
+                        fetched_at, evidence_level, coverage_note, local_path
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        actual_id,
+                        source["source_platform"],
+                        source["source_key"],
+                        source["url"],
+                        source["title"],
+                        source["source_type"],
+                        source["fetched_at"],
+                        source["evidence_level"],
+                        source["coverage_note"],
+                        source["local_path"],
+                    ),
+                )
+            if source["id"]:
+                source_map[source["id"]] = actual_id
+            source_map[source["source_key"]] = actual_id
+        return validated, source_map, len(validated), duplicates
+
+    def _resolve_audience_source_id(
+        self, reference: Any, source_map: Mapping[str, str], field: str
+    ) -> str | None:
+        if reference is None:
+            return None
+        value = require_text(reference, field)
+        if value in source_map:
+            return source_map[value]
+        row = self.connection.execute(
+            "SELECT id FROM audience_source WHERE id = ?", (value,)
+        ).fetchone()
+        if row is None:
+            raise ValidationError(
+                f"{field} does not reference an imported or stored audience source",
+                details={"source_id": value},
+            )
+        return str(row["id"])
+
+    def _validate_audience_observations(
+        self,
+        observations: Any,
+        *,
+        kind: str,
+        source_map: Mapping[str, str],
+        profile_scope: str,
+    ) -> tuple[list[dict[str, Any]], int]:
+        if observations is None:
+            observations = []
+        if not isinstance(observations, Sequence) or isinstance(observations, (str, bytes)):
+            raise ValidationError("observations must be a JSON array")
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, int | None, str | None]] = set()
+        duplicates = 0
+        for index, observation in enumerate(observations):
+            if not isinstance(observation, Mapping):
+                raise ValidationError(f"observations[{index}] must be an object")
+            field_prefix = f"observations[{index}]"
+            dimension = _audience_choice(
+                observation.get("dimension"),
+                f"{field_prefix}.dimension",
+                AUDIENCE_DIMENSIONS,
+            )
+            bucket = require_text(observation.get("bucket"), f"{field_prefix}.bucket")
+            evidence_level = _audience_choice(
+                observation.get("evidence_level"),
+                f"{field_prefix}.evidence_level",
+                AUDIENCE_EVIDENCE_LEVELS,
+            )
+            value_low = _audience_share(observation.get("value_low"), f"{field_prefix}.value_low")
+            value_high = _audience_share(
+                observation.get("value_high"), f"{field_prefix}.value_high"
+            )
+            value_mid = _audience_share(observation.get("value_mid"), f"{field_prefix}.value_mid")
+            known_values = [value for value in (value_low, value_mid, value_high) if value is not None]
+            if any(left > right for left, right in zip(known_values, known_values[1:])):
+                raise ValidationError(
+                    f"{field_prefix} requires 0 <= value_low <= value_mid <= value_high <= 1",
+                    details={
+                        "value_low": value_low,
+                        "value_mid": value_mid,
+                        "value_high": value_high,
+                    },
+                )
+            rank = _audience_integer(observation.get("rank"), f"{field_prefix}.rank", minimum=1)
+            sample_n = _audience_integer(
+                observation.get("sample_n"), f"{field_prefix}.sample_n", minimum=0
+            )
+            is_proxy = observation.get("is_proxy", 1)
+            if isinstance(is_proxy, bool) or is_proxy not in (0, 1):
+                raise ValidationError(f"{field_prefix}.is_proxy must be 0 or 1")
+            source_id = self._resolve_audience_source_id(
+                observation.get("source_id"), source_map, f"{field_prefix}.source_id"
+            )
+            if kind == "chart_evidence":
+                if dimension not in CHART_EVIDENCE_OBSERVATION_DIMENSIONS:
+                    raise ValidationError(
+                        "chart evidence observations require dimension "
+                        "generation_hint, scene, or tribe",
+                        details={"dimension": dimension},
+                    )
+                if evidence_level != "3_proxy":
+                    raise ValidationError(
+                        "chart evidence observations require evidence_level=3_proxy",
+                        details={"dimension": dimension, "bucket": bucket},
+                    )
+                if is_proxy != 1:
+                    raise ValidationError("chart evidence observations require is_proxy=1")
+                if rank is None:
+                    raise ValidationError(
+                        "chart evidence observations require rank",
+                        details={"dimension": dimension, "bucket": bucket},
+                    )
+            dedupe_key = (dimension, bucket, rank, source_id)
+            if dedupe_key in seen:
+                duplicates += 1
+                continue
+            seen.add(dedupe_key)
+            rows.append(
+                {
+                    "dimension": dimension,
+                    "bucket": bucket,
+                    "value_low": value_low,
+                    "value_high": value_high,
+                    "value_mid": value_mid,
+                    "rank": rank,
+                    "sample_n": sample_n,
+                    "evidence_level": evidence_level,
+                    "is_proxy": int(is_proxy),
+                    "source_id": source_id,
+                }
+            )
+        # Observation rows are profile-scoped internals: ids are always derived
+        # from the profile identity plus the observation content so the same
+        # fixture can be imported under two time windows without an id clash.
+        for row in rows:
+            row["id"] = _stable_id(
+                "audience_observation",
+                profile_scope,
+                row["dimension"],
+                row["bucket"],
+                "" if row["rank"] is None else str(row["rank"]),
+                row["source_id"] or "",
+            )
+        return rows, duplicates
+
+    def _validate_audience_entries(
+        self,
+        entries: Any,
+        *,
+        recording_id: str,
+        source_map: Mapping[str, str],
+    ) -> tuple[list[dict[str, Any]], int]:
+        if entries is None:
+            entries = []
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+            raise ValidationError("entries must be a JSON array")
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        duplicates = 0
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, Mapping):
+                raise ValidationError(f"entries[{index}] must be an object")
+            field_prefix = f"entries[{index}]"
+            entry_type = _audience_choice(
+                entry.get("entry_type"), f"{field_prefix}.entry_type", AUDIENCE_ENTRY_TYPES
+            )
+            # Unknown performers/release dates are stored as empty strings, never
+            # NULL, so the recording-scoped UNIQUE key keeps working.
+            performer = _audience_optional_text(
+                entry.get("performer"), f"{field_prefix}.performer"
+            )
+            released_at = _audience_optional_text(
+                entry.get("released_at"), f"{field_prefix}.released_at"
+            )
+            relation = entry.get("relation_to_original")
+            if relation is not None and str(relation).strip():
+                relation = _audience_choice(
+                    relation,
+                    f"{field_prefix}.relation_to_original",
+                    AUDIENCE_ENTRY_RELATIONS,
+                )
+            else:
+                relation = None
+            source_id = self._resolve_audience_source_id(
+                entry.get("source_id"), source_map, f"{field_prefix}.source_id"
+            )
+            dedupe_key = (entry_type, performer, released_at)
+            if dedupe_key in seen:
+                duplicates += 1
+                continue
+            seen.add(dedupe_key)
+            rows.append(
+                {
+                    "id": str(entry.get("id") or "").strip() or None,
+                    "entry_type": entry_type,
+                    "performer": performer,
+                    "released_at": released_at,
+                    "platform": _audience_optional_text(
+                        entry.get("platform"), f"{field_prefix}.platform"
+                    )
+                    or None,
+                    "relation_to_original": relation,
+                    "weight_basis": _audience_optional_text(
+                        entry.get("weight_basis"), f"{field_prefix}.weight_basis"
+                    )
+                    or None,
+                    "source_id": source_id,
+                }
+            )
+        for row in rows:
+            if row["id"] is None:
+                row["id"] = _stable_id(
+                    "audience_entry",
+                    recording_id,
+                    row["entry_type"],
+                    row["performer"],
+                    row["released_at"],
+                )
+        return rows, duplicates
+
+    def _upsert_audience_profile(
+        self, recording_id: str, profile: Mapping[str, Any]
+    ) -> str:
+        existing = self.connection.execute(
+            """
+            SELECT id FROM audience_profile
+            WHERE recording_id = ? AND target_platform = ? AND time_window = ?
+              AND method_version = ? AND researched_at = ?
+            """,
+            (
+                recording_id,
+                profile["target_platform"],
+                profile["time_window"],
+                profile["method_version"],
+                profile["researched_at"],
+            ),
+        ).fetchone()
+        values = (
+            profile["window_start"],
+            profile["window_end"],
+            profile["method_id"],
+            profile["status"],
+            profile["confidence"],
+            profile["is_proxy"],
+            profile["basis_note"],
+            profile["coverage_note"],
+            profile["payload_path"],
+        )
+        if existing is not None:
+            profile_id = str(existing["id"])
+            self.connection.execute(
+                """
+                UPDATE audience_profile
+                SET window_start = ?, window_end = ?, method_id = ?, status = ?,
+                    confidence = ?, is_proxy = ?, basis_note = ?,
+                    coverage_note = ?, payload_path = ?
+                WHERE id = ?
+                """,
+                (*values, profile_id),
+            )
+            return profile_id
+        profile_id = profile["id"] or _stable_id(
+            "audience_profile",
+            recording_id,
+            profile["target_platform"],
+            profile["time_window"],
+            profile["method_version"],
+            profile["researched_at"],
+        )
+        self.connection.execute(
+            """
+            INSERT INTO audience_profile(
+                id, recording_id, target_platform, time_window, window_start,
+                window_end, method_id, method_version, status, confidence,
+                is_proxy, researched_at, basis_note, coverage_note, payload_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                profile_id,
+                recording_id,
+                profile["target_platform"],
+                profile["time_window"],
+                profile["window_start"],
+                profile["window_end"],
+                profile["method_id"],
+                profile["method_version"],
+                profile["status"],
+                profile["confidence"],
+                profile["is_proxy"],
+                profile["researched_at"],
+                profile["basis_note"],
+                profile["coverage_note"],
+                profile["payload_path"],
+            ),
+        )
+        return profile_id
+
+    def get_audience(
+        self,
+        recording_id: str,
+        *,
+        window: str | None = None,
+        method: str | None = None,
+    ) -> dict[str, Any]:
+        """Read one recording's audience records grouped into research vs chart evidence."""
+
+        recording = self.connection.execute(
+            "SELECT id, canonical_title, version_label FROM recording WHERE id = ?",
+            (recording_id,),
+        ).fetchone()
+        if recording is None:
+            raise NotFoundError(f"No recording found for audience {recording_id}")
+        if window is not None:
+            window = require_text(window, "window")
+            if window not in AUDIENCE_TIME_WINDOWS:
+                raise ValidationError(
+                    "window must be one of: "
+                    + ", ".join(sorted(AUDIENCE_TIME_WINDOWS)),
+                    details={"window": window},
+                )
+        if method is not None:
+            method = require_text(method, "method")
+        clauses = ["p.recording_id = ?"]
+        params: list[Any] = [recording_id]
+        if window:
+            clauses.append("p.time_window = ?")
+            params.append(window)
+        if method:
+            clauses.append("p.method_id = ?")
+            params.append(method)
+        profiles = _rows_to_dicts(
+            self.connection.execute(
+                f"""
+                SELECT p.* FROM audience_profile p
+                WHERE {' AND '.join(clauses)}
+                ORDER BY p.researched_at DESC, p.method_version DESC, p.id DESC
+                """,
+                params,
+            )
+        )
+        profile_groups: dict[str, str] = {}
+        for profile in profiles:
+            is_chart = (
+                profile["time_window"] == CHART_EVIDENCE_TIME_WINDOW
+                or profile["method_id"] == CHART_EVIDENCE_METHOD_ID
+            )
+            profile_groups[str(profile["id"])] = "chart_evidence" if is_chart else "research"
+        observations = _rows_to_dicts(
+            self.connection.execute(
+                f"""
+                SELECT o.* FROM audience_observation o
+                WHERE o.profile_id IN ({','.join('?' for _ in profiles) or "''"})
+                ORDER BY o.profile_id, o.dimension, o.bucket, o.rank
+                """,
+                [profile["id"] for profile in profiles],
+            )
+            if profiles
+            else []
+        )
+        entries = _rows_to_dicts(
+            self.connection.execute(
+                """
+                SELECT * FROM audience_entry WHERE recording_id = ?
+                ORDER BY entry_type, performer, released_at, id
+                """,
+                (recording_id,),
+            )
+        )
+        source_ids = {
+            str(row["source_id"])
+            for row in (*observations, *entries)
+            if row["source_id"] is not None
+        }
+        sources = _rows_to_dicts(
+            self.connection.execute(
+                f"SELECT * FROM audience_source WHERE id IN ({','.join('?' for _ in source_ids)}) "
+                "ORDER BY source_platform, source_key",
+                sorted(source_ids),
+            )
+        ) if source_ids else []
+        tag_rows = _rows_to_dicts(
+            self.connection.execute(
+                """
+                SELECT t.id AS tag_id, t.namespace, t.canonical_name, t.path,
+                       t.lifecycle_status, rt.role
+                FROM recording_tag rt JOIN tag t ON t.id = rt.tag_id
+                WHERE rt.recording_id = ?
+                  AND (rt.role IN ('audience', 'audience-hint')
+                       OR t.namespace IN ('audience', 'audience-hint'))
+                ORDER BY t.namespace, t.canonical_name
+                """,
+                (recording_id,),
+            )
+        )
+        for tag in tag_rows:
+            tag["aliases"] = [
+                str(alias["alias"])
+                for alias in self.connection.execute(
+                    "SELECT alias FROM tag_alias WHERE tag_id = ? ORDER BY alias",
+                    (tag["tag_id"],),
+                )
+            ]
+            del tag["tag_id"]
+        sources_by_id = {str(source["id"]): source for source in sources}
+        groups: dict[str, dict[str, Any]] = {
+            "research": {
+                "group": "research",
+                "label": "调研画像",
+                "profiles": [],
+                "observations": [],
+                "sources": [],
+                "entries": entries,
+                "tags": tag_rows,
+                "coverage_gaps": [],
+            },
+            "chart_evidence": {
+                "group": "chart_evidence",
+                "label": "榜单证据",
+                "profiles": [],
+                "observations": [],
+                "sources": [],
+                "entries": entries,
+                "tags": tag_rows,
+                "coverage_gaps": [],
+            },
+        }
+        referenced_sources: dict[str, set[str]] = {"research": set(), "chart_evidence": set()}
+        for profile in profiles:
+            group = profile_groups[str(profile["id"])]
+            groups[group]["profiles"].append(profile)
+            if profile["coverage_note"]:
+                groups[group]["coverage_gaps"].append(
+                    {
+                        "profile_id": str(profile["id"]),
+                        "time_window": profile["time_window"],
+                        "note": str(profile["coverage_note"]),
+                    }
+                )
+        for observation in observations:
+            group = profile_groups.get(str(observation["profile_id"]))
+            if group is None:
+                continue
+            groups[group]["observations"].append(observation)
+            if observation["source_id"] is not None:
+                referenced_sources[group].add(str(observation["source_id"]))
+        for group_name, group in groups.items():
+            group_sources = set(referenced_sources[group_name])
+            if entries:
+                group_sources.update(
+                    str(entry["source_id"])
+                    for entry in entries
+                    if entry["source_id"] is not None
+                )
+            group["sources"] = [
+                sources_by_id[source_id]
+                for source_id in sorted(group_sources)
+                if source_id in sources_by_id
+            ]
+        chart_note = "榜单证据来自公开榜单快照，只代表「进过哪些池子」，不代表受众占比。"
+        return {
+            "recording_id": str(recording["id"]),
+            "title": str(recording["canonical_title"]),
+            "version_label": str(recording["version_label"]),
+            "filters": {"window": window, "method": method},
+            "groups": [groups["research"], groups["chart_evidence"]],
+            "profiles": profiles,
+            "observations": observations,
+            "sources": sources,
+            "entries": entries,
+            "tags": tag_rows,
+            "coverage_gaps": [
+                gap for group in groups.values() for gap in group["coverage_gaps"]
+            ],
+            "counts": {
+                "profiles": len(profiles),
+                "observations": len(observations),
+                "sources": len(sources),
+                "entries": len(entries),
+                "tags": len(tag_rows),
+            },
+            "chart_evidence_note": chart_note,
+        }
+
+    def audience_summary(self, recording_id: str) -> dict[str, Any]:
+        """Compact audience view embedded in the canonical-analysis read paths."""
+
+        audience = self.get_audience(recording_id)
+        groups = []
+        for group in audience["groups"]:
+            profiles = group["profiles"]
+            latest = profiles[0] if profiles else None
+            groups.append(
+                {
+                    "group": group["group"],
+                    "label": group["label"],
+                    "profile_count": len(profiles),
+                    "observation_count": len(group["observations"]),
+                    "latest_researched_at": str(latest["researched_at"]) if latest else None,
+                    "time_windows": sorted({str(profile["time_window"]) for profile in profiles}),
+                    "dimensions": sorted(
+                        {str(observation["dimension"]) for observation in group["observations"]}
+                    ),
+                    "coverage_gaps": group["coverage_gaps"],
+                }
+            )
+        return {
+            "recorded": bool(audience["counts"]["profiles"] or audience["tags"]),
+            "groups": groups,
+            "tags": audience["tags"],
+            "counts": audience["counts"],
+            "coverage_gaps": audience["coverage_gaps"],
+            "chart_evidence_note": audience["chart_evidence_note"],
+        }
+
     def enrich_campaign_tags(
         self, *, dry_run: bool = False, batch_size: int = DEFAULT_ENRICH_BATCH_SIZE
     ) -> dict[str, Any]:
@@ -1421,6 +2689,194 @@ class MusicKBRepository:
                 "INSERT OR IGNORE INTO recording_tag(recording_id, tag_id, role) VALUES (?, ?, 'artist')",
                 (recording_id, artist_tag),
             )
+
+    # -- audience tag projection ------------------------------------------
+
+    def rebuild_audience_tags(
+        self, *, recording_ids: Iterable[str] | None = None
+    ) -> dict[str, Any]:
+        """Rebuild recording-level audience tags from the current audience records.
+
+        ``recording_ids=None`` rebuilds the whole library, which is what
+        :meth:`import_audience` runs after every successful import. One set of
+        ``audience`` tags comes from the recording's newest research profile
+        (``full_lifecycle`` wins a same-``researched_at`` tie, then
+        ``method_version``/``id`` descending); one set of ``audience-hint`` tags
+        comes from the global newest chart snapshot
+        (``method_id='chart_signal_v1'`` at ``MAX(researched_at)``). A chart
+        snapshot that does not hit a recording therefore removes its previous
+        hint. Repeated runs replace rather than stack, and the full public key
+        (``audience/age/31-40``, ``audience-hint/gen/00后``) is registered as a
+        ``tag_alias`` so the existing exact ``--tag`` retrieval resolves it.
+        """
+
+        self._require_writer()
+        scope: set[str] | None = None
+        if recording_ids is not None:
+            scope = {str(recording_id) for recording_id in recording_ids if str(recording_id)}
+        tag_plan: dict[str, set[tuple[str, str]]] = {}
+        research_recordings = 0
+        chart_recordings = 0
+
+        research_profiles = list(
+            self.connection.execute(
+                """
+                SELECT p.id, p.recording_id
+                FROM audience_profile p
+                WHERE p.time_window IN ('first_wave', 'full_lifecycle')
+                  AND p.id = (
+                      SELECT p2.id FROM audience_profile p2
+                      WHERE p2.recording_id = p.recording_id
+                        AND p2.time_window IN ('first_wave', 'full_lifecycle')
+                      ORDER BY p2.researched_at DESC,
+                               CASE p2.time_window WHEN 'full_lifecycle' THEN 0 ELSE 1 END,
+                               p2.method_version DESC,
+                               p2.id DESC
+                      LIMIT 1
+                  )
+                ORDER BY p.recording_id
+                """
+            )
+        )
+        for profile in research_profiles:
+            recording_id = str(profile["recording_id"])
+            if scope is not None and recording_id not in scope:
+                continue
+            research_recordings += 1
+            tag_plan.setdefault(recording_id, set()).update(
+                self._audience_observation_tags(str(profile["id"]), chart_evidence=False)
+            )
+
+        latest_period_row = self.connection.execute(
+            "SELECT MAX(researched_at) AS period FROM audience_profile WHERE method_id = ?",
+            (CHART_EVIDENCE_METHOD_ID,),
+        ).fetchone()
+        latest_period = (
+            str(latest_period_row["period"])
+            if latest_period_row is not None and latest_period_row["period"]
+            else ""
+        )
+        if latest_period:
+            chart_profiles = list(
+                self.connection.execute(
+                    """
+                    SELECT p.id, p.recording_id FROM audience_profile p
+                    WHERE p.method_id = ? AND p.researched_at = ?
+                    ORDER BY p.recording_id
+                    """,
+                    (CHART_EVIDENCE_METHOD_ID, latest_period),
+                )
+            )
+            for profile in chart_profiles:
+                recording_id = str(profile["recording_id"])
+                if scope is not None and recording_id not in scope:
+                    continue
+                chart_recordings += 1
+                tag_plan.setdefault(recording_id, set()).update(
+                    self._audience_observation_tags(str(profile["id"]), chart_evidence=True)
+                )
+
+        tags_written = 0
+        namespaces: set[str] = set()
+        with self.connection:
+            stale_recordings = self._delete_audience_tag_rows(scope)
+            for recording_id in sorted(tag_plan):
+                for namespace, name in sorted(tag_plan[recording_id]):
+                    tag_id = self._ensure_tag(
+                        namespace,
+                        name,
+                        (f"{namespace}/{name}",),
+                        path=name,
+                        lifecycle_status="candidate",
+                    )
+                    cursor = self.connection.execute(
+                        """
+                        INSERT OR IGNORE INTO recording_tag(recording_id, tag_id, role)
+                        VALUES (?, ?, ?)
+                        """,
+                        (recording_id, tag_id, AUDIENCE_TAG_ROLE),
+                    )
+                    tags_written += max(int(cursor.rowcount), 0)
+                    namespaces.add(namespace)
+            orphan_tags_deleted = self._delete_orphan_audience_tags()
+            affected = set(tag_plan) | stale_recordings
+            for recording_id in sorted(affected):
+                self.connection.execute(
+                    "DELETE FROM search_fts WHERE recording_id = ?", (recording_id,)
+                )
+                self._insert_search_projection(recording_id)
+        return {
+            "recordings": len(tag_plan),
+            "tags": tags_written,
+            "research_recordings": research_recordings,
+            "chart_recordings": chart_recordings,
+            "namespaces": sorted(namespaces),
+            "stale_recordings": len(stale_recordings),
+            "orphan_tags_deleted": orphan_tags_deleted,
+            "fts_rebuilt": len(set(tag_plan) | stale_recordings),
+        }
+
+    def _audience_observation_tags(
+        self, profile_id: str, *, chart_evidence: bool
+    ) -> set[tuple[str, str]]:
+        tags: set[tuple[str, str]] = set()
+        for row in self.connection.execute(
+            "SELECT dimension, bucket FROM audience_observation WHERE profile_id = ?",
+            (profile_id,),
+        ):
+            tag = _audience_tag_name(
+                str(row["dimension"]),
+                str(row["bucket"]),
+                chart_evidence=chart_evidence,
+            )
+            if tag is not None:
+                tags.add(tag)
+        return tags
+
+    def _delete_audience_tag_rows(self, scope: set[str] | None) -> set[str]:
+        """Delete existing audience projections and return the touched recordings."""
+
+        condition = (
+            "role IN ('audience', 'audience-hint') "
+            "OR tag_id IN (SELECT id FROM tag WHERE namespace IN ('audience', 'audience-hint'))"
+        )
+        if scope is None:
+            stale = {
+                str(row["recording_id"])
+                for row in self.connection.execute(
+                    f"SELECT DISTINCT recording_id FROM recording_tag WHERE {condition}"
+                )
+            }
+            self.connection.execute(f"DELETE FROM recording_tag WHERE {condition}")
+            return stale
+        stale: set[str] = set()
+        recording_ids = sorted(scope)
+        for start in range(0, len(recording_ids), 500):
+            chunk = recording_ids[start:start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            scoped_condition = f"recording_id IN ({placeholders}) AND ({condition})"
+            stale.update(
+                str(row["recording_id"])
+                for row in self.connection.execute(
+                    f"SELECT DISTINCT recording_id FROM recording_tag WHERE {scoped_condition}",
+                    chunk,
+                )
+            )
+            self.connection.execute(
+                f"DELETE FROM recording_tag WHERE {scoped_condition}", chunk
+            )
+        return stale
+
+    def _delete_orphan_audience_tags(self) -> int:
+        cursor = self.connection.execute(
+            """
+            DELETE FROM tag
+            WHERE namespace IN ('audience', 'audience-hint')
+              AND NOT EXISTS (SELECT 1 FROM recording_tag rt WHERE rt.tag_id = tag.id)
+              AND NOT EXISTS (SELECT 1 FROM analysis_tag at WHERE at.tag_id = tag.id)
+            """
+        )
+        return max(int(cursor.rowcount), 0)
 
     def _upsert_source_track(self, recording_id: str, source: Any) -> None:
         if not isinstance(source, Mapping):
@@ -2603,6 +4059,18 @@ class MusicKBRepository:
             "lyrics_pending": lyric_coverage["pending"],
             "lyrics_missing": lyric_coverage["missing"],
             "lyrics_unresolved": lyric_coverage["unresolved"],
+            "audience_sources": self.connection.execute(
+                "SELECT COUNT(*) FROM audience_source"
+            ).fetchone()[0],
+            "audience_profiles": self.connection.execute(
+                "SELECT COUNT(*) FROM audience_profile"
+            ).fetchone()[0],
+            "audience_observations": self.connection.execute(
+                "SELECT COUNT(*) FROM audience_observation"
+            ).fetchone()[0],
+            "audience_entries": self.connection.execute(
+                "SELECT COUNT(*) FROM audience_entry"
+            ).fetchone()[0],
         }
         return {
             "path": str(self.path),
@@ -3364,6 +4832,7 @@ class MusicKBRepository:
             "tags": _rows_to_dicts(tag_rows),
             "numeric_features": _rows_to_dicts(numeric_rows),
             "campaign_delivery_provenance": delivery_provenance,
+            "audience": self.audience_summary(str(row["id"])),
         }
 
     def tag_facets(
@@ -3514,6 +4983,153 @@ class MusicKBRepository:
         for code, sql in checks:
             for row in self.connection.execute(sql):
                 issues.append({"code": code, "recording_id": str(row[0])})
+        # Audience records are additive evidence: validate their own invariants
+        # but never gate publication on audience coverage (v1 coverage is partial
+        # by design, so there is deliberately no require_audience switch).
+        audience_checks = [
+            (
+                "audience_profile_missing_recording",
+                "profile_id",
+                """
+                SELECT p.id FROM audience_profile p
+                LEFT JOIN recording r ON r.id = p.recording_id
+                WHERE r.id IS NULL
+                """,
+            ),
+            (
+                "audience_profile_noncanonical_recording",
+                "recording_id",
+                """
+                SELECT p.recording_id FROM audience_profile p
+                JOIN recording r ON r.id = p.recording_id
+                WHERE r.canonical_analysis_id IS NULL
+                """,
+            ),
+            (
+                "audience_profile_invalid_enum",
+                "recording_id",
+                f"""
+                SELECT p.recording_id FROM audience_profile p
+                WHERE p.target_platform NOT IN ({','.join(repr(value) for value in sorted(AUDIENCE_TARGET_PLATFORMS))})
+                   OR p.time_window NOT IN ({','.join(repr(value) for value in sorted(AUDIENCE_TIME_WINDOWS))})
+                   OR p.status NOT IN ({','.join(repr(value) for value in sorted(AUDIENCE_PROFILE_STATUSES))})
+                   OR p.confidence NOT IN ({','.join(repr(value) for value in sorted(AUDIENCE_CONFIDENCES))})
+                   OR p.is_proxy NOT IN (0, 1)
+                """,
+            ),
+            (
+                "audience_profile_target_platform_rule",
+                "recording_id",
+                """
+                SELECT p.recording_id FROM audience_profile p
+                WHERE (p.method_id = 'chart_signal_v1' AND p.target_platform <> 'unspecified')
+                   OR (p.method_id <> 'chart_signal_v1' AND p.target_platform <> 'douyin')
+                """,
+            ),
+            (
+                "audience_source_invalid_enum",
+                "source_id",
+                f"""
+                SELECT s.id FROM audience_source s
+                WHERE s.source_platform NOT IN ({','.join(repr(value) for value in sorted(AUDIENCE_SOURCE_PLATFORMS))})
+                   OR s.source_type NOT IN ({','.join(repr(value) for value in sorted(AUDIENCE_SOURCE_TYPES))})
+                   OR s.evidence_level NOT IN ({','.join(repr(value) for value in sorted(AUDIENCE_EVIDENCE_LEVELS))})
+                """,
+            ),
+            (
+                "audience_source_empty_key",
+                "source_id",
+                "SELECT id FROM audience_source WHERE trim(source_key) = ''",
+            ),
+            (
+                "audience_observation_empty_bucket",
+                "profile_id",
+                """
+                SELECT o.profile_id FROM audience_observation o
+                WHERE o.bucket IS NULL OR trim(o.bucket) = ''
+                """,
+            ),
+            (
+                "audience_observation_invalid_enum",
+                "profile_id",
+                f"""
+                SELECT o.profile_id FROM audience_observation o
+                WHERE o.dimension NOT IN ({','.join(repr(value) for value in sorted(AUDIENCE_DIMENSIONS))})
+                   OR o.evidence_level NOT IN ({','.join(repr(value) for value in sorted(AUDIENCE_EVIDENCE_LEVELS))})
+                   OR o.is_proxy NOT IN (0, 1)
+                """,
+            ),
+            (
+                "audience_observation_invalid_share",
+                "profile_id",
+                """
+                SELECT o.profile_id FROM audience_observation o
+                WHERE (o.value_low IS NOT NULL AND (o.value_low < 0 OR o.value_low > 1))
+                   OR (o.value_mid IS NOT NULL AND (o.value_mid < 0 OR o.value_mid > 1))
+                   OR (o.value_high IS NOT NULL AND (o.value_high < 0 OR o.value_high > 1))
+                   OR (o.value_low IS NOT NULL AND o.value_mid IS NOT NULL AND o.value_low > o.value_mid)
+                   OR (o.value_mid IS NOT NULL AND o.value_high IS NOT NULL AND o.value_mid > o.value_high)
+                   OR (o.value_low IS NOT NULL AND o.value_high IS NOT NULL AND o.value_low > o.value_high)
+                """,
+            ),
+            (
+                "audience_observation_invalid_rank",
+                "profile_id",
+                """
+                SELECT o.profile_id FROM audience_observation o
+                WHERE (o.rank IS NOT NULL AND o.rank < 1)
+                   OR (o.sample_n IS NOT NULL AND o.sample_n < 0)
+                """,
+            ),
+            (
+                "audience_observation_source_missing",
+                "profile_id",
+                """
+                SELECT o.profile_id FROM audience_observation o
+                LEFT JOIN audience_source s ON s.id = o.source_id
+                WHERE o.source_id IS NOT NULL AND s.id IS NULL
+                """,
+            ),
+            (
+                "audience_entry_missing_recording",
+                "entry_id",
+                """
+                SELECT e.id FROM audience_entry e
+                LEFT JOIN recording r ON r.id = e.recording_id
+                WHERE r.id IS NULL
+                """,
+            ),
+            (
+                "audience_entry_invalid_enum",
+                "recording_id",
+                f"""
+                SELECT e.recording_id FROM audience_entry e
+                WHERE e.entry_type NOT IN ({','.join(repr(value) for value in sorted(AUDIENCE_ENTRY_TYPES))})
+                   OR (e.relation_to_original IS NOT NULL
+                       AND e.relation_to_original NOT IN ({','.join(repr(value) for value in sorted(AUDIENCE_ENTRY_RELATIONS))}))
+                """,
+            ),
+            (
+                "audience_entry_null_identity",
+                "recording_id",
+                """
+                SELECT recording_id FROM audience_entry
+                WHERE performer IS NULL OR released_at IS NULL
+                """,
+            ),
+            (
+                "audience_entry_source_missing",
+                "recording_id",
+                """
+                SELECT e.recording_id FROM audience_entry e
+                LEFT JOIN audience_source s ON s.id = e.source_id
+                WHERE e.source_id IS NOT NULL AND s.id IS NULL
+                """,
+            ),
+        ]
+        for code, identity_key, sql in audience_checks:
+            for row in self.connection.execute(sql):
+                issues.append({"code": code, identity_key: str(row[0])})
         lyric_rows = self.connection.execute(
             """
             SELECT rl.recording_id, rl.source_track_row_id, rl.status,
@@ -3645,6 +5261,65 @@ def iter_import_file(path: str | Path) -> Iterable[dict[str, Any]]:
         raise ValidationError(f"Unable to read import input: {source}") from exc
     if use_legacy_decoder:
         yield from load_import_file(source)
+
+
+def iter_audience_file(path: str | Path) -> Iterable[tuple[int, dict[str, Any]]]:
+    """Yield ``(line_number, record)`` for an audience JSON object/JSONL input.
+
+    The scalable shape is a physical-LF ``.jsonl``/``.ndjson`` stream: records
+    keep their physical line number so the importer can report per-record
+    validation failures precisely. JSON objects/arrays and the historical
+    pretty-printed-object-saved-as-jsonl shape fall back to the shared whole
+    file loader and use 1-based record positions instead.
+    """
+
+    source = Path(path)
+    if not source.is_file():
+        raise ValidationError(f"Audience input does not exist: {source}")
+    if source.suffix.casefold() not in {".jsonl", ".ndjson"}:
+        for index, payload in enumerate(load_import_file(source), 1):
+            yield index, payload
+        return
+    use_legacy_decoder = False
+    try:
+        with source.open("rb") as handle:
+            lines = enumerate(handle, 1)
+            first: tuple[int, bytes] | None = None
+            for line_number, raw_line in lines:
+                if raw_line.strip():
+                    first = (line_number, raw_line)
+                    break
+            if first is None:
+                raise ValidationError("Audience JSONL cannot be empty")
+            first_line_number, first_raw_line = first
+            if b"\r" in first_raw_line or not first_raw_line.endswith(b"\n"):
+                raise ValidationError(
+                    "Audience JSONL requires physical LF line endings and a final LF",
+                    details={"line": first_line_number},
+                )
+            if first_raw_line.lstrip().startswith(b"["):
+                use_legacy_decoder = True
+            else:
+                try:
+                    first_item = _decode_jsonl_object(first_raw_line, first_line_number)
+                except ValidationError:
+                    use_legacy_decoder = True
+                else:
+                    yield first_line_number, first_item
+                    for line_number, raw_line in lines:
+                        if not raw_line.strip():
+                            continue
+                        if b"\r" in raw_line or not raw_line.endswith(b"\n"):
+                            raise ValidationError(
+                                "Audience JSONL requires physical LF line endings and a final LF",
+                                details={"line": line_number},
+                            )
+                        yield line_number, _decode_jsonl_object(raw_line, line_number)
+    except OSError as exc:
+        raise ValidationError(f"Unable to read audience input: {source}") from exc
+    if use_legacy_decoder:
+        for index, payload in enumerate(load_import_file(source), 1):
+            yield index, payload
 
 
 def load_import_file(path: str | Path) -> list[dict[str, Any]]:

@@ -110,6 +110,45 @@ def create_snapshot(
                       AND NOT EXISTS (SELECT 1 FROM recording_tag rt WHERE rt.tag_id = tag.id)
                     """
                 )
+                # Audience evidence is versioned in the master but a client
+                # release only needs the newest profile per
+                # (recording, target_platform, time_window, method_id). Readers
+                # replay the same ordering: researched_at, method_version, id.
+                snapshot.connection.execute(
+                    """
+                    DELETE FROM audience_profile
+                    WHERE EXISTS (
+                        SELECT 1 FROM audience_profile newer
+                        WHERE newer.recording_id = audience_profile.recording_id
+                          AND newer.target_platform = audience_profile.target_platform
+                          AND newer.time_window = audience_profile.time_window
+                          AND newer.method_id = audience_profile.method_id
+                          AND (
+                              newer.researched_at > audience_profile.researched_at
+                              OR (newer.researched_at = audience_profile.researched_at
+                                  AND newer.method_version > audience_profile.method_version)
+                              OR (newer.researched_at = audience_profile.researched_at
+                                  AND newer.method_version = audience_profile.method_version
+                                  AND newer.id > audience_profile.id)
+                          )
+                    )
+                    """
+                )
+                # A source is public evidence only while an observation or a
+                # version entry still references it. Publisher-local paths are
+                # never distributed to clients.
+                snapshot.connection.execute(
+                    """
+                    DELETE FROM audience_source
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM audience_observation o WHERE o.source_id = audience_source.id
+                    )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM audience_entry e WHERE e.source_id = audience_source.id
+                    )
+                    """
+                )
+                snapshot.connection.execute("UPDATE audience_source SET local_path = NULL")
                 snapshot.connection.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES ('database_kind', 'snapshot')"
                 )

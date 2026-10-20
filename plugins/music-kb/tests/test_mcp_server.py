@@ -71,7 +71,7 @@ def test_mcp_rejects_v7_snapshot(embedded_snapshot):
         connection.execute("UPDATE meta SET value='7' WHERE key='schema_version'")
     api = ReadOnlyMusicKB(database)
     for operation in (api.status, lambda: api.similar(recording_id="rec_neon_night_studio")):
-        with pytest.raises(DatabaseNotInitializedError, match="Unsupported schema version 7; expected 8"):
+        with pytest.raises(DatabaseNotInitializedError, match="Unsupported schema version 7; expected 9"):
             operation()
 
 
@@ -117,6 +117,73 @@ def test_read_only_mcp_facade_searches_canonical_data(master_database) -> None:
         {"namespace": "production", "name": "granular vocal chop"}
     ]
     assert "source_links" not in recommended["results"][0]
+
+
+def test_mcp_canonical_analysis_returns_audience_summary(master_database) -> None:
+    from music_kb.repository import MusicKBRepository
+
+    audience_rows = [
+        {
+            "kind": "profile",
+            "recording": {"recording_id": "rec_neon_night_studio"},
+            "profile": {
+                "target_platform": "douyin",
+                "time_window": "full_lifecycle",
+                "window_start": "2026-07-20",
+                "window_end": "2026-10-19",
+                "method_id": "version-matrix",
+                "method_version": "v1.1",
+                "status": "available",
+                "confidence": "low",
+                "is_proxy": 1,
+                "researched_at": "2026-10-20",
+                "coverage_note": "no platform audience report; intervals are inferred",
+            },
+            "observations": [
+                {
+                    "dimension": "age",
+                    "bucket": "31-40",
+                    "value_low": 0.3,
+                    "value_high": 0.34,
+                    "value_mid": 0.32,
+                    "evidence_level": "4_inferred",
+                },
+                {
+                    "dimension": "gender",
+                    "bucket": "female",
+                    "evidence_level": "4_inferred",
+                },
+            ],
+        }
+    ]
+    with MusicKBRepository(master_database) as repository:
+        assert repository.import_audience(audience_rows)["errors"] == 0
+
+    api = ReadOnlyMusicKB(master_database)
+    canonical = api.get_canonical_analysis(recording_id="rec_neon_night_studio")
+    summary = canonical["audience"]
+    assert summary["recorded"] is True
+    assert [group["group"] for group in summary["groups"]] == ["research", "chart_evidence"]
+    research = summary["groups"][0]
+    assert research["profile_count"] == 1
+    assert research["observation_count"] == 2
+    assert research["latest_researched_at"] == "2026-10-20"
+    assert research["dimensions"] == ["age", "gender"]
+    assert {(tag["namespace"], tag["canonical_name"]) for tag in summary["tags"]} == {
+        ("audience", "age/31-40"),
+        ("audience", "gender/female"),
+    }
+    assert "不代表受众占比" in summary["chart_evidence_note"]
+
+    server = create_server(master_database)
+    _, structured = asyncio.run(
+        server.call_tool(
+            "music_kb_get_canonical_analysis",
+            {"recording_id": "rec_neon_night_studio"},
+        )
+    )
+    assert structured["audience"] == summary
+    assert api.search(tags=["audience/age/31-40"])["count"] == 1
 
 
 def test_mcp_server_exposes_only_retrieval_tools(master_database) -> None:

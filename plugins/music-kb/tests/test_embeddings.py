@@ -247,11 +247,11 @@ def test_real_v7_database_upgrades_with_data_intact(tmp_path):
             "INSERT INTO recording(id, canonical_title, normalized_title, audio_sha256) "
             "VALUES ('legacy', 'Legacy song', 'legacy song', ?)", ("b" * 64,)
         )
-    with pytest.raises(DatabaseNotInitializedError, match="expected 8"):
+    with pytest.raises(DatabaseNotInitializedError, match="expected 9"):
         MusicKBRepository(database, read_only=True)
     initialize_database(database)
     with MusicKBRepository(database) as repository:
-        assert repository.status()["schema_version"] == 8
+        assert repository.status()["schema_version"] == 9
         assert repository.status()["counts"]["embedding_models"] == 0
         assert repository.status()["counts"]["recordings"] == 2
         assert repository.search(title="Legacy song") == []

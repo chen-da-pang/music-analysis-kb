@@ -88,9 +88,20 @@ uv run music-kb --json weekly-run \
   --peers-file "$HOME/.config/music-kb/peers.toml" \
   --output-dir "$HOME/.music-kb/releases" \
   --release-name music-kb-2026w30 \
+  --audience /path/to/audience-profiles.jsonl \
+  --audience-charts /path/to/music-workspace/data/weekly_runs/kugou-2026w30/audience-charts \
   --cnb-transport lfs \
   --download-dry-run
 ```
+
+The audience flags are optional: `--audience` supplies the SOP research
+profile JSONL and `--audience-charts` selects the audience chart directory
+(default `run_dir/audience-charts`). A fresh run captures the 24 audience
+charts live into that directory. If the directory already holds an
+`audience-charts-manifest.json` **or** a normalized `-songs.json` page for every
+profile chart (a manual-gate pre-capture), the capture atom reuses it and skips
+live kugou-cli capture; a malformed manifest or a capture failure is recorded as
+a `coverage_gaps` entry instead of blocking publication.
 
 This fresh path captures the full configured chart profile, dedupes against the
 inventory, asks Claude Code to download only the queue, materializes a new
@@ -264,6 +275,51 @@ Installation verifies the release and atomically switches `current.sqlite`.
 Verify its target, schema 8, snapshot kind and embedding counts, then exercise
 all channels and MCP reads before updating clients. These local commands do
 not push to peers; peer distribution requires a separate explicit decision.
+
+## Audience records release (schema v9)
+
+Schema v9 adds the four additive `audience_*` tables plus the
+`import-audience` / `get-audience` commands and plugin version 0.9.0. The
+schema-v9 PR (#139) deliberately does **not** create or publish a v9 snapshot
+and does **not** upgrade any peer: those are post-merge publisher steps.
+
+The real release order is:
+
+1. **Upgrade clients/peers first.** Install plugin 0.9.0 (the distribution
+   compatibility gate requires the remote plugin to be at least the publisher's
+   version). A v8 client cannot open a v9 snapshot, and queries never migrate a
+   read-only database.
+2. **Migrate the publisher master.** `music-kb init --db ...` performs the
+   v8→v9 migration: it only creates the audience tables, indexes, and foreign
+   keys and does not rewrite analyses, tags, lyrics, embeddings, or FTS data.
+   The migration is idempotent, so an interrupted `init` can simply be rerun.
+3. **Validate.** `music-kb validate --db ...` must pass. Audience coverage is
+   never a gate; the new checks only cover audience foreign keys, enums, the
+   target-platform rule, bucket non-emptiness, share bounds, and entry identity.
+4. **Import audience evidence (optional, non-blocking).** Run
+   `music-kb import-audience --db ... --input <profiles.jsonl> --kind profile`
+   for SOP research output and `--kind chart_evidence` for the weekly chart
+   snapshot. A failed record is reported by line; remaining lines commit.
+   Missing research coverage stays in the profile's `coverage_note`, while a
+   missing or partial chart capture is reported in the weekly atoms'
+   `coverage_gaps`; neither blocks the release. Each successful import
+   automatically rebuilds the recording-level
+   `audience` / `audience-hint` tags, so `search/recommend/discover --tag
+   audience/age/31-40` works immediately and the subsequent snapshot carries the
+   projection. `weekly-run` and `weekly-update` already run this step (via
+   `--audience` / `--audience-charts`; a failed or partial chart capture is
+   reported in their `coverage_gaps`); the explicit `import-audience` command is
+   for a manual publisher import outside a weekly run.
+5. **Rebuild and verify a v9 snapshot.** `snapshot create` keeps only the newest
+   profile per `(recording_id, target_platform, time_window, method_id)`,
+   carries entries of all canonical recordings, prunes orphan sources, clears
+   `local_path`, and writes `audience_*` counts into `manifest.json`. Then run
+   `snapshot verify`.
+6. **Install locally, then publish.** Use the normal verified local install and
+   an explicit `publish push` dry-run before any peer distribution.
+
+Do not distribute the v9 release before step 1 completes; a mixed fleet would
+silently fail the schema check on every client read.
 
 ## Historical schema v7 publisher upgrade
 

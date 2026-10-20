@@ -16,9 +16,9 @@ def test_plugin_manifest_and_mcp_config_are_present() -> None:
     manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
     mcp = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
     assert manifest["name"] == "music-kb"
-    assert manifest["version"] == "0.8.5"
+    assert manifest["version"] == "0.9.0"
     assert _current_plugin_version() == manifest["version"]
-    assert SCHEMA_VERSION == 8
+    assert SCHEMA_VERSION == 9
     assert "suno" not in json.dumps(manifest, ensure_ascii=False).casefold()
     assert manifest["mcpServers"] == "./.mcp.json"
     assert mcp["mcpServers"]["music-kb"]["command"] == "uv"
@@ -647,6 +647,6 @@ def test_plugin_version_is_kept_in_sync() -> None:
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     lockfile = (root / "uv.lock").read_text(encoding="utf-8")
     version = manifest["version"]
-    assert version == "0.8.5"
+    assert version == "0.9.0"
     assert f'version = "{version}"' in pyproject
     assert f'name = "music-kb"\nversion = "{version}"' in lockfile

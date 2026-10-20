@@ -69,6 +69,20 @@
   .nb .t div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .nb .t span { color: var(--muted); font-size: 12px; }
   .note { color: var(--muted); font-size: 12px; line-height: 1.7; }
+  .au-block { border: 1px solid var(--line); border-radius: 8px; background: #12151a;
+    padding: 8px 10px; margin: 4px 0 2px; }
+  .au-group { padding: 3px 0; }
+  .au-group + .au-group { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 7px; }
+  .au-title { font-size: 12px; font-weight: 600; color: var(--ink); margin: 1px 0 4px; }
+  .au-title small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+  .au-row { display: flex; gap: 8px; font-size: 12px; padding: 1px 0; }
+  .au-row .k { color: var(--muted); min-width: 56px; flex: none; }
+  .au-row .v { color: var(--ink); flex: none; }
+  .au-row .e { color: var(--muted); }
+  .au-sources { color: var(--muted); font-size: 12px; margin-top: 4px; word-break: break-all; }
+  .au-sources a { color: var(--accent); }
+  .chip { display: inline-block; margin: 2px 4px 2px 0; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--soft); color: var(--muted); font-size: 11px; }
   details.lyrics { margin: 8px 0 4px; border: 1px solid var(--line); border-radius: 8px;
     background: #12151a; }
   details.lyrics summary { cursor: pointer; padding: 8px 10px; color: var(--muted); font-size: 12px; }
@@ -269,6 +283,69 @@
     return channel().clusters.find(cluster => cluster.id === song.cluster);
   }
 
+  const EVIDENCE_LABELS = {
+    "1_platform_public": "① 平台公开",
+    "2_media": "② 媒体报道",
+    "3_proxy": "③ 代理证据",
+    "4_inferred": "④ 推断",
+  };
+
+  function evidenceLabel(level) {
+    return EVIDENCE_LABELS[level] || String(level);
+  }
+
+  function audienceItemDetail(item) {
+    if (item.rank !== null && item.rank !== undefined) return `榜单第 ${item.rank} 名`;
+    if (item.value_low !== null && item.value_low !== undefined
+        && item.value_high !== null && item.value_high !== undefined) {
+      return `推断区间 ${Math.round(item.value_low * 100)}–${Math.round(item.value_high * 100)}%`;
+    }
+    return "方向性结论";
+  }
+
+  function audienceGroupHtml(group, title) {
+    if (!group) return "";
+    const rows = group.items.map(item => `
+      <div class="au-row">
+        <span class="k">${escapeHtml(item.label)}</span>
+        <span class="v">${escapeHtml(item.bucket)}</span>
+        <span class="e">${escapeHtml(evidenceLabel(item.evidence_level))} · ${escapeHtml(audienceItemDetail(item))}</span>
+      </div>`).join("");
+    const meta = [group.researched_at,
+                  `${group.time_window} / ${group.method_version}`,
+                  group.confidence ? `置信度 ${group.confidence}` : ""]
+      .filter(Boolean).join(" · ");
+    const sourceLinks = group.sources.map(source => {
+      const label = source.title || source.source_key || source.source_platform;
+      return source.url
+        ? `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`
+        : escapeHtml(label);
+    }).join(" · ");
+    return `<div class="au-group">
+      <div class="au-title">${escapeHtml(title)}<small>${escapeHtml(meta)}</small></div>
+      ${rows || `<div class="note">该组无方向性结论。</div>`}
+      ${sourceLinks ? `<div class="au-sources">来源：${sourceLinks}</div>` : ""}
+      ${group.basis_note ? `<div class="note">依据：${escapeHtml(group.basis_note)}</div>` : ""}
+      ${group.coverage_note ? `<div class="note">缺口：${escapeHtml(group.coverage_note)}</div>` : ""}
+    </div>`;
+  }
+
+  function audienceBlock(audience) {
+    if (!audience) {
+      return `<div class="section-title">受众</div>
+        <div class="note">暂无受众记录。v1 受众覆盖是部分覆盖，缺失不代表歌曲质量。</div>`;
+    }
+    const chips = (audience.tags || [])
+      .map(tag => `<span class="chip">${escapeHtml(tag.key)}</span>`).join(" ");
+    return `<div class="section-title">受众</div>
+      <div class="au-block">
+        ${audienceGroupHtml(audience.research, "调研画像")}
+        ${audienceGroupHtml(audience.chart, "榜单证据")}
+        ${chips ? `<div class="au-group"><div class="au-title">可检索标签<small>search --tag</small></div>${chips}</div>` : ""}
+        <div class="note">${escapeHtml(audience.note || "调研数值是 0–1 推断区间，不是平台报表；榜单证据只代表「进过哪些池子」，不代表受众占比。")}</div>
+      </div>`;
+  }
+
   function renderPanel() {
     if (selected === null) {
       const clusters = channel().clusters;
@@ -280,7 +357,7 @@
           ${clusters.filter(c => c.id >= 0).length} 个浏览用簇${noise ? `，${noise.size} 首散点` : ""}。
           <div class="section-title">怎么用</div>
           · 滚轮缩放、拖拽平移、双击重置<br>
-          · 点击任意点：完整播放、查看歌词、看${channel().label}最近 5 首<br>
+          · 点击任意点：完整播放、查看歌词、受众记录、看${channel().label}最近 5 首<br>
           · 顶部切换整体听感 / 节奏 / 音色，布局会重算<br>
           · 搜索会高亮匹配点，簇图例可隐藏
           <div class="section-title">注意</div>
@@ -307,6 +384,7 @@
           song.lyric_status === "available" ? "" : "（" + song.lyric_status + "）"
         }</summary><pre>${escapeHtml(song.lyric)}</pre></details>`
         : `<div class="note">无歌词（${song.lyric_status || "missing"}）</div>`}
+      ${audienceBlock(song.audience)}
       <div class="section-title">${channel().label}最近 5 首</div>
       ${neighbors.map(item => `
         <div class="nb" data-index="${item.index}">
