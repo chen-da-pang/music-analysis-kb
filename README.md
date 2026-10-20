@@ -49,6 +49,32 @@ to compare. Large result sets begin with a representative page and can be
 expanded, while small sets may be shown in full. The Skill preserves runtime
 listening URLs and does not silently invent a default quantity.
 
+## Audio similarity (schema v8)
+
+Ask “找像《X》的歌”, “找节奏像的”, or “找音色像的”. The retrieval
+Skill resolves the title/artist first and asks you to choose ambiguous versions.
+Three independent channels are available: `overall` (MuQ-MuLan v3, 512d,
+default), `rhythm` and `timbre` (MERIT/MERT, 128d each). CLI
+`music-kb --json similar --recording-id '<id>' --channel overall --limit 10`
+and MCP `music_kb_similar` return cosine distances (three decimals, lower is
+closer), folded title versions and listening links; not percentages or match
+scores. Existing search/discover/recommend contracts are unchanged.
+
+Only embedded recordings participate. Check `doctor` / MCP status counts
+`recordings_with_embeddings` and `recordings`; initial coverage is 434/2005,
+not full-library recall. Publisher `import-embeddings` imports SHA-bound JSONL;
+clients load no models. See [plugin commands](plugins/music-kb/README.md) and
+[runner and Suno evaluation scripts](runners/audio-embed/README.md).
+
+**Upgrade order:** migrate/bootstrap the publisher, produce and verify a v8
+snapshot, install/distribute it, then upgrade clients. The new plugin cannot
+open v7 snapshots and never migrates them on read. Peer distribution is a
+separate explicit operation; a local release does not push to peers.
+
+MuQ-MuLan and MERT weights are **CC-BY-NC-4.0**; MERIT heads are MIT.
+This feature is for internal research; commercial use requires authorization
+or replacement of restricted weights.
+
 ## Quick start (publisher)
 
 ```bash

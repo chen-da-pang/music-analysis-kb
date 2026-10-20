@@ -9,6 +9,81 @@ this directory or in Git.
 
 > **运行时状态（2026-09，ADR-0001）**：CNB 云端 Music Flamingo 分析运行时已退役——CNB 平台开始收费，不再作为默认或回退链路；本节及 weekly-run 中所有 `cnb_*` 原子仅作历史参考保留。默认分析路径正迁移至本机 MOSS-Music（MLX 8-bit，见 ADR-0001 与 issue #111）。fresh 周更若要触达 CNB 计费入口，现在必须显式传 `--confirm-cnb-analysis`，否则快速失败。现状分析续跑（`--delivery`）不受影响。
 
+## Audio vectors (publisher, snapshots, CLI and MCP, schema v8)
+
+Natural requests such as “找像《X》的歌”, “找节奏像的” and “找音色像的”
+resolve title/artist first; ambiguous versions require user selection. Channels
+are `overall` (default), `rhythm` and `timbre`, never a blended score.
+The [publisher runner](../../runners/audio-embed/README.md) documents
+`embed_audio.py` and `evaluate_suno.py`: inference stays in an external
+publisher environment; Suno JSON reports stay outside git and never write the KB.
+MuQ-MuLan/MERT weights are CC-BY-NC-4.0; MERIT heads are MIT. Internal
+research only; commercial use requires authorization or replacement.
+Only embedded recordings participate (initially 434/2005); coverage is not
+similarity quality. Produce, verify and install a v8 snapshot before client
+upgrade; local installation does not distribute it to peers.
+
+Upgrade a publisher v7 master explicitly with `music-kb init --db /path/to/master.sqlite`.
+Read-only queries never migrate a client database; v7 clients must receive a
+compatible v8 snapshot before upgrading the plugin. Opening a v7 snapshot fails
+with `Unsupported schema version 7; expected 8.` No client query migrates it.
+These commands do not compute vectors or download weights.
+
+```bash
+music-kb --json import-embeddings --db /path/to/master.sqlite \
+  --input /path/to/vectors.jsonl --model-id muq-mulan-v3 \
+  --model-name MuQ-MuLan --recipe v3 --dim 512 --metric cosine \
+  --license CC-BY-NC-4.0
+music-kb --json similar --db /path/to/master.sqlite \
+  --recording-id rec_example --channel overall --limit 10
+```
+
+Input is UTF-8 physical-LF JSONL, one object per line, with a final LF and no
+blank lines or CRLF. Each object contains `recording_id`, `audio_sha256`, and
+`vector_b64` (base64 of little-endian float32 bytes). Optional `norm` is checked
+against the actual Euclidean norm (`rtol=1e-5`, `atol=1e-6`); otherwise it is
+computed. Vectors must be finite, nonzero, exactly `dim * 4` bytes, and match
+the recording's existing audio hash. Model registration and all rows commit
+together or roll back together. Re-import upserts the same recording/model/factor.
+Model metadata is immutable; a changed recipe needs a new id.
+
+For MERIT use the same registered model id/recipe with `--dim 128` and import
+the heads separately with `--factor rhythm` or `--factor timbre`. Query with
+`--channel rhythm` or `--channel timbre`; no melody or fused score exists.
+The first overall audio import sets `meta.default_embedding_model`; later
+imports preserve it. `--model-id` overrides query selection explicitly. A
+rhythm/timbre channel with multiple models requires that override.
+
+`similar` returns compact `results` with recording ID, title, version, artists,
+numeric `distance`, listening URL (nullable), and `more_versions` (other embedded
+versions of the normalized title, excluding the seed). Results sort by full
+cosine distance then recording ID before title collapse and limit (1–50).
+Distances are 0–2, smaller is closer, rounded to three decimals in JSON and
+printed with three decimal places in human output; they are not percentages
+or threshold decisions. Missing vectors and invalid channels return the usual
+structured error envelope. Both new commands accept `--json` before or after
+the command name.
+
+`doctor` / repository `status()` include `embedding_models`,
+`recordings_with_embeddings`, and `embedding_coverage` with a 0–1 coverage
+ratio (not a similarity score). `validate` audits vector lengths, norms, audio
+ownership and foreign keys. Existing tag retrieval contracts are unchanged.
+`music_kb_status` exposes the same counts and coverage. The read-only MCP tool
+`music_kb_similar(recording_id, channel="overall", limit=10, model_id=None)` returns the same
+compact result as CLI `similar`; it loads no model and requires no write access.
+For ambiguous rhythm/timbre recipes, select explicitly with MCP `model_id` or
+CLI `--model-id`; omitting the model fails clearly rather than choosing a recipe.
+
+`snapshot create` carries model metadata and vectors in its SQLite backup;
+canonical-only pruning cascades deletion of excluded recordings' vectors.
+The manifest counts include `embedding_models` and `recordings_with_embeddings`.
+`snapshot verify` audits embedding integrity through `validate`, and installation
+verifies before switching `current.sqlite`. Installed snapshots remain read-only,
+including for embedding imports, even if their file permissions are changed.
+
+MuQ-MuLan/MERT weights are CC-BY-NC-4.0; MERIT heads are MIT. Use internally
+for research only until commercial rights are resolved (ADR-0003).
+
 ## Natural-language retrieval
 
 The retrieval Skill is designed for a first request in ordinary language. A
@@ -175,6 +250,25 @@ completed disposable repository, with post-delete 404, charge,
 organization-volume, and protected-runtime verification before the run may
 succeed. `--cnb-transport` is passed to the disposable campaign and final
 storage-cleanup atoms; `git-objects` is accepted only under its policy gates.
+
+After `lyrics_coverage` and before `snapshot`, `audio_embedding` runs the existing
+publisher runner sequentially for `overall` and `merit`, then imports each
+model/factor into the master using the `import-embeddings` repository path.
+Use `--embed-python` or `MUSIC_KB_EMBED_PYTHON` to select the external model
+environment; the default is the verified publisher `venv-muq/bin/python` under
+`/Users/wycm/Documents/克莱儿/.scratch/mir-song-description/bakeoff/`.
+Runner JSONL/receipts live in `data/weekly_runs/<run-id>/audio-embedding/`;
+the atom receipt records commands, imported rows, failures and per-channel
+coverage. Every canonical recording in this delivery with local SHA256-matched
+audio must have all three current vectors. Historical recordings without local
+audio only lower reported coverage, not the publication gate. A failure stops
+before snapshot and audio cleanup; retain the audio and retry the same run ID
+(`--resume` is passed to the runner). Local-audio coverage and the runner use the
+same eligibility rule: nonempty `.flac`, `.mp3`, `.ogg`, or `.m4a` files, with no
+minimum byte size beyond zero. Scan/hash errors fail rather than disappear.
+Download/CNB dry-runs and runs without a delivery skip embedding automatically;
+real runs have no embedding bypass. No eligible local audio from this delivery
+means no inference is needed.
 
 On a real publish run, the verified release is also installed atomically as the
 publisher's local `~/.music-kb/current.sqlite` (or `--local-snapshot-dir`),

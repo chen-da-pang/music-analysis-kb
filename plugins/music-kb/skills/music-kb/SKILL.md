@@ -1,6 +1,6 @@
 ---
 name: music-kb
-description: Retrieve real songs from the local, read-only Music Flamingo analysis KB. Use when a user asks naturally for discovery by mood, style, theme, or tag, or for title/artist resolution and canonical analysis; no internal tag or MCP syntax is required.
+description: Retrieve real songs from the local, read-only Music Flamingo analysis KB. Use for similar-sounding songs, discovery by mood, style, theme, or tag, title/artist resolution and canonical analysis; no internal tag or MCP syntax is required.
 ---
 
 # Music Knowledge Base
@@ -41,6 +41,37 @@ For an ordinary successful retrieval:
 - Do not reread this Skill after the complete first read. A complete first read is sufficient; do not use sed, cat, or another file read to recover it.
 - Do not repeat a successful discovery or recommendation with identical
   arguments, and do not `jq`-filter a successful branch to trigger a rerun.
+
+## Similar-sounding songs — independent route
+
+For “找像《X》的歌”, “找和这首听感像的”, “找节奏像的”, or
+“找音色像的”, use this route rather than tag discovery/recommendation:
+
+1. Resolve the named seed with `music_kb_resolve_title_artist` (include artist
+   when supplied), or `music-kb --json search --title 'X'` (optionally
+   `--artist 'Y'`). If multiple recordings/versions match, list candidates and
+   ask the user to pick; never guess or choose the first. If exactly one
+   matches, use its recording ID. An already selected recording needs no new
+   resolution. With no identifiable seed, ask which song; with no matches,
+   report that boundary.
+2. Default to `overall` (整体听感); “节奏像” selects `rhythm`, “音色像”
+   selects `timbre`. Call `music_kb_similar(recording_id, channel, limit)` when
+   available; otherwise use
+   `music-kb --json similar --recording-id '<id>' --channel overall --limit 10`.
+   Honor an explicit quantity; otherwise start with the tool default of 10.
+   This route's bounded default does not change discovery/recommendation UX.
+3. Present title — artists, distance to three decimals (lower is closer),
+   and “另有 N 个版本” when `more_versions > 0`. Preserve returned listening
+   URLs. Never show percentages, thresholds, or call distance a match score.
+   Use status `recordings_with_embeddings / recordings` only when coverage
+   explains missing seeds or limited results; do not imply full-library recall.
+   If the seed has no vectors, say so; do not substitute a version or channel.
+4. “再来一些” keeps seed/channel and requests a larger `limit`, appending only
+   unseen rows (there is no similarity offset). “换节奏/音色” keeps the seed,
+   switches channel, and replaces the displayed ranking. At the tool limit or
+   exhausted coverage, report the boundary rather than repeat results.
+5. A selected result can use the existing canonical-analysis/lyrics detail
+   tools and selected-song contracts below; do not prefetch long details.
 
 ## Safety and data boundary
 

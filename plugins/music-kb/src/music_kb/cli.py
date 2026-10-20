@@ -11,7 +11,7 @@ from .campaign_delivery import load_campaign_delivery_file
 from .distribution import publish_snapshot
 from .errors import DatabaseNotInitializedError, MusicKBError
 from .lyrics_backfill import materialize_lyric_backfill_queue
-from .repository import MusicKBRepository, iter_import_file
+from .repository import MusicKBRepository, iter_embedding_file, iter_import_file
 from .schema import SCHEMA_VERSION, initialize_database
 from .snapshot import create_snapshot, install_snapshot, verify_snapshot
 from .workflow import run_weekly_update
@@ -84,6 +84,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = commands.add_parser("doctor", help="Inspect a local database without writing")
     _add_database_argument(doctor)
+
+    embedding_importer = commands.add_parser("import-embeddings", help="Import publisher audio vectors from LF JSONL")
+    _add_database_argument(embedding_importer, required=True)
+    embedding_importer.add_argument("--json", action="store_true", dest="as_json", default=argparse.SUPPRESS)
+    embedding_importer.add_argument("--input", type=Path, required=True)
+    for option in ("model-id", "model-name", "recipe", "metric", "license"):
+        embedding_importer.add_argument(f"--{option}", required=True)
+    embedding_importer.add_argument("--dim", type=int, required=True)
+    embedding_importer.add_argument("--factor", default="", help="Empty (overall), rhythm, or timbre")
+
+    similar = commands.add_parser("similar", help="Find recordings by independent cosine distance channel")
+    _add_database_argument(similar)
+    similar.add_argument("--json", action="store_true", dest="as_json", default=argparse.SUPPRESS)
+    similar.add_argument("--recording-id", required=True)
+    similar.add_argument("--channel", default="overall", help="overall, rhythm, or timbre")
+    similar.add_argument("--model-id", help="Explicit model override for a channel")
+    similar.add_argument("--limit", type=int, default=10)
 
     importer = commands.add_parser("import-analysis", help="Import one JSON/JSONL Music Flamingo analysis")
     _add_database_argument(importer, required=True)
@@ -327,6 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly_run.add_argument("--proxy")
     weekly_run.add_argument("--download-dry-run", action="store_true")
     weekly_run.add_argument("--download-max-items", type=int)
+    weekly_run.add_argument("--embed-python", type=Path, help="External model interpreter (or MUSIC_KB_EMBED_PYTHON)")
     weekly_run.add_argument("--confirm-delete-audio", action="store_true")
     weekly_run.add_argument(
         "--confirm-cnb-analysis",
@@ -427,6 +445,22 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             read_only=False,
             operation=lambda repo: repo.import_analyses(
                 iter_import_file(args.input), batch_size=args.batch_size
+            ),
+        )
+    if args.command == "import-embeddings":
+        return 0, _with_repository(
+            args.db, read_only=False,
+            operation=lambda repo: repo.import_embeddings(
+                iter_embedding_file(args.input), model_id=args.model_id, model_name=args.model_name,
+                recipe=args.recipe, dim=args.dim, metric=args.metric, weight_license=args.license,
+                factor=args.factor,
+            ),
+        )
+    if args.command == "similar":
+        return 0, _with_repository(
+            args.db, read_only=True,
+            operation=lambda repo: repo.similar(
+                args.recording_id, channel=args.channel, model_id=args.model_id, limit=args.limit,
             ),
         )
     if args.command == "rebuild-search":
@@ -597,6 +631,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             cnb_github_commit=args.cnb_github_commit,
             cnb_campaign_work_dir=args.cnb_campaign_work_dir,
             retained_campaign_receipt=args.retained_campaign_receipt,
+            embed_python=args.embed_python,
         )
         return 0, result
     raise AssertionError("unhandled command")
@@ -616,7 +651,16 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
             return code
-        _result(result, as_json=args.as_json)
+        if args.command == "similar" and not args.as_json:
+            print(f"{result['channel']} / {result['model_id']} — cosine distance (0–2, smaller is closer)")
+            for row in result["results"]:
+                versions = f" (另有 {row['more_versions']} 个版本)" if row["more_versions"] else ""
+                print(f"{row['distance']:.3f}\t{row['recording_id']}\t{row['title']} "
+                      f"[{row['version_label']}] — {', '.join(row['artists'])}{versions}")
+                if row["listen_url"]:
+                    print(row["listen_url"])
+        else:
+            _result(result, as_json=args.as_json)
         return code
     except MusicKBError as error:
         _error(error, as_json=args.as_json)

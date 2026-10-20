@@ -466,7 +466,7 @@ def test_initialize_migrates_v6_database_without_fabricating_lyrics(tmp_path: Pa
         connection.execute("UPDATE meta SET value = '6' WHERE key = 'schema_version'")
     initialize_database(database)
     with MusicKBRepository(database) as repository:
-        assert repository.status()["schema_version"] == SCHEMA_VERSION == 7
+        assert repository.status()["schema_version"] == SCHEMA_VERSION == 8
         tables = {
             str(row["name"])
             for row in repository.connection.execute(

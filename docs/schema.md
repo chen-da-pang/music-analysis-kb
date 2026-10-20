@@ -18,6 +18,8 @@ at 100k-recording scale.
 | `tag_namespace`, `tag`, `tag_alias` | Namespaced, hierarchical tags and aliases without an arbitrary quantity cap. |
 | `analysis_tag`, `recording_tag` | Analysis-derived tags plus first-class title/artist identity tags. |
 | `numeric_feature` | BPM, duration, energy, and other numeric values, including a source label so parser backfills cannot overwrite manual/editorial measurements. |
+| `embedding_model` | Versioned model/recipe/modality identity, dimension, cosine metric, weight license and JSON metadata (schema v8). |
+| `recording_embedding` | Audio-SHA-bound little-endian float32 BLOB and norm, keyed by recording/model/factor; cascade on recording deletion, restrict on model deletion. |
 | `search_fts` | FTS5 projection of only the canonical public analysis. |
 
 ## Search order
@@ -26,10 +28,38 @@ at 100k-recording scale.
 2. Title/artist alias matching.
 3. FTS5 across title, artist aliases, tags, summary, and canonical analysis
    text.
-4. Optional vector retrieval later, only for intentionally fuzzy queries.
+4. Independent audio nearest-neighbor retrieval via `similar`, not mixed into the first three paths.
 
 The first three are deterministic. Vector search is not a substitute for rare
-tag retrieval and is not part of this first release.
+tag retrieval. Schema v8 stores independent overall, rhythm and timbre channels;
+cosine distance is ordered ascending with recording ID as the tie breaker.
+`meta.default_embedding_model` selects the overall model. No melody vectors or
+fused scores are stored. See ADR-0003 for migration and license boundaries.
+
+SQLite snapshots include both embedding tables. Canonical-only pruning removes
+excluded recordings' vectors via foreign-key cascade; snapshot verification runs
+the embedding integrity checks in `validate`. Manifest counts include embedding
+models and distinct recordings with embeddings. Clients query installed v8
+snapshots read-only through CLI `similar` or MCP `music_kb_similar`; MCP status
+includes embedding counts and coverage. Old v7 snapshots fail the strict schema
+version check rather than being migrated by a query.
+
+## Audio import and client compatibility
+
+`import-embeddings` transactionally imports model metadata and SHA-bound JSONL
+vectors; it performs no inference. `overall` uses MuQ-MuLan v3 (512d), while
+`rhythm` and `timbre` use independent MERIT/MERT heads (128d each). Results
+fold normalized titles, expose `more_versions`, and display distance to three
+decimals, never percentages or threshold judgments. Only recordings with
+vectors participate; status counts `recordings_with_embeddings / recordings`
+describe coverage (initially 434/2005), not quality.
+
+Migrate/bootstrap the master, create/verify and install a v8 snapshot **before**
+upgrading clients: new clients cannot open v7 snapshots. The external
+[audio runner and Suno evaluation scripts](../runners/audio-embed/README.md)
+keep inference outside plugin dependencies. MuQ-MuLan/MERT weights are
+CC-BY-NC-4.0 and MERIT heads MIT; internal research only until authorization
+or replacement for commercial use.
 
 ## Scale notes
 
@@ -55,8 +85,8 @@ tag retrieval and is not part of this first release.
 - The deterministic `music_flamingo_parser_v1` source can backfill rich
   analysis tags without changing canonical raw text. It replaces only its own
   assignments, so manual editorial tags remain durable across parser reruns.
-- Schema v7 accepts publisher databases created by every released prior schema
-  (v1–v4). Upgrading a v4 publisher master with `music-kb init --db ...` is a
+- Schema v8 accepts publisher databases created by prior schemas (v1–v7).
+  Upgrading a v4 publisher master with `music-kb init --db ...` is a
   required one-time gate before the new 100k paths are used: it installs the
   canonical-switch and exact-tag indexes and records the FTS projection state.
   Existing numeric measurements are labelled `legacy` during migration; new

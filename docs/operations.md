@@ -227,7 +227,45 @@ peer installs.
 
 Never grant client agents write access to a snapshot.
 
-## Schema v7 publisher upgrade
+## Audio similarity release (schema v8)
+
+The external [audio runner](../runners/audio-embed/README.md) documents
+`embed_audio.py` (three-channel JSONL/receipts) and `evaluate_suno.py`
+(read-only Suno comparisons and external JSON output). Do not run inference
+in the plugin environment. `music-kb import-embeddings` imports the runner's
+SHA-bound vectors into the publisher master. Weekly embedding must succeed
+before snapshot creation and audio cleanup; missing historical audio remains
+uncovered. Initial coverage is 434/2005; check `doctor` / MCP status
+`recordings_with_embeddings` and `recordings` rather than assume full recall.
+
+Channels: `overall` (MuQ-MuLan v3, 512d, default), `rhythm` and `timbre`
+(MERIT/MERT, 128d each). Read-only CLI `similar --recording-id '<id>'
+--channel overall --limit 10` and MCP `music_kb_similar` use cosine distance,
+lower is closer; display three decimals, not percentages or thresholds.
+MuQ-MuLan/MERT weights are CC-BY-NC-4.0; MERIT heads are MIT. Internal
+research only; obtain authorization or replace weights before commercial use.
+
+Release order: explicitly migrate/bootstrap the master to v8, then create,
+verify and install a v8 snapshot **before upgrading clients**. New plugin code
+cannot open a v7 snapshot; queries never migrate read-only databases.
+
+```sh
+music-kb --json snapshot create --db "$HOME/.music-kb/music-master.sqlite" \
+  --output-dir "$HOME/.music-kb/releases" --name music-kb-2026w42-audio-similarity
+music-kb --json snapshot verify \
+  --manifest "$HOME/.music-kb/releases/music-kb-2026w42-audio-similarity/manifest.json"
+music-kb --json snapshot install \
+  --release-dir "$HOME/.music-kb/releases/music-kb-2026w42-audio-similarity" \
+  --target-dir "$HOME/.music-kb"
+music-kb --json doctor
+```
+
+Installation verifies the release and atomically switches `current.sqlite`.
+Verify its target, schema 8, snapshot kind and embedding counts, then exercise
+all channels and MCP reads before updating clients. These local commands do
+not push to peers; peer distribution requires a separate explicit decision.
+
+## Historical schema v7 publisher upgrade
 
 Before using the 100k generic-import path against a pre-existing schema-v4
 master, run the one-time local migration on the publisher machine:

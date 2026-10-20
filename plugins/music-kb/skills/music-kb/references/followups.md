@@ -31,6 +31,11 @@ parent Skill.
 
 ## Follow-up requests keep the selected direction
 
+For similarity results, follow the parent Skill's independent route: keep the
+seed/channel and increase `limit` for more, showing only unseen rows; do not use
+`next_offset`. An explicit “换节奏/音色” switches channel for that same seed.
+The offset rules below apply to discovery/recommendation, not `similar`.
+
 - “再来一些” means the user wants more songs that fit the **current selected
   direction**. Keep the results already shown and append new, not-yet-shown
   recordings from that same direction by continuing its `next_offset`.
