@@ -235,3 +235,157 @@ descriptors.
 Each numeric feature records a `source`. Campaign BPM values use
 `music_flamingo_parser_v1`; a parser rerun replaces only that source and never
 overwrites `manual`, `model`, or migrated `legacy` measurements.
+
+## Audience import contract
+
+Use `music-kb import-audience` for audience evidence. It writes the four
+schema-v9 tables (`audience_source`, `audience_profile`, `audience_observation`,
+`audience_entry`) and never touches `analysis_revision` or the canonical public
+analysis. There are two record kinds:
+
+```bash
+music-kb import-audience \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --input /secure/path/audience-shanfeng.jsonl \
+  --kind profile
+
+music-kb import-audience \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --input /secure/path/chart-evidence.jsonl \
+  --kind chart_evidence
+```
+
+`--kind profile` (default) is the SOP research picture: one profile per
+recording × time window with age/gender/city-tier/scene/... observations.
+`--kind chart_evidence` is a chart snapshot: one profile per recording × snapshot
+date with `generation_hint` / `scene` / `tribe` observations derived from the
+charts a song appeared on. A record may also carry `"kind"`, but it must match
+the command line; mixed kinds in one file are rejected per record.
+
+### Record shape
+
+One JSONL record = one profile plus nested `sources`, `observations`, and
+optional `entries`:
+
+```json
+{
+  "recording": {"title": "山风山风等等我", "primary_artist": "万海东"},
+  "profile": {
+    "target_platform": "douyin",
+    "time_window": "full_lifecycle",
+    "window_start": "2026-07-20",
+    "window_end": "2026-10-19",
+    "method_id": "version-matrix",
+    "method_version": "v1.1",
+    "status": "available",
+    "confidence": "low",
+    "is_proxy": 1,
+    "researched_at": "2026-10-20",
+    "basis_note": "public pages + KuGou ownercount weights",
+    "coverage_note": "no platform audience report; age left blank until recomputed"
+  },
+  "sources": [
+    {
+      "source_platform": "kugou",
+      "source_key": "kugou-search:song:<title>:2026-10-19",
+      "source_type": "kugou_search",
+      "fetched_at": "2026-10-19",
+      "evidence_level": "1_platform_public",
+      "url": "http://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword=..."
+    }
+  ],
+  "observations": [
+    {
+      "dimension": "age", "bucket": "31-40",
+      "value_low": 0.3, "value_mid": 0.32, "value_high": 0.34,
+      "evidence_level": "4_inferred", "source_id": "src_shanfeng_kugou_search"
+    }
+  ],
+  "entries": [
+    {"entry_type": "original", "performer": "万海东",
+     "released_at": "2026-07-20", "platform": "douyin",
+     "relation_to_original": "same_master", "weight_basis": "等权"}
+  ]
+}
+```
+
+`recording` accepts `recording_id`/`id`, or `title` + `primary_artist` (the
+importer resolves normalized title + artist and refuses ambiguous matches). The
+recording must already exist with a canonical analysis.
+
+### Required fields and validation
+
+- `profile.target_platform`, `profile.time_window`, `profile.method_id`,
+  `profile.method_version`, `profile.status`, `profile.confidence`,
+  `profile.researched_at` (ISO date).
+- `target_platform` rule: `method_id='chart_signal_v1'` requires
+  `unspecified`; every other method requires `douyin`.
+- Chart evidence enforces `method_id='chart_signal_v1'`,
+  `method_version='chart-hint-v1'`, `time_window='chart_snapshot'`,
+  `target_platform='unspecified'`, `status='available'`.
+- Each source requires `source_platform`, `source_key`, `source_type`,
+  `fetched_at`, `evidence_level`. Chart sources additionally require
+  `source_platform='kugou'`, `source_type='chart_snapshot'`,
+  `evidence_level='1_platform_public'`, `source_key` of the form
+  `chart:<rank_id>:<YYYY-MM-DD>`, and a publisher-local `local_path`.
+- Each observation requires `dimension`, non-empty `bucket`, `evidence_level`.
+  Chart observations require `dimension ∈ generation_hint|scene|tribe`,
+  `evidence_level='3_proxy'`, `is_proxy=1`, and a positive `rank`.
+- Non-null share values must satisfy `0 ≤ value_low ≤ value_mid ≤ value_high ≤ 1`
+  (adjacent non-null values only). `status='unavailable'` may have no
+  observations; gaps are written to `coverage_note` instead of fabricated rows.
+- `window_start`/`window_end` are optional ISO dates; when both are present
+  `window_end ≥ window_start`.
+- Every observation/entry `source_id` must reference a source in the same record
+  (by its `id` or `source_key`) or an existing `audience_source.id`.
+- `entries[].entry_type` is required; unknown `performer` / `released_at` are
+  stored as empty strings (never NULL) so
+  `UNIQUE(recording_id, entry_type, performer, released_at)` keeps working.
+- Enum values follow the schema comments; unknown `entry_type`,
+  `relation_to_original`, dimension, source type, evidence level, status, or
+  confidence rejects that record only.
+
+### Idempotency and output
+
+- Sources upsert by `(source_platform, source_key)`; a rerun updates metadata and
+  never accumulates duplicate source rows.
+- A repeated profile whose
+  `(recording_id, target_platform, time_window, method_version, researched_at)`
+  already exists updates it in place and replaces its observations. When the
+  record contains an `entries` key, the recording's entries are replaced with
+  that list (an empty list clears them); when the key is absent, existing entries
+  are left untouched.
+- A record with validation errors is rolled back individually; other lines stay
+  committed. The command prints a bounded JSON summary and exits `1` when any
+  line failed:
+
+```json
+{"profiles": 1, "observations": 8, "sources": 2, "entries": 2,
+ "duplicates": 1, "errors": 0, "error_details": [],
+ "kind": "profile", "batch_count": 1}
+```
+
+`errors` is the count of rejected lines; `error_details` lists
+`{"line", "code", "message", "details"}` for each. `duplicates` counts source
+natural-key updates plus observation/entry rows deduplicated inside one record.
+`--batch-size` (1–5000, default 500) bounds the transaction; per-record failures
+roll back to a savepoint inside the batch.
+
+### Reading and data boundary
+
+```bash
+music-kb get-audience <recording_id> [--window full_lifecycle] [--method version-matrix]
+```
+
+The read returns `groups` split into `research` (调研画像) and `chart_evidence`
+(榜单证据); each group has `profiles`, `observations`, `sources`, `entries`,
+`tags`, and `coverage_gaps`. `entries`/`tags` are recording-scoped and therefore
+also returned at the top level with `counts`. `--window` filters by
+`time_window` and rejects unknown values; `--method` filters by `method_id`.
+Chart evidence always carries a note that it does not represent audience share.
+
+Raw chart JSON and research reports stay on the publisher machine: only derived
+records, source references, and `payload_path`/`local_path` strings enter the
+database, and `local_path` is cleared from client snapshots. Tests use the
+synthetic fixtures in `plugins/music-kb/tests/fixtures/audience/`; never commit a
+real chart snapshot or a real research report.

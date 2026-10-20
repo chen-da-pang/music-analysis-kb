@@ -179,7 +179,7 @@ def test_init_migrates_v5_source_tracks_to_v6(master_database) -> None:
     with MusicKBRepository(master_database) as repository:
         columns = {row["name"] for row in repository.connection.execute("PRAGMA table_info(source_track)")}
         assert "source_url" in columns
-        assert repository.status()["schema_version"] == 8
+        assert repository.status()["schema_version"] == 9
 
 
 def test_importer_rejects_feigua_workflow_tags(master_database, fixture_payload) -> None:

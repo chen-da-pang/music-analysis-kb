@@ -265,6 +265,44 @@ Verify its target, schema 8, snapshot kind and embedding counts, then exercise
 all channels and MCP reads before updating clients. These local commands do
 not push to peers; peer distribution requires a separate explicit decision.
 
+## Audience records release (schema v9)
+
+Schema v9 adds the four additive `audience_*` tables plus the
+`import-audience` / `get-audience` commands and plugin version 0.9.0. The
+schema-v9 PR (#139) deliberately does **not** create or publish a v9 snapshot
+and does **not** upgrade any peer: those are post-merge publisher steps.
+
+The real release order is:
+
+1. **Upgrade clients/peers first.** Install plugin 0.9.0 (the distribution
+   compatibility gate requires the remote plugin to be at least the publisher's
+   version). A v8 client cannot open a v9 snapshot, and queries never migrate a
+   read-only database.
+2. **Migrate the publisher master.** `music-kb init --db ...` performs the
+   v8→v9 migration: it only creates the audience tables, indexes, and foreign
+   keys and does not rewrite analyses, tags, lyrics, embeddings, or FTS data.
+   The migration is idempotent, so an interrupted `init` can simply be rerun.
+3. **Validate.** `music-kb validate --db ...` must pass. Audience coverage is
+   never a gate; the new checks only cover audience foreign keys, enums, the
+   target-platform rule, bucket non-emptiness, share bounds, and entry identity.
+4. **Import audience evidence (optional, non-blocking).** Run
+   `music-kb import-audience --db ... --input <profiles.jsonl> --kind profile`
+   for SOP research output and `--kind chart_evidence` for the weekly chart
+   snapshot. A failed record is reported by line; remaining lines commit, and
+   missing coverage is recorded in `coverage_note` instead of blocking the
+   release. Weekly-orchestrator integration of this step belongs to #141; for
+   now the import is an explicit publisher command.
+5. **Rebuild and verify a v9 snapshot.** `snapshot create` keeps only the newest
+   profile per `(recording_id, target_platform, time_window, method_id)`,
+   carries entries of all canonical recordings, prunes orphan sources, clears
+   `local_path`, and writes `audience_*` counts into `manifest.json`. Then run
+   `snapshot verify`.
+6. **Install locally, then publish.** Use the normal verified local install and
+   an explicit `publish push` dry-run before any peer distribution.
+
+Do not distribute the v9 release before step 1 completes; a mixed fleet would
+silently fail the schema check on every client read.
+
 ## Historical schema v7 publisher upgrade
 
 Before using the 100k generic-import path against a pre-existing schema-v4

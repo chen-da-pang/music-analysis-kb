@@ -57,7 +57,7 @@ def test_cli_similar_rejects_v7_snapshot(embedded_snapshot):
     assert result.returncode == 2
     error = json.loads(result.stderr)["error"]
     assert error["code"] == "database_not_initialized"
-    assert error["message"] == "Unsupported schema version 7; expected 8."
+    assert error["message"] == "Unsupported schema version 7; expected 9."
 
 
 def test_cli_embedding_import_similar_and_doctor(master_database, tmp_path):
