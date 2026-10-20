@@ -362,14 +362,49 @@ recording must already exist with a canonical analysis.
 ```json
 {"profiles": 1, "observations": 8, "sources": 2, "entries": 2,
  "duplicates": 1, "errors": 0, "error_details": [],
- "kind": "profile", "batch_count": 1}
+ "kind": "profile", "batch_count": 1,
+ "tags": {"recordings": 1, "tags": 8, "research_recordings": 1,
+          "chart_recordings": 0, "namespaces": ["audience"],
+          "stale_recordings": 0, "orphan_tags_deleted": 0, "fts_rebuilt": 1}}
 ```
 
 `errors` is the count of rejected lines; `error_details` lists
 `{"line", "code", "message", "details"}` for each. `duplicates` counts source
 natural-key updates plus observation/entry rows deduplicated inside one record.
 `--batch-size` (1–5000, default 500) bounds the transaction; per-record failures
-roll back to a savepoint inside the batch.
+roll back to a savepoint inside the batch. `tags` reports the tag projection
+below; it is all zeroes when every line failed.
+
+### Tag projection
+
+A successful import (`profiles > 0`, the same path the weekly
+`audience_import` atom uses) rebuilds recording-level tags automatically; no
+second command is needed and the CLI and the orchestrator get identical
+results. Projection writes `recording_tag(role='audience')` only — it never
+writes `analysis_tag`, never changes `analysis_revision`, and never projects a
+`value_*` number. Each `tag.name` is a path-style key and the full public prefix
+is registered as a `tag_alias`, so the existing exact `--tag` retrieval resolves
+`audience/age/31-40` / `audience-hint/gen/00后` without any retrieval-code
+change.
+
+- `audience` namespace (research, newest profile per recording; a same
+  `researched_at` tie prefers `full_lifecycle`, then `method_version` and id
+  descending): `age` → `age/18-23|24-30|31-40|41-50|50+`, `gender` →
+  `gender/male|female`, `city_tier` → `city-tier/high|mid|low`
+  (一线/新一线=high、二线=mid、三线及以下+县域乡镇=low). Other dimensions stay
+  evidence-only in v1.
+- `audience-hint` namespace (chart evidence only): only the global newest chart
+  snapshot (`method_id='chart_signal_v1'` at `MAX(researched_at)`) projects.
+  `generation_hint` → `gen/00后|90后|80后|cross-00-90|cross-80-90`
+  (`cross:00后+90后` is normalized to `cross-00-90`), `scene` →
+  `scene/shortvideo|dj|variety|soundtrack|recognition|channels` (v1 has no KTV
+  chart), `tribe` →
+  `tribe/acg|electronic|rap|folk|rock|rnb|jazz|country|classical|guofeng|opera`.
+  A recording the newest snapshot did not hit loses its previous hint; the older
+  `chart_snapshot` profile stays queryable through `get-audience`.
+- Each rebuild replaces the previous projection and prunes audience tag rows that
+  no longer have a recording; a repeated import never stacks tags. Search FTS
+  projections of the touched recordings are rebuilt in the same step.
 
 ### Reading and data boundary
 
@@ -383,6 +418,10 @@ The read returns `groups` split into `research` (调研画像) and `chart_eviden
 also returned at the top level with `counts`. `--window` filters by
 `time_window` and rejects unknown values; `--method` filters by `method_id`.
 Chart evidence always carries a note that it does not represent audience share.
+The canonical read paths (`get` and MCP `music_kb_get_canonical_analysis`) embed
+a compact `audience` summary with the projected tags, per-group
+profile/observation counts, latest `researched_at`, dimensions, coverage gaps,
+and the same non-share note.
 
 Raw chart JSON and research reports stay on the publisher machine: only derived
 records, source references, and `payload_path`/`local_path` strings enter the

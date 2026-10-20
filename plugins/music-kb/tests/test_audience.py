@@ -212,7 +212,21 @@ def test_import_audience_profile_fixture_roundtrip(audience_database: Path) -> N
         }
         assert chart["profiles"] == []
         assert chart["observations"] == []
-        assert audience["tags"] == []
+        # The successful import path projects the research buckets into
+        # recording-level tags (#140); values are never projected, only buckets.
+        assert {
+            (tag["namespace"], tag["canonical_name"]) for tag in audience["tags"]
+        } == {
+            ("audience", "age/18-23"),
+            ("audience", "age/24-30"),
+            ("audience", "age/31-40"),
+            ("audience", "age/41-50"),
+            ("audience", "age/50+"),
+            ("audience", "gender/male"),
+            ("audience", "gender/female"),
+            ("audience", "city-tier/low"),
+        }
+        assert {tag["role"] for tag in audience["tags"]} == {"audience"}
         assert audience["entries"] == research["entries"]
         assert audience["counts"]["profiles"] == 1
         cover = next(
@@ -443,7 +457,13 @@ def test_import_chart_evidence_contract_and_get_filters(audience_database: Path)
         assert len(chart["observations"]) == 3
         assert len(chart["sources"]) == 3
         assert audience["chart_evidence_note"]
-        assert audience["tags"] == []
+        # Only the newest chart snapshot period projects hints; the older
+        # 2026-10-20 generation/scene memberships stay queryable as evidence but
+        # do not leave stale recording tags behind.
+        assert [
+            (tag["namespace"], tag["canonical_name"]) for tag in audience["tags"]
+        ] == [("audience-hint", "gen/00后")]
+        assert audience["tags"][0]["role"] == "audience"
 
         snapshot_window = repository.get_audience(
             SHANFENG_RECORDING_ID, window="chart_snapshot"

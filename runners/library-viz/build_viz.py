@@ -183,6 +183,194 @@ def load_lyrics(connection: sqlite3.Connection, ids: set[str]) -> dict[str, dict
                                        "text": str(row["lyric_text"] or "")} for row in rows}
 
 
+AUDIENCE_DIMENSION_LABELS = {
+    "age": "年龄",
+    "gender": "性别",
+    "city_tier": "城市层级",
+    "generation_hint": "代际",
+    "scene": "场景",
+    "tribe": "圈层",
+    "province": "省份",
+    "life_stage": "人生阶段",
+    "creator": "创作者",
+    "emotion": "情绪",
+}
+AUDIENCE_TAG_PREFIXES = ("gen", "scene", "tribe", "age", "gender", "city-tier")
+
+
+def _chunks(values, size: int = 500):
+    ordered = list(values)
+    for start in range(0, len(ordered), size):
+        yield ordered[start:start + size]
+
+
+def _audience_bucket_label(bucket: str) -> str:
+    """Strip a path-style prefix for display while keeping the stored bucket."""
+
+    text = str(bucket)
+    for prefix in AUDIENCE_TAG_PREFIXES:
+        marker = f"{prefix}/"
+        if text.casefold().startswith(marker.casefold()):
+            return text[len(marker):]
+    return text
+
+
+def load_audience(connection: sqlite3.Connection, recording_ids) -> dict[str, dict]:
+    """Return the newest research/chart audience picture for the given recordings.
+
+    Pure, read-only helper for the static detail panel: the newest research
+    profile per recording (``full_lifecycle`` wins a same-``researched_at`` tie,
+    then ``method_version``/``id`` descending) and the newest chart snapshot
+    profile, their observations, public sources, coverage notes and the
+    projected audience recording tags. Publisher-local paths are deliberately
+    not included in the page payload.
+    """
+
+    ids = sorted({str(recording_id) for recording_id in recording_ids})
+    if not ids:
+        return {}
+
+    profiles: dict[str, list[dict]] = {}
+    for chunk in _chunks(ids):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = connection.execute(
+            f"""
+            SELECT p.id, p.recording_id, p.target_platform, p.time_window,
+                   p.method_id, p.method_version, p.status, p.confidence,
+                   p.is_proxy, p.researched_at, p.window_start, p.window_end,
+                   p.coverage_note
+            FROM audience_profile p
+            WHERE p.recording_id IN ({placeholders})
+            ORDER BY p.recording_id, p.researched_at DESC,
+                     CASE p.time_window WHEN 'full_lifecycle' THEN 0 ELSE 1 END,
+                     p.method_version DESC, p.id DESC
+            """, tuple(chunk)).fetchall()
+        for row in rows:
+            profiles.setdefault(str(row["recording_id"]), []).append(dict(row))
+
+    selection: dict[str, dict[str, dict]] = {}
+    for recording_id, rows in profiles.items():
+        research = [row for row in rows
+                    if row["time_window"] in ("first_wave", "full_lifecycle")]
+        chart = [row for row in rows
+                 if row["method_id"] == "chart_signal_v1"
+                 or row["time_window"] == "chart_snapshot"]
+        chosen = {}
+        if research:
+            chosen["research"] = research[0]
+        if chart:
+            chosen["chart"] = chart[0]
+        if chosen:
+            selection[recording_id] = chosen
+
+    profile_groups = {
+        str(profile["id"]): (recording_id, group)
+        for recording_id, groups in selection.items()
+        for group, profile in groups.items()
+    }
+    observations: dict[str, list[dict]] = {profile_id: [] for profile_id in profile_groups}
+    for chunk in _chunks(profile_groups):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = connection.execute(
+            f"""
+            SELECT profile_id, dimension, bucket, value_low, value_high,
+                   value_mid, rank, evidence_level, source_id
+            FROM audience_observation
+            WHERE profile_id IN ({placeholders})
+            ORDER BY profile_id, dimension, bucket, rank
+            """, tuple(chunk)).fetchall()
+        for row in rows:
+            observations.setdefault(str(row["profile_id"]), []).append(dict(row))
+
+    source_ids = sorted({
+        str(row["source_id"])
+        for rows in observations.values()
+        for row in rows
+        if row["source_id"] is not None
+    })
+    sources: dict[str, dict] = {}
+    for chunk in _chunks(source_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = connection.execute(
+            f"""
+            SELECT id, source_platform, source_key, url, title, source_type,
+                   evidence_level, coverage_note
+            FROM audience_source
+            WHERE id IN ({placeholders})
+            ORDER BY source_platform, source_key
+            """, tuple(chunk)).fetchall()
+        for row in rows:
+            item = dict(row)
+            item.pop("id", None)
+            sources[str(row["id"])] = item
+
+    tags: dict[str, list[dict]] = {recording_id: [] for recording_id in ids}
+    for chunk in _chunks(ids):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = connection.execute(
+            f"""
+            SELECT rt.recording_id, t.namespace, t.canonical_name, t.path
+            FROM recording_tag rt JOIN tag t ON t.id = rt.tag_id
+            WHERE rt.recording_id IN ({placeholders})
+              AND t.namespace IN ('audience', 'audience-hint')
+            ORDER BY rt.recording_id, t.namespace, t.canonical_name
+            """, tuple(chunk)).fetchall()
+        for row in rows:
+            tags.setdefault(str(row["recording_id"]), []).append(
+                {
+                    "namespace": str(row["namespace"]),
+                    "name": str(row["canonical_name"]),
+                    "path": str(row["path"]),
+                    "key": f"{row['namespace']}/{row['canonical_name']}",
+                }
+            )
+
+    result: dict[str, dict] = {}
+    for recording_id, groups in selection.items():
+        entry: dict = {"research": None, "chart": None,
+                       "tags": tags.get(recording_id, []),
+                       "note": "调研数值是 0–1 推断区间，不是平台报表；榜单证据只代表「进过哪些池子」，不代表受众占比。"}
+        for group, profile in groups.items():
+            items = []
+            group_source_ids: list[str] = []
+            for row in observations.get(str(profile["id"]), []):
+                items.append(
+                    {
+                        "dimension": str(row["dimension"]),
+                        "label": AUDIENCE_DIMENSION_LABELS.get(
+                            str(row["dimension"]), str(row["dimension"])
+                        ),
+                        "bucket": _audience_bucket_label(str(row["bucket"])),
+                        "value_low": row["value_low"],
+                        "value_high": row["value_high"],
+                        "value_mid": row["value_mid"],
+                        "rank": row["rank"],
+                        "evidence_level": str(row["evidence_level"]),
+                    }
+                )
+                if row["source_id"] is not None:
+                    source_id = str(row["source_id"])
+                    if source_id not in group_source_ids:
+                        group_source_ids.append(source_id)
+            entry[group] = {
+                "researched_at": str(profile["researched_at"]),
+                "time_window": str(profile["time_window"]),
+                "method_id": str(profile["method_id"]),
+                "method_version": str(profile["method_version"]),
+                "confidence": str(profile["confidence"]),
+                "status": str(profile["status"]),
+                "coverage_note": str(profile["coverage_note"] or ""),
+                "items": items,
+                "sources": [
+                    sources[source_id]
+                    for source_id in group_source_ids
+                    if source_id in sources
+                ],
+            }
+        result[recording_id] = entry
+    return result
+
+
 def build(database: Path, output_dir: Path, audio_roots: list[Path]) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     audio_dir = output_dir / "audio"
@@ -208,6 +396,7 @@ def build(database: Path, output_dir: Path, audio_roots: list[Path]) -> dict:
         needed = {sha for data in loaded.values() for sha in data["shas"] if sha}
 
     lyrics = load_lyrics(connection, set(audio_refs))
+    audience = load_audience(connection, set(audio_refs))
     found = audio_index(needed, audio_roots)
     ordered_ids = sorted(audio_refs)
     sha_by_id = {}
@@ -248,6 +437,7 @@ def build(database: Path, output_dir: Path, audio_roots: list[Path]) -> dict:
                 "full": audio_refs.get(recording_id, ""),
                 "lyric": lyrics.get(recording_id, {}).get("text", ""),
                 "lyric_status": lyrics.get(recording_id, {}).get("status", "missing"),
+                "audience": audience.get(recording_id),
                 "neighbors": neighbors[index],
             })
         channels_payload.append({

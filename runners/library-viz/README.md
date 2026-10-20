@@ -7,7 +7,7 @@
 - 发布者嵌入环境：Python 3.12 + `numpy` + `umap-learn` + `hdbscan`（本机用
   `/Users/wycm/Documents/克莱儿/.scratch/mir-song-description/bakeoff/venv-muq/bin/python`）。
 - 本地音频：通过 `recording.audio_sha256` 匹配到原文件（`.flac/.mp3/.ogg/.m4a`），页面用符号链接提供完整播放。
-- 主库：schema v8，含 overall / rhythm / timbre 三通道向量与 `recording_lyric` 歌词。
+- 主库：schema v9，含 overall / rhythm / timbre 三通道向量与 `recording_lyric` 歌词；有受众记录时详情面板读 `audience_*` 四表与投影出的录音级标签。
 
 ## 生成
 
@@ -27,7 +27,7 @@ HF_HUB_OFFLINE=1 NUMBA_CACHE_DIR=/tmp/music-kb-numba \
 "$OUT/serve.sh"     # http://127.0.0.1:8792/
 ```
 
-页面：左画布 + 右详情面板；顶部切换整体听感 / 节奏 / 音色；滚轮缩放、拖拽平移、双击重置；搜索高亮；簇图例可隐藏。点击点查看歌曲：完整音频播放（本地文件）、歌词、当前通道 Top-5 邻域。
+页面：左画布 + 右详情面板；顶部切换整体听感 / 节奏 / 音色；滚轮缩放、拖拽平移、双击重置；搜索高亮；簇图例可隐藏。点击点查看歌曲：完整音频播放（本地文件）、歌词、受众记录（调研画像 / 榜单证据 / 证据等级 / 来源 / 「非占比」声明）、当前通道 Top-5 邻域。
 
 ## 数据契约
 
@@ -35,8 +35,14 @@ HF_HUB_OFFLINE=1 NUMBA_CACHE_DIR=/tmp/music-kb-numba \
 
 - `channels[]`：`key`、`label`、`model_id`、`recipe`、`clusters[]`、`songs[]`。
 - `clusters[]`：`{id, name, size, color}`；`id=-1` 为散点。
-- `songs[]`：`{id, title, artists, cluster, x, y, full, lyric, lyric_status, neighbors: [[index, distance], ...]}`。
+- `songs[]`：`{id, title, artists, cluster, x, y, full, lyric, lyric_status, audience, neighbors: [[index, distance], ...]}`。
 - `x/y` 归一化到 `[-1, 1]`；`full` 是 `audio/` 下指向原始音频的符号链接（缺失时为空串）；`lyric` 来自 `recording_lyric.lyric_text`，`lyric_status` 为 available / platform_unavailable / missing。
+- `audience`：无受众记录时为 `null`；否则 `{research, chart, tags, note}`，由 `build_viz.load_audience()` 只读 master 预生成（静态页无后端查询）：
+  - `research` / `chart`：各取该歌最新一条调研画像 / 榜单证据（`null` 表示该组没有记录），字段为 `researched_at`、`time_window`、`method_id`、`method_version`、`confidence`、`status`、`coverage_note`、`items[]`、`sources[]`。
+  - `items[]`：`{dimension, label, bucket, value_low, value_high, value_mid, rank, evidence_level}`；`rank` 只有榜单证据有值，`value_*` 只有调研推断有值且是 0–1 区间。
+  - `sources[]`：`{source_platform, source_key, url, title, source_type, evidence_level, coverage_note}`；不含发布端本机路径。
+  - `tags[]`：`{namespace, name, path, key}`，即 `recording_tag(role='audience')` 投影出的可检索标签（`key` 形如 `audience/age/31-40`、`audience-hint/gen/00后`）。
+  - `note`：固定的「非占比」声明。
 
 ## 说明
 

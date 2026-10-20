@@ -113,6 +113,68 @@ DEFAULT_AUDIENCE_BATCH_SIZE = 500
 _AUDIENCE_DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _AUDIENCE_CHART_KEY_PATTERN = re.compile(r"chart:(\d+):(\d{4}-\d{2}-\d{2})\Z")
 
+# Audience tag projection (schema v9, ticket #140). Research conclusions are
+# projected into the ``audience`` namespace and chart signal into
+# ``audience-hint``; both are recording-level ``recording_tag(role='audience')``
+# rows whose canonical name is a path-style key and whose public prefix is
+# registered as an alias. Retrieval keeps using the existing exact ``--tag``
+# machinery, so ``audience/age/31-40`` resolves through ``tag_alias`` without
+# touching ``_tag_candidate_sql`` or the ``search_fts`` schema.
+AUDIENCE_TAG_NAMESPACE = "audience"
+AUDIENCE_HINT_TAG_NAMESPACE = "audience-hint"
+AUDIENCE_TAG_ROLE = "audience"
+AUDIENCE_TAG_PREFIXES = {"age": "age", "gender": "gender", "city_tier": "city-tier"}
+AUDIENCE_HINT_TAG_PREFIXES = {"generation_hint": "gen", "scene": "scene", "tribe": "tribe"}
+AUDIENCE_TAG_VALUES = {
+    "age": frozenset({"18-23", "24-30", "31-40", "41-50", "50+"}),
+    "gender": frozenset({"male", "female"}),
+    "city-tier": frozenset({"high", "mid", "low"}),
+    "gen": frozenset({"00后", "90后", "80后", "cross-00-90", "cross-80-90"}),
+    "scene": frozenset({"shortvideo", "dj", "variety", "soundtrack", "recognition", "channels"}),
+    "tribe": frozenset(
+        {
+            "acg",
+            "electronic",
+            "rap",
+            "folk",
+            "rock",
+            "rnb",
+            "jazz",
+            "country",
+            "classical",
+            "guofeng",
+            "opera",
+        }
+    ),
+}
+_AUDIENCE_GENERATION_CROSS = {
+    frozenset({"00后", "90后"}): "cross-00-90",
+    frozenset({"80后", "90后"}): "cross-80-90",
+}
+_AUDIENCE_GENDER_ALIASES = {"男": "male", "女": "female", "男性": "male", "女性": "female"}
+_AUDIENCE_CITY_TIER_TOKENS = (
+    ("high", ("一线",)),
+    ("mid", ("二线",)),
+    ("low", ("三线", "四线", "五线", "县域", "乡镇")),
+)
+_AUDIENCE_TRIBE_ALIASES = {
+    "国潮": "guofeng",
+    "国乐": "guofeng",
+    "粤剧": "opera",
+    "京剧": "opera",
+    "南音": "opera",
+    "电子": "electronic",
+    "电音": "electronic",
+    "说唱": "rap",
+    "民谣": "folk",
+    "摇滚": "rock",
+    "爵士": "jazz",
+    "乡村": "country",
+    "乡村音乐": "country",
+    "古典": "classical",
+    "古典音乐": "classical",
+}
+
 
 def _audience_date(value: Any, field: str) -> str:
     text = require_text(value, field)
@@ -172,6 +234,61 @@ def _audience_optional_text(value: Any, field: str) -> str:
         raise ValidationError(f"{field} must be a string")
     return value
 
+
+def _audience_bucket_value(prefix: str, bucket: str) -> str | None:
+    """Normalize one observation bucket to the v1 path key value, or skip it.
+
+    Spec v2.1 §7 writes the projection table down as a closed vocabulary: age
+    five buckets, gender male/female, city tier high/mid/low, generation five
+    values (including the research script's ``cross:00后+90后`` spelling),
+    scene six values (v1 has no KTV chart) and tribe eleven values. Buckets
+    outside that vocabulary are deliberately not projected; the underlying
+    observation stays queryable through ``get-audience``.
+    """
+
+    text = str(bucket).strip().replace("：", ":").replace("＋", "+").replace("–", "-").replace("—", "-")
+    if not text:
+        return None
+    prefix_with_slash = f"{prefix}/"
+    if text.casefold().startswith(prefix_with_slash.casefold()):
+        text = text[len(prefix_with_slash):].strip()
+        if not text:
+            return None
+    allowed = AUDIENCE_TAG_VALUES[prefix]
+    for value in allowed:
+        if text.casefold() == value.casefold():
+            return value
+    if prefix == "gender":
+        return _AUDIENCE_GENDER_ALIASES.get(text)
+    if prefix == "city-tier":
+        for value, tokens in _AUDIENCE_CITY_TIER_TOKENS:
+            if any(token in text for token in tokens):
+                return value
+        return None
+    if prefix == "gen":
+        if text.casefold().startswith("cross:"):
+            members = frozenset(part.strip() for part in text[len("cross:"):].split("+") if part.strip())
+            return _AUDIENCE_GENERATION_CROSS.get(members)
+        return None
+    if prefix == "tribe":
+        return _AUDIENCE_TRIBE_ALIASES.get(text)
+    return None
+
+
+def _audience_tag_name(dimension: str, bucket: str) -> tuple[str, str] | None:
+    """Map one observation to ``(namespace, path-style tag name)`` or ``None``."""
+
+    prefix = AUDIENCE_TAG_PREFIXES.get(dimension)
+    namespace = AUDIENCE_TAG_NAMESPACE
+    if prefix is None:
+        prefix = AUDIENCE_HINT_TAG_PREFIXES.get(dimension)
+        namespace = AUDIENCE_HINT_TAG_NAMESPACE
+    if prefix is None:
+        return None
+    value = _audience_bucket_value(prefix, bucket)
+    if value is None:
+        return None
+    return namespace, f"{prefix}/{value}"
 
 
 def _optional_source_url(value: Any) -> str | None:
@@ -967,6 +1084,25 @@ class MusicKBRepository:
             if len(batch) >= batch_size:
                 import_batch()
         import_batch()
+        # Projection is part of the successful import path (ticket #140): the
+        # weekly ``audience_import`` atom and the CLI both get recording-level
+        # audience tags without a second call. A full rebuild is deliberate:
+        # the ``audience-hint`` period is global, so a newer chart snapshot must
+        # also drop stale hints from recordings it did not hit.
+        stats["tags"] = (
+            self.rebuild_audience_tags()
+            if stats["profiles"]
+            else {
+                "recordings": 0,
+                "tags": 0,
+                "research_recordings": 0,
+                "chart_recordings": 0,
+                "namespaces": [],
+                "stale_recordings": 0,
+                "orphan_tags_deleted": 0,
+                "fts_rebuilt": 0,
+            }
+        )
         return stats
 
     def _import_audience_record(self, payload: Mapping[str, Any], *, kind: str) -> dict[str, int]:
@@ -1833,6 +1969,37 @@ class MusicKBRepository:
             "chart_evidence_note": chart_note,
         }
 
+    def audience_summary(self, recording_id: str) -> dict[str, Any]:
+        """Compact audience view embedded in the canonical-analysis read paths."""
+
+        audience = self.get_audience(recording_id)
+        groups = []
+        for group in audience["groups"]:
+            profiles = group["profiles"]
+            latest = profiles[0] if profiles else None
+            groups.append(
+                {
+                    "group": group["group"],
+                    "label": group["label"],
+                    "profile_count": len(profiles),
+                    "observation_count": len(group["observations"]),
+                    "latest_researched_at": str(latest["researched_at"]) if latest else None,
+                    "time_windows": sorted({str(profile["time_window"]) for profile in profiles}),
+                    "dimensions": sorted(
+                        {str(observation["dimension"]) for observation in group["observations"]}
+                    ),
+                    "coverage_gaps": group["coverage_gaps"],
+                }
+            )
+        return {
+            "recorded": bool(audience["counts"]["profiles"] or audience["tags"]),
+            "groups": groups,
+            "tags": audience["tags"],
+            "counts": audience["counts"],
+            "coverage_gaps": audience["coverage_gaps"],
+            "chart_evidence_note": audience["chart_evidence_note"],
+        }
+
     def enrich_campaign_tags(
         self, *, dry_run: bool = False, batch_size: int = DEFAULT_ENRICH_BATCH_SIZE
     ) -> dict[str, Any]:
@@ -2513,6 +2680,188 @@ class MusicKBRepository:
                 "INSERT OR IGNORE INTO recording_tag(recording_id, tag_id, role) VALUES (?, ?, 'artist')",
                 (recording_id, artist_tag),
             )
+
+    # -- audience tag projection ------------------------------------------
+
+    def rebuild_audience_tags(
+        self, *, recording_ids: Iterable[str] | None = None
+    ) -> dict[str, Any]:
+        """Rebuild recording-level audience tags from the current audience records.
+
+        ``recording_ids=None`` rebuilds the whole library, which is what
+        :meth:`import_audience` runs after every successful import. One set of
+        ``audience`` tags comes from the recording's newest research profile
+        (``full_lifecycle`` wins a same-``researched_at`` tie, then
+        ``method_version``/``id`` descending); one set of ``audience-hint`` tags
+        comes from the global newest chart snapshot
+        (``method_id='chart_signal_v1'`` at ``MAX(researched_at)``). A chart
+        snapshot that does not hit a recording therefore removes its previous
+        hint. Repeated runs replace rather than stack, and the full public key
+        (``audience/age/31-40``, ``audience-hint/gen/00后``) is registered as a
+        ``tag_alias`` so the existing exact ``--tag`` retrieval resolves it.
+        """
+
+        self._require_writer()
+        scope: set[str] | None = None
+        if recording_ids is not None:
+            scope = {str(recording_id) for recording_id in recording_ids if str(recording_id)}
+        tag_plan: dict[str, set[tuple[str, str]]] = {}
+        research_recordings = 0
+        chart_recordings = 0
+
+        research_profiles = list(
+            self.connection.execute(
+                """
+                SELECT p.id, p.recording_id
+                FROM audience_profile p
+                WHERE p.time_window IN ('first_wave', 'full_lifecycle')
+                  AND p.id = (
+                      SELECT p2.id FROM audience_profile p2
+                      WHERE p2.recording_id = p.recording_id
+                        AND p2.time_window IN ('first_wave', 'full_lifecycle')
+                      ORDER BY p2.researched_at DESC,
+                               CASE p2.time_window WHEN 'full_lifecycle' THEN 0 ELSE 1 END,
+                               p2.method_version DESC,
+                               p2.id DESC
+                      LIMIT 1
+                  )
+                ORDER BY p.recording_id
+                """
+            )
+        )
+        for profile in research_profiles:
+            recording_id = str(profile["recording_id"])
+            if scope is not None and recording_id not in scope:
+                continue
+            research_recordings += 1
+            tag_plan.setdefault(recording_id, set()).update(
+                self._audience_observation_tags(str(profile["id"]))
+            )
+
+        latest_period_row = self.connection.execute(
+            "SELECT MAX(researched_at) AS period FROM audience_profile WHERE method_id = ?",
+            (CHART_EVIDENCE_METHOD_ID,),
+        ).fetchone()
+        latest_period = (
+            str(latest_period_row["period"])
+            if latest_period_row is not None and latest_period_row["period"]
+            else ""
+        )
+        if latest_period:
+            chart_profiles = list(
+                self.connection.execute(
+                    """
+                    SELECT p.id, p.recording_id FROM audience_profile p
+                    WHERE p.method_id = ? AND p.researched_at = ?
+                    ORDER BY p.recording_id
+                    """,
+                    (CHART_EVIDENCE_METHOD_ID, latest_period),
+                )
+            )
+            for profile in chart_profiles:
+                recording_id = str(profile["recording_id"])
+                if scope is not None and recording_id not in scope:
+                    continue
+                chart_recordings += 1
+                tag_plan.setdefault(recording_id, set()).update(
+                    self._audience_observation_tags(str(profile["id"]))
+                )
+
+        tags_written = 0
+        namespaces: set[str] = set()
+        with self.connection:
+            stale_recordings = self._delete_audience_tag_rows(scope)
+            for recording_id in sorted(tag_plan):
+                for namespace, name in sorted(tag_plan[recording_id]):
+                    tag_id = self._ensure_tag(
+                        namespace,
+                        name,
+                        (f"{namespace}/{name}",),
+                        path=name,
+                        lifecycle_status="candidate",
+                    )
+                    cursor = self.connection.execute(
+                        """
+                        INSERT OR IGNORE INTO recording_tag(recording_id, tag_id, role)
+                        VALUES (?, ?, ?)
+                        """,
+                        (recording_id, tag_id, AUDIENCE_TAG_ROLE),
+                    )
+                    tags_written += max(int(cursor.rowcount), 0)
+                    namespaces.add(namespace)
+            orphan_tags_deleted = self._delete_orphan_audience_tags()
+            affected = set(tag_plan) | stale_recordings
+            for recording_id in sorted(affected):
+                self.connection.execute(
+                    "DELETE FROM search_fts WHERE recording_id = ?", (recording_id,)
+                )
+                self._insert_search_projection(recording_id)
+        return {
+            "recordings": len(tag_plan),
+            "tags": tags_written,
+            "research_recordings": research_recordings,
+            "chart_recordings": chart_recordings,
+            "namespaces": sorted(namespaces),
+            "stale_recordings": len(stale_recordings),
+            "orphan_tags_deleted": orphan_tags_deleted,
+            "fts_rebuilt": len(set(tag_plan) | stale_recordings),
+        }
+
+    def _audience_observation_tags(self, profile_id: str) -> set[tuple[str, str]]:
+        tags: set[tuple[str, str]] = set()
+        for row in self.connection.execute(
+            "SELECT dimension, bucket FROM audience_observation WHERE profile_id = ?",
+            (profile_id,),
+        ):
+            tag = _audience_tag_name(str(row["dimension"]), str(row["bucket"]))
+            if tag is not None:
+                tags.add(tag)
+        return tags
+
+    def _delete_audience_tag_rows(self, scope: set[str] | None) -> set[str]:
+        """Delete existing audience projections and return the touched recordings."""
+
+        condition = (
+            "role IN ('audience', 'audience-hint') "
+            "OR tag_id IN (SELECT id FROM tag WHERE namespace IN ('audience', 'audience-hint'))"
+        )
+        if scope is None:
+            stale = {
+                str(row["recording_id"])
+                for row in self.connection.execute(
+                    f"SELECT DISTINCT recording_id FROM recording_tag WHERE {condition}"
+                )
+            }
+            self.connection.execute(f"DELETE FROM recording_tag WHERE {condition}")
+            return stale
+        stale: set[str] = set()
+        recording_ids = sorted(scope)
+        for start in range(0, len(recording_ids), 500):
+            chunk = recording_ids[start:start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            scoped_condition = f"recording_id IN ({placeholders}) AND ({condition})"
+            stale.update(
+                str(row["recording_id"])
+                for row in self.connection.execute(
+                    f"SELECT DISTINCT recording_id FROM recording_tag WHERE {scoped_condition}",
+                    chunk,
+                )
+            )
+            self.connection.execute(
+                f"DELETE FROM recording_tag WHERE {scoped_condition}", chunk
+            )
+        return stale
+
+    def _delete_orphan_audience_tags(self) -> int:
+        cursor = self.connection.execute(
+            """
+            DELETE FROM tag
+            WHERE namespace IN ('audience', 'audience-hint')
+              AND NOT EXISTS (SELECT 1 FROM recording_tag rt WHERE rt.tag_id = tag.id)
+              AND NOT EXISTS (SELECT 1 FROM analysis_tag at WHERE at.tag_id = tag.id)
+            """
+        )
+        return max(int(cursor.rowcount), 0)
 
     def _upsert_source_track(self, recording_id: str, source: Any) -> None:
         if not isinstance(source, Mapping):
@@ -4468,6 +4817,7 @@ class MusicKBRepository:
             "tags": _rows_to_dicts(tag_rows),
             "numeric_features": _rows_to_dicts(numeric_rows),
             "campaign_delivery_provenance": delivery_provenance,
+            "audience": self.audience_summary(str(row["id"])),
         }
 
     def tag_facets(
