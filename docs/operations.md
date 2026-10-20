@@ -88,9 +88,20 @@ uv run music-kb --json weekly-run \
   --peers-file "$HOME/.config/music-kb/peers.toml" \
   --output-dir "$HOME/.music-kb/releases" \
   --release-name music-kb-2026w30 \
+  --audience /path/to/audience-profiles.jsonl \
+  --audience-charts /path/to/music-workspace/data/weekly_runs/kugou-2026w30/audience-charts \
   --cnb-transport lfs \
   --download-dry-run
 ```
+
+The audience flags are optional: `--audience` supplies the SOP research
+profile JSONL and `--audience-charts` selects the audience chart directory
+(default `run_dir/audience-charts`). A fresh run captures the 24 audience
+charts live into that directory. If the directory already holds an
+`audience-charts-manifest.json` **or** a normalized `-songs.json` page for every
+profile chart (a manual-gate pre-capture), the capture atom reuses it and skips
+live kugou-cli capture; a malformed manifest or a capture failure is recorded as
+a `coverage_gaps` entry instead of blocking publication.
 
 This fresh path captures the full configured chart profile, dedupes against the
 inventory, asks Claude Code to download only the queue, materializes a new
@@ -288,13 +299,17 @@ The real release order is:
 4. **Import audience evidence (optional, non-blocking).** Run
    `music-kb import-audience --db ... --input <profiles.jsonl> --kind profile`
    for SOP research output and `--kind chart_evidence` for the weekly chart
-   snapshot. A failed record is reported by line; remaining lines commit, and
-   missing coverage is recorded in `coverage_note` instead of blocking the
-   release. Each successful import automatically rebuilds the recording-level
+   snapshot. A failed record is reported by line; remaining lines commit.
+   Missing research coverage stays in the profile's `coverage_note`, while a
+   missing or partial chart capture is reported in the weekly atoms'
+   `coverage_gaps`; neither blocks the release. Each successful import
+   automatically rebuilds the recording-level
    `audience` / `audience-hint` tags, so `search/recommend/discover --tag
    audience/age/31-40` works immediately and the subsequent snapshot carries the
-   projection. Weekly-orchestrator integration of this step belongs to #141; for
-   now the import is an explicit publisher command.
+   projection. `weekly-run` and `weekly-update` already run this step (via
+   `--audience` / `--audience-charts`; a failed or partial chart capture is
+   reported in their `coverage_gaps`); the explicit `import-audience` command is
+   for a manual publisher import outside a weekly run.
 5. **Rebuild and verify a v9 snapshot.** `snapshot create` keeps only the newest
    profile per `(recording_id, target_platform, time_window, method_id)`,
    carries entries of all canonical recordings, prunes orphan sources, clears

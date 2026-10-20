@@ -70,7 +70,7 @@ def _audience_connection() -> sqlite3.Connection:
             time_window TEXT NOT NULL, method_id TEXT NOT NULL, method_version TEXT NOT NULL,
             status TEXT NOT NULL, confidence TEXT NOT NULL, is_proxy INTEGER NOT NULL,
             researched_at TEXT NOT NULL, window_start TEXT, window_end TEXT,
-            coverage_note TEXT
+            basis_note TEXT, coverage_note TEXT
         );
         CREATE TABLE audience_observation (
             id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, dimension TEXT NOT NULL,
@@ -107,9 +107,17 @@ def _audience_connection() -> sqlite3.Connection:
          "available", "low", 1, "2026-10-20"),
     ]
     connection.executemany(
-        "INSERT INTO audience_profile VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)",
-        [(*row, None if not row[0].startswith("p_b") else "no report; inferred only")
-         for row in profiles],
+        "INSERT INTO audience_profile VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
+        [
+            (
+                *row,
+                "单期快照命中 1 榜（榜单证据，非受众占比）"
+                if row[0].startswith("p_a_chart")
+                else "",
+                "no report; inferred only" if row[0] == "p_b_research" else None,
+            )
+            for row in profiles
+        ],
     )
     connection.executemany(
         "INSERT INTO audience_source VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -190,6 +198,10 @@ def test_load_audience_reads_newest_profiles_sources_and_tags(viz):
     # The newest chart snapshot is selected; path-style buckets are displayed bare.
     assert entry["chart"]["researched_at"] == "2026-10-27"
     assert entry["chart"]["status"] == "available"
+    assert entry["chart"]["basis_note"] == "单期快照命中 1 榜（榜单证据，非受众占比）"
+    assert entry["chart"]["coverage_note"] == ""
+    assert entry["research"]["basis_note"] == ""
+    assert entry["research"]["coverage_note"] == ""
     assert [item["bucket"] for item in entry["chart"]["items"]] == ["00后"]
     assert [item["rank"] for item in entry["chart"]["items"]] == [8]
     assert entry["chart"]["sources"][0]["title"] == "酷狗 00后热歌榜"
@@ -209,10 +221,24 @@ def test_load_audience_reads_newest_profiles_sources_and_tags(viz):
 def test_viewer_renders_audience_between_lyrics_and_neighbors():
     html = VIEWER.read_text(encoding="utf-8")
     assert "function audienceBlock(audience)" in html
+    assert "function audienceGroupHtml(group, title)" in html
     lyric_position = html.index("song.lyric ?")
     audience_position = html.index("audienceBlock(song.audience)")
     neighbor_position = html.index("最近 5 首</div>")
     assert lyric_position < audience_position < neighbor_position
+    # The panel must keep both provenance and the non-share disclaimer visible,
+    # and must render the chart hit count from basis_note rather than as a gap.
     assert "不代表受众占比" in html
+    assert "group.basis_note" in html
+    assert "缺口：" in html
     assert "调研画像" in html and "榜单证据" in html
     assert "证据" in html or "evidence" in html
+    assert 'class="chip"' in html
+
+
+def test_library_viz_readme_documents_the_audience_contract():
+    readme = (SCRIPT.parent / "README.md").read_text(encoding="utf-8")
+    assert "`audience`" in readme
+    assert "basis_note" in readme
+    assert "不代表受众占比" in readme
+    assert "audience/age/31-40" in readme
