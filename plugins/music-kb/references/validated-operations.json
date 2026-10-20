@@ -25,6 +25,7 @@
   ],
   "rules": [
     "榜单输入必须先保存原始 JSON，再进行规范化和去重。",
+    "受众榜单原始快照只留发布端 run_dir/audience-charts/，不进 git、不进客户端快照；榜单命中只写派生 audience 记录与弱标签，不输出任何受众占比；2 个热度榜（8888/6666）由 chart_capture 覆盖、v1 不产出热度维度。",
     "下载默认由 wrapper 直接运行固定 worker：主 Kugou worker 以队列绑定的 MixSong 页面和 audio hash 精确解析单首，失败才回退标题/艺人搜索，并保持单进程独占 inventory、progress 和歌词 receipt。fallback 只处理 no_results/failed，默认以两个隔离 shard 下载；所有 shard 终态且真实 inventory hash 未变后，才由一个 serial merger 写回正式状态。--executor claude 仅是显式兼容启动方式。",
     "历史去重依赖 song_inventory.json，不依赖音频文件继续存在。",
     "入库前必须保留歌曲级 source_url；source_links 数量必须等于 source_tracks 数量。",
@@ -65,6 +66,9 @@
     "chart_capture": {
       "effective_method": "默认读取 kugou-chart-profile.json，使用 kugou-cli --no-update-check music charts 对六张榜单逐页抓取直到空页或短页；每页保存原始 JSON 和规范化 songs JSON，跨页保留绝对 rank。显式 --rank-id 时保留单页受控捕获。"
     },
+    "audience_chart_capture": {
+      "effective_method": "读取版本化 kugou-audience-charts-v1.json，用同一 scripts/capture_kugou_chart.py（kugou-cli）逐页抓取 24 个受众指向榜（3 代际 + 7 场景 + 14 圈层）到 run_dir/audience-charts/，直到空页或短页并保留绝对 rank；52144 若 run_dir/charts/ 已有同 rank_id 规范化产物则标记 reuse 而不重复抓取。2 个热度榜（8888/6666）归原有 chart_capture，本原子不抓、v1 不产出热度维度。原始榜单 JSON 只留发布端本机，不写下载队列、不进 git、不进客户端快照；--delivery 或同 run campaign resume 时显式 skipped。抓取失败只记录覆盖缺口，不阻塞发布。"
+    },
     "chart_dedupe": {
       "effective_method": "优先按 kugou:<mix_song_id> 去重，缺失平台 ID 时按规范化 title + artist 兜底；保留 play_link。"
     },
@@ -85,6 +89,9 @@
     },
     "knowledge_import": {
       "effective_method": "只导入质量通过的 canonical delivery；幂等导入、重建标签和搜索投影，然后验证 source_links 完整。"
+    },
+    "audience_import": {
+      "effective_method": "读 run_dir/audience-charts/*-songs.json（52144 可复用 run_dir/charts/ 同 rank_id 产物），按 MixSongID 精确（source_track.source_name='kugou' AND source_track_id='kugou-'||platform_track_key）→ 规范化 exact-title+artist → base-title+artist 顺序匹配 canonical recording；歌名命中但歌手不匹配记为歧义、写入复核队列、不自动打标，未命中不生成证据。匹配后按 24 榜 spec §7 写死映射在内存生成 chart_snapshot chart_evidence（dimension ∈ generation_hint/scene/tribe，rank=该榜最好名次，evidence_level=3_proxy，is_proxy=1，source_key=chart:<rank_id>:<YYYY-MM-DD>，confidence 按单期规则 low/medium/high），与 --audience 调研画像 JSONL 分别经 import-audience 幂等写四表；标签投影由 import-audience 成功路径统一完成。缺任一路只记录覆盖缺口、不阻塞发布；--delivery 恢复模式只导画像并记录 reason。输出榜单命中/未匹配/歧义/画像导入/标签数/覆盖缺口统计。"
     },
     "lyrics_import": {
       "effective_method": "只导入固定 worker 产生的结构化歌词 receipt；按 source_name + source_track_id 精确绑定 canonical source_track，标题和歌手只可用于 worker 候选定位。available、instrumental、platform_unavailable 需有可审计证据；空结果、网络/解析失败和 identity 不一致一律保留 pending，不得伪造平台无歌词。"

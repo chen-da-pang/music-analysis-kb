@@ -1,0 +1,257 @@
+{
+  "schema_version": 1,
+  "profile_id": "kugou-audience-charts-v1",
+  "platform": "kugou",
+  "page_size": 100,
+  "max_pages": 5,
+  "termination": "empty_or_short_page",
+  "chart_count": 24,
+  "family_counts": {
+    "generation": 3,
+    "scene": 7,
+    "tribe": 14
+  },
+  "official_intro_source": "GitHub issue #141 正文「24 榜官方简介（逐字，来自 2026-10-20 落盘快照）」；不得改写、联网刷新或编造。",
+  "charts": [
+    {
+      "rank_id": "49224",
+      "chart_name": "00后热歌榜",
+      "family": "generation",
+      "update_frequency": "每天",
+      "official_intro": "排序方式：按年龄段的喜爱热度高低排序 更新频率：每天",
+      "capture": "own",
+      "dimension": "generation_hint",
+      "bucket": "gen/00后"
+    },
+    {
+      "rank_id": "49223",
+      "chart_name": "90后热歌榜",
+      "family": "generation",
+      "update_frequency": "每天",
+      "official_intro": "排序方式：按年龄段的喜爱热度高低排序 更新频率：每天",
+      "capture": "own",
+      "dimension": "generation_hint",
+      "bucket": "gen/90后"
+    },
+    {
+      "rank_id": "49225",
+      "chart_name": "80后热歌榜",
+      "family": "generation",
+      "update_frequency": "每天",
+      "official_intro": "排序方式：按年龄段的喜爱热度高低排序 更新频率：每天",
+      "capture": "own",
+      "dimension": "generation_hint",
+      "bucket": "gen/80后"
+    },
+    {
+      "rank_id": "52144",
+      "chart_name": "短视频热歌榜",
+      "family": "scene",
+      "update_frequency": "周一",
+      "official_intro": "数据来源：短视频热门歌曲 排序方式：按照歌曲在酷狗的播放热度排序 更新频率：每周一",
+      "capture": "reuse",
+      "dimension": "scene",
+      "bucket": "scene/shortvideo"
+    },
+    {
+      "rank_id": "52767",
+      "chart_name": "短视频收藏人气榜",
+      "family": "scene",
+      "update_frequency": "每天",
+      "official_intro": "数据来源：短视频平台歌曲 排序方式：按照歌曲在酷狗的喜爱用户数排序 更新频率：每天",
+      "capture": "own",
+      "dimension": "scene",
+      "bucket": "scene/shortvideo"
+    },
+    {
+      "rank_id": "24971",
+      "chart_name": "DJ热歌榜",
+      "family": "scene",
+      "update_frequency": "周四",
+      "official_intro": "数据来源：DJ类歌曲 排序方式：按歌曲喜爱用户数的总量排序 更新频率：每周四",
+      "capture": "own",
+      "dimension": "scene",
+      "bucket": "scene/dj"
+    },
+    {
+      "rank_id": "46910",
+      "chart_name": "综艺新歌榜",
+      "family": "scene",
+      "update_frequency": "周三",
+      "official_intro": "数据来源：60天内发行的综艺新歌 排序方式：按歌曲热度、歌手等级和发行时间综合评分排序 更新频率：每周三",
+      "capture": "own",
+      "dimension": "scene",
+      "bucket": "scene/variety"
+    },
+    {
+      "rank_id": "33163",
+      "chart_name": "影视金曲榜",
+      "family": "scene",
+      "update_frequency": "周三",
+      "official_intro": "数据来源：影视歌曲 排序方式：影视歌曲偏好用户中，按歌曲日均喜爱用户数排序 更新频率：每周三",
+      "capture": "own",
+      "dimension": "scene",
+      "bucket": "scene/soundtrack"
+    },
+    {
+      "rank_id": "37361",
+      "chart_name": "酷狗识曲榜",
+      "family": "scene",
+      "update_frequency": "工作日",
+      "official_intro": "数据来源：酷狗音乐听歌识曲 排序方式：按近一周识曲用户数排序 更新频率：每周一至周五",
+      "capture": "own",
+      "dimension": "scene",
+      "bucket": "scene/recognition"
+    },
+    {
+      "rank_id": "100530",
+      "chart_name": "视频号热歌酷狗榜",
+      "family": "scene",
+      "update_frequency": "每天",
+      "official_intro": "数据来源：全曲库歌曲 排序方式：按酷狗、视频号双平台热度排序 更新频率：每天",
+      "capture": "own",
+      "dimension": "scene",
+      "bucket": "scene/channels"
+    },
+    {
+      "rank_id": "33162",
+      "chart_name": "ACG新歌榜",
+      "family": "tribe",
+      "update_frequency": "周四",
+      "official_intro": "数据来源：180天内发行的ACG新歌 排序方式：按歌曲热度、歌手等级和发行时间综合评分排序 更新频率：每周四",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/acg"
+    },
+    {
+      "rank_id": "33160",
+      "chart_name": "电音榜",
+      "family": "tribe",
+      "update_frequency": "周四",
+      "official_intro": "数据来源：电音歌曲 排序方式：电音歌曲偏好用户中，按歌曲日均喜爱用户数排序 更新频率：每周四",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/electronic"
+    },
+    {
+      "rank_id": "44412",
+      "chart_name": "说唱先锋榜",
+      "family": "tribe",
+      "update_frequency": "周四",
+      "official_intro": "数据来源：说唱歌曲 排序方式：说唱歌曲偏好用户中，按歌曲日均喜爱用户数排序 更新频率：每周四",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/rap"
+    },
+    {
+      "rank_id": "51341",
+      "chart_name": "民谣榜",
+      "family": "tribe",
+      "update_frequency": "周四",
+      "official_intro": "数据来源：民谣歌曲 排序方式：民谣歌曲偏好用户中，按歌曲日均喜爱用户数排序 更新频率：每周四",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/folk"
+    },
+    {
+      "rank_id": "59896",
+      "chart_name": "摇滚榜",
+      "family": "tribe",
+      "update_frequency": "周四",
+      "official_intro": "数据来源：摇滚歌曲 排序方式：摇滚歌曲偏好用户中，按歌曲日均喜爱用户数排序 更新频率：每周四",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/rock"
+    },
+    {
+      "rank_id": "59895",
+      "chart_name": "R&B榜",
+      "family": "tribe",
+      "update_frequency": "周四",
+      "official_intro": "数据来源：R&B歌曲 排序方式：R&B歌曲偏好用户中，按歌曲日均喜爱用户数排序 更新频率：每周四",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/rnb"
+    },
+    {
+      "rank_id": "59897",
+      "chart_name": "爵士榜",
+      "family": "tribe",
+      "update_frequency": "周四",
+      "official_intro": "数据来源：爵士歌曲 排序方式：按歌曲日均喜爱用户数排序 更新频率：每周四",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/jazz"
+    },
+    {
+      "rank_id": "59898",
+      "chart_name": "乡村音乐榜",
+      "family": "tribe",
+      "update_frequency": "周四",
+      "official_intro": "数据来源：乡村音乐歌曲 排序方式：按歌曲日均喜爱用户数排序 更新频率：每周四",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/country"
+    },
+    {
+      "rank_id": "59899",
+      "chart_name": "古典榜",
+      "family": "tribe",
+      "update_frequency": "周四",
+      "official_intro": "数据来源：古典歌曲 排序方式：按歌曲日均喜爱用户数排序 更新频率：每周四",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/classical"
+    },
+    {
+      "rank_id": "85897",
+      "chart_name": "国潮音乐榜",
+      "family": "tribe",
+      "update_frequency": "周五凌晨更新周榜",
+      "official_intro": "酷狗音乐结合平台特色，通过播放、传播、互动等维度，结合歌曲自身播放热度等综合评估推出的全新音乐榜单",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/guofeng"
+    },
+    {
+      "rank_id": "80025",
+      "chart_name": "国乐榜",
+      "family": "tribe",
+      "update_frequency": "周四更新",
+      "official_intro": "数据来源：国乐歌曲 排序方式：按歌曲日均喜爱用户数排序 更新频率：每周四",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/guofeng"
+    },
+    {
+      "rank_id": "108332",
+      "chart_name": "粤剧榜",
+      "family": "tribe",
+      "update_frequency": "每周二更新",
+      "official_intro": "数据来源：粤剧音乐 排序方式：按歌曲播放量排序 更新频率：每周二",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/opera"
+    },
+    {
+      "rank_id": "108333",
+      "chart_name": "京剧榜",
+      "family": "tribe",
+      "update_frequency": "每周二更新",
+      "official_intro": "数据来源：京剧音乐 排序方式：按歌曲播放量排序 更新频率：每周二",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/opera"
+    },
+    {
+      "rank_id": "108335",
+      "chart_name": "南音榜",
+      "family": "tribe",
+      "update_frequency": "每周二更新",
+      "official_intro": "数据来源：南音音乐 排序方式：按歌曲播放量排序 更新频率：每周二",
+      "capture": "own",
+      "dimension": "tribe",
+      "bucket": "tribe/opera"
+    }
+  ]
+}
