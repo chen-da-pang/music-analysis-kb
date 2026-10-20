@@ -422,7 +422,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--audience-charts",
         type=Path,
         default=None,
-        help="Optional pre-captured audience chart directory (default: run_dir/audience-charts)",
+        help=(
+            "Optional audience chart directory (default: run_dir/audience-charts). "
+            "If it already holds an audience-charts-manifest.json or every profile "
+            "chart page, the capture is reused and live capture is skipped; "
+            "otherwise the 24 charts are captured live into it"
+        ),
     )
     weekly_run.add_argument(
         "--audience-chart-profile",

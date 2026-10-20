@@ -16,6 +16,7 @@ from .campaign_delivery import load_campaign_delivery_file
 from .audience_charts import (
     DEFAULT_AUDIENCE_CHART_PROFILE,
     import_audience_inputs,
+    precaptured_audience_chart_summary,
 )
 from .lyrics import load_lyric_receipts
 from .operation_context import RunContext, atom, atomic_write_json
@@ -992,38 +993,71 @@ def run_weekly_run(
             if delivery_supplied or campaign_resume:
                 outputs.update({"status": "skipped", "reason": resume_reason})
             else:
-                command = [
-                    sys.executable,
-                    str(scripts_dir / "capture_kugou_audience_charts.py"),
-                    "--run-id",
-                    run_id,
-                    "--output-dir",
-                    str(audience_charts_path),
-                    "--profile",
-                    str(audience_chart_profile_path),
-                    "--reuse-directory",
-                    str(chart_dir),
-                    "--operations-file",
-                    str(operations_path),
-                ]
-                if proxy:
-                    command.extend(["--proxy", proxy])
+                # A manual-gate run may pre-capture the 24 audience charts via
+                # the same capture script and pass the directory here; reuse it
+                # instead of hitting kugou-cli again in this run.
                 try:
-                    payload, _ = _json_command(
-                        command, cwd=root, timeout_seconds=min(timeout_seconds, 900)
+                    precaptured = precaptured_audience_chart_summary(
+                        audience_charts_path,
+                        chart_profile=audience_chart_profile_path,
                     )
-                except RuntimeError as error:
-                    # Audience charts are an enrichment producer: a capture
-                    # failure is a recorded coverage gap, not a publication gate.
+                except Exception as error:  # enrichment must not block publication
                     outputs.update(
                         {
                             "status": "failed",
-                            "reason": "audience chart capture failed; publication continues",
+                            "reason": "audience chart reuse check failed; publication continues",
                             "error": str(error),
+                            "coverage_gaps": [
+                                {
+                                    "source": "chart_capture",
+                                    "reason": f"audience chart reuse check failed: {error}",
+                                }
+                            ],
                         }
                     )
                 else:
-                    outputs.update(payload)
+                    if precaptured is not None:
+                        outputs.update(precaptured)
+                    else:
+                        command = [
+                            sys.executable,
+                            str(scripts_dir / "capture_kugou_audience_charts.py"),
+                            "--run-id",
+                            run_id,
+                            "--output-dir",
+                            str(audience_charts_path),
+                            "--profile",
+                            str(audience_chart_profile_path),
+                            "--reuse-directory",
+                            str(chart_dir),
+                            "--operations-file",
+                            str(operations_path),
+                        ]
+                        if proxy:
+                            command.extend(["--proxy", proxy])
+                        try:
+                            payload, _ = _json_command(
+                                command, cwd=root, timeout_seconds=min(timeout_seconds, 900)
+                            )
+                        except RuntimeError as error:
+                            # Audience charts are an enrichment producer: a
+                            # capture failure is a recorded coverage gap, not a
+                            # publication gate.
+                            outputs.update(
+                                {
+                                    "status": "failed",
+                                    "reason": "audience chart capture failed; publication continues",
+                                    "error": str(error),
+                                    "coverage_gaps": [
+                                        {
+                                            "source": "chart_capture",
+                                            "reason": f"audience chart capture failed: {error}",
+                                        }
+                                    ],
+                                }
+                            )
+                        else:
+                            outputs.update(payload)
 
         merged_chart = run_dir / "chart-songs.json"
         with atom(context, "chart_dedupe", inputs={"captures": [item["songs"] for item in capture_results]}) as outputs:
@@ -1464,6 +1498,12 @@ def run_weekly_run(
                             "status": "failed",
                             "reason": "audience import failed; publication continues",
                             "error": str(error),
+                            "coverage_gaps": [
+                                {
+                                    "source": "audience_import",
+                                    "reason": f"audience import failed: {error}",
+                                }
+                            ],
                         }
                     )
                 else:

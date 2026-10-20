@@ -462,6 +462,56 @@ def test_projection_normalizes_cross_generation_and_skips_v1_excluded_buckets(
         assert repository.search(tags=["audience-hint/scene/ktv"]) == []
 
 
+def test_research_observations_never_project_into_the_hint_namespace(
+    tag_database: Path,
+) -> None:
+    """Regression for review finding #1: research tags stay in ``audience``.
+
+    A research profile can carry dimensions that also exist in the chart
+    vocabulary; looking them up in both tables used to project e.g.
+    ``scene/shortvideo`` as an ``audience-hint`` tag, making an SOP inference
+    look like chart signal.
+    """
+
+    with MusicKBRepository(tag_database) as repository:
+        repository.import_audience(
+            [
+                research_row(
+                    recording_id=SHANFENG_RECORDING_ID,
+                    researched_at="2026-10-20",
+                    observations=[
+                        ("scene", "scene/shortvideo"),
+                        ("tribe", "tribe/acg"),
+                        ("generation_hint", "gen/00后"),
+                        ("age", "31-40"),
+                    ],
+                )
+            ]
+        )
+        assert tag_names(repository, SHANFENG_RECORDING_ID) == {("audience", "age/31-40")}
+        assert repository.connection.execute(
+            "SELECT COUNT(*) FROM tag WHERE namespace = 'audience-hint'"
+        ).fetchone()[0] == 0
+        assert repository.search(tags=["audience-hint/scene/shortvideo"]) == []
+        assert repository.search(tags=["audience-hint/gen/00后"]) == []
+        assert repository.get_audience(SHANFENG_RECORDING_ID)["groups"][1]["profiles"] == []
+
+
+def test_matched_chart_evidence_is_not_a_coverage_gap(tag_database: Path) -> None:
+    """Regression for review finding #2: a chart hit count is not a gap."""
+
+    with MusicKBRepository(tag_database) as repository:
+        repository.import_audience([fixture_row(CHART_EVIDENCE, 1)], kind="chart_evidence")
+        audience = repository.get_audience(SHANFENG_RECORDING_ID)
+        research, chart = audience["groups"]
+        assert chart["coverage_gaps"] == []
+        assert research["coverage_gaps"] == []
+        assert audience["coverage_gaps"] == []
+        profile = chart["profiles"][0]
+        assert profile["coverage_note"] is None
+        assert "命中 1 榜" in profile["basis_note"]
+
+
 def test_get_canonical_analysis_includes_audience_summary(tag_database: Path) -> None:
     with MusicKBRepository(tag_database) as repository:
         repository.import_audience([fixture_row(SHANFENG)])

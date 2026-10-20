@@ -657,7 +657,11 @@ def build_chart_evidence_records(
                     "confidence": confidence,
                     "is_proxy": 1,
                     "researched_at": snapshot_date,
-                    "coverage_note": f"榜单证据：单期快照命中 {len(hits)} 榜",
+                    # A chart hit is evidence, not a coverage gap: keep the hit
+                    # count in basis_note so ``get_audience`` does not report
+                    # every matched song as "missing coverage". ``coverage_note``
+                    # stays reserved for genuinely missing evidence.
+                    "basis_note": f"单期快照命中 {len(hits)} 榜（榜单证据，非受众占比）",
                 },
                 "sources": sources,
                 "observations": observations,
@@ -696,7 +700,99 @@ def _derived_snapshot_date(capture: Mapping[str, Any], fallback: str) -> str:
     return fallback
 
 
-def _audience_tag_count(repository: MusicKBRepository) -> int:
+def precaptured_audience_chart_summary(
+    chart_directory: str | Path | None,
+    *,
+    chart_profile: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Return a reuse summary when a directory already holds an audience capture.
+
+    Manual-gate runs may capture the 24 audience charts outside the orchestrator
+    and pass the directory via ``--audience-charts``; the weekly-run atom then
+    reuses it instead of hitting kugou-cli again. A published capture manifest
+    is authoritative. Without one, the directory is reusable only when every
+    chart in the versioned profile has at least one normalized ``-songs.json``
+    page. An unreadable/malformed manifest raises ``ValidationError`` so the
+    caller records a coverage gap instead of silently recapturing over it.
+    """
+
+    if chart_directory is None:
+        return None
+    directory = Path(chart_directory).expanduser()
+    if not directory.is_dir():
+        return None
+    manifest = directory / AUDIENCE_CAPTURE_MANIFEST
+    if manifest.is_file():
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValidationError(
+                f"Unable to read pre-captured audience chart manifest: {manifest}",
+                details={"manifest": str(manifest)},
+            ) from error
+        if not isinstance(payload, Mapping):
+            raise ValidationError(
+                "Pre-captured audience chart manifest must be a JSON object",
+                details={"manifest": str(manifest)},
+            )
+        charts = payload.get("charts")
+        chart_count = payload.get("chart_count")
+        if chart_count is None and isinstance(charts, Sequence) and not isinstance(charts, (str, bytes)):
+            chart_count = len(charts)
+        reused_payload = payload.get("reused_charts")
+        if isinstance(reused_payload, Sequence) and not isinstance(reused_payload, (str, bytes)):
+            reused_charts = [str(rank_id) for rank_id in reused_payload if str(rank_id)]
+        else:
+            reused_charts = []
+        return {
+            "status": "reused",
+            "reason": "pre-captured audience chart manifest reused; live capture skipped",
+            "manifest": str(manifest),
+            "snapshot_date": payload.get("snapshot_date"),
+            "chart_count": int(chart_count or 0),
+            "captured_charts": int(payload.get("captured_charts") or 0),
+            "reused_charts": reused_charts,
+            "total_source_records": int(payload.get("total_source_records") or 0),
+        }
+    profile = load_audience_chart_profile(chart_profile)
+    present = [
+        str(chart["rank_id"])
+        for chart in profile["charts"]
+        if chart_capture_files(directory, str(chart["rank_id"]))
+    ]
+    if len(present) < len(profile["charts"]):
+        return None
+    capture = load_chart_capture(chart_directory=directory, profile=profile)
+    pages = [
+        path
+        for chart in capture["charts"].values()
+        for path in chart.get("files", [])
+    ]
+    total_source_records = 0
+    for page in pages:
+        try:
+            page_payload = json.loads(Path(page).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        summary = page_payload.get("summary") if isinstance(page_payload, Mapping) else None
+        if isinstance(summary, Mapping):
+            total_source_records += int(summary.get("source_records") or 0)
+    snapshot_date = _derived_snapshot_date(capture, "")
+    return {
+        "status": "reused",
+        "reason": "pre-captured audience chart pages reused; live capture skipped",
+        "manifest": None,
+        "snapshot_date": snapshot_date or None,
+        "chart_count": len(capture["charts"]),
+        "captured_charts": 0,
+        "reused_charts": sorted(capture["charts"]),
+        "total_source_records": total_source_records,
+    }
+
+
+def _audience_tag_total(repository: MusicKBRepository) -> int:
+    """Count distinct recording-level audience/hint tags after an import."""
+
     row = repository.connection.execute(
         """
         SELECT COUNT(DISTINCT rt.tag_id)
@@ -721,9 +817,9 @@ def import_audience_inputs(
 ) -> dict[str, Any]:
     """Match chart captures, import research profiles, and report coverage.
 
-    ``import_audience`` owns the four audience tables and (per the #140 seam)
-    the tag projection on its success path; this function never calls a
-    projection API directly, so it also runs before #140 lands.
+    ``import_audience`` owns the four audience tables and projects the
+    recording-level audience tags on its success path; this function only calls
+    the importer and reports how many tags the projection left in the master.
 
     Missing inputs are coverage gaps, not failures: the caller records them and
     keeps publishing. Per-record import errors are returned in the stats
@@ -745,7 +841,7 @@ def import_audience_inputs(
             "import": None,
         },
         "profiles": {"status": "skipped", "reason": "", "path": None, "import": None},
-        "tags": 0,
+        "tag_count": 0,
         "coverage_gaps": coverage_gaps,
     }
     chart_records: list[dict[str, Any]] = []
@@ -766,6 +862,17 @@ def import_audience_inputs(
             profile=profile,
             reuse_directory=chart_path.parent / "charts",
         )
+        if capture["missing"] and capture["entries"]:
+            # A partially captured chart set still imports what exists, but the
+            # missing charts are a real coverage gap and must be auditable.
+            coverage_gaps.append(
+                {
+                    "source": "chart_evidence",
+                    "reason": "audience chart capture is partial; missing charts: "
+                    + ", ".join(capture["missing"]),
+                    "missing_rank_ids": list(capture["missing"]),
+                }
+            )
         if not capture["entries"]:
             reason = f"no normalized audience chart entries found under {chart_path}"
             result["chart_evidence"].update({"status": "skipped", "reason": reason})
@@ -839,6 +946,6 @@ def import_audience_inputs(
                     iter_audience_file(profile_path), kind="profile"
                 )
                 result["profiles"]["import"] = profile_import
-            result["tags"] = _audience_tag_count(repository)
+            result["tag_count"] = _audience_tag_total(repository)
     result["status"] = "succeeded" if imported_anything else "skipped"
     return result
