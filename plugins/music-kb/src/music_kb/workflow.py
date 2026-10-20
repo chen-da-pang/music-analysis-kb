@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .campaign_delivery import load_campaign_delivery_file
+from .audience_charts import import_audience_inputs
 from .distribution import CommandRunner, publish_snapshot
 from .lyrics import load_lyric_receipts
 from .publish_state import record_publish_result
@@ -35,6 +36,9 @@ def run_weekly_update(
     publish: bool = False,
     state_file: str | Path,
     runner: CommandRunner | None = None,
+    audience_input: str | Path | None = None,
+    audience_charts: str | Path | None = None,
+    audience_chart_profile: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run one publisher update and optionally distribute its release.
 
@@ -70,6 +74,25 @@ def run_weekly_update(
         )
     else:
         tag_result = {"skipped": True, "reason": "generic input must carry its own retrieval tags"}
+
+    # Audience records are an enrichment pass: research profiles and captured
+    # chart snapshots are imported after deterministic tagging and before the
+    # release validation, and a failure only records a coverage gap (#141).
+    try:
+        audience_result = import_audience_inputs(
+            database=db,
+            chart_directory=audience_charts,
+            chart_profile=audience_chart_profile,
+            audience_profiles=audience_input,
+            delivery_resume=False,
+        )
+    except Exception as error:  # enrichment must not block the release
+        audience_result = {
+            "status": "failed",
+            "reason": "audience import failed; publication continues",
+            "error": str(error),
+            "coverage_gaps": [{"source": "audience", "reason": str(error)}],
+        }
 
     receipt_files = [Path(path).expanduser().resolve() for path in lyric_receipt_paths]
     receipts = [receipt for path in receipt_files for receipt in load_lyric_receipts(path)]
@@ -146,6 +169,7 @@ def run_weekly_update(
         "input_kind": input_kind,
         "import": import_result,
         "tags": tag_result,
+        "audience": audience_result,
         "lyrics": lyric_import,
         "validation": validation,
         "source_link_status": source_link_status,

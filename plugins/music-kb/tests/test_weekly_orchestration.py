@@ -25,6 +25,13 @@ FIXTURE = Path(__file__).parent / "fixtures" / "kugou_canonical_delivery.jsonl"
 OPERATIONS = Path(__file__).parents[1] / "references" / "validated-operations.json"
 
 
+
+def _atom_started(state: dict, name: str) -> str:
+    """Atom start timestamps are the durable execution order (state JSON sorts keys)."""
+
+    return str(state["atoms"][name]["started_at"])
+
+
 def _delivery_lyrics(lyric_receipt_writer, name: str) -> Path:
     return lyric_receipt_writer(
         name,
@@ -424,6 +431,80 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
     progress = tmp_path / "download_progress.json"
     progress.write_text("{}\n", encoding="utf-8")
     lyrics = _delivery_lyrics(lyric_receipt_writer, "supplied-delivery")
+    audience_charts = tmp_path / "audience-charts"
+    audience_charts.mkdir()
+    (audience_charts / "chart-49224-p1-songs.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "platform": "kugou",
+                "run_id": "supplied-delivery-resume",
+                "summary": {
+                    "run_id": "supplied-delivery-resume",
+                    "rank_id": "49224",
+                    "page": 1,
+                    "size": 100,
+                    "rank_start": 1,
+                    "source_records": 1,
+                    "captured_at": "2026-10-20T10:40:21+08:00",
+                },
+                "songs": [
+                    {
+                        "identity_key": "kugou:900",
+                        "platform": "kugou",
+                        "platform_track_key": "900",
+                        "title": "霓虹夜航",
+                        "artist": "示例乐队",
+                        "chart_appearances": [{"rank": 3}],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    audience_profiles = tmp_path / "audience-profiles.jsonl"
+    audience_profiles.write_text(
+        json.dumps(
+            {
+                "kind": "profile",
+                "recording": {"title": "霓虹夜航", "primary_artist": "示例乐队"},
+                "profile": {
+                    "target_platform": "douyin",
+                    "time_window": "full_lifecycle",
+                    "method_id": "version-matrix",
+                    "method_version": "v1.1",
+                    "status": "available",
+                    "confidence": "low",
+                    "is_proxy": 1,
+                    "researched_at": "2026-10-20",
+                },
+                "sources": [
+                    {
+                        "source_platform": "web",
+                        "source_key": "https://example.test/audience-weekly",
+                        "source_type": "report",
+                        "fetched_at": "2026-10-20",
+                        "evidence_level": "2_media",
+                    }
+                ],
+                "observations": [
+                    {
+                        "dimension": "age",
+                        "bucket": "31-40",
+                        "value_low": 0.3,
+                        "value_high": 0.4,
+                        "value_mid": 0.35,
+                        "evidence_level": "4_inferred",
+                        "is_proxy": 1,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     result = run_weekly_run(
         workspace=tmp_path,
@@ -449,6 +530,8 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
         state_file=tmp_path / "publish-state.json",
         expected_count=2,
         skip_peers=True,
+        audience_input=audience_profiles,
+        audience_charts=audience_charts,
     )
 
     state = json.loads(Path(result["state"]).read_text(encoding="utf-8"))
@@ -472,6 +555,39 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
     assert state["atoms"]["cnb_campaign_cleanup"]["outputs"]["status"] == "dry_run"
     assert "explicit repository deletion confirmation" in state["atoms"]["cnb_campaign_cleanup"]["outputs"]["reason"]
     assert not (tmp_path / "data" / "weekly_runs" / "supplied-delivery-resume" / "charts").exists()
+    resumed = "verified supplied delivery resumes after Music Flamingo analysis"
+    assert state["atoms"]["audience_chart_capture"]["outputs"] == {
+        "status": "skipped",
+        "reason": resumed,
+    }
+    audience = state["atoms"]["audience_import"]["outputs"]
+    assert audience["status"] == "succeeded"
+    assert audience["chart_evidence"]["status"] == "skipped"
+    assert "delivery resume" in audience["chart_evidence"]["reason"]
+    assert audience["profiles"]["import"]["profiles"] == 1
+    assert isinstance(audience["tags"], int)
+    from music_kb.repository import MusicKBRepository
+
+    with MusicKBRepository(database, read_only=True) as repository:
+        recordings = repository.connection.execute(
+            "SELECT id FROM recording WHERE canonical_analysis_id IS NOT NULL ORDER BY id"
+        ).fetchall()
+        audience_row = repository.get_audience(str(recordings[0]["id"]))
+    assert any(
+        group["group"] == "research" and group["profiles"]
+        for group in audience_row["groups"]
+    )
+    assert (
+        _atom_started(state, "chart_capture")
+        < _atom_started(state, "audience_chart_capture")
+        < _atom_started(state, "chart_dedupe")
+    )
+    assert (
+        _atom_started(state, "knowledge_import")
+        < _atom_started(state, "audience_import")
+        < _atom_started(state, "lyrics_import")
+        < _atom_started(state, "snapshot")
+    )
 
 
 def test_supplied_delivery_can_install_publisher_snapshot_explicitly_in_dry_run(
@@ -535,6 +651,12 @@ def test_supplied_delivery_can_install_publisher_snapshot_explicitly_in_dry_run(
     assert atom["outputs"]["verification"]["valid"] is True
     assert (local_target / "current.sqlite").is_symlink()
     assert (local_target / "current.sqlite").resolve().name == "fixture-local-install.sqlite"
+    audience = state["atoms"]["audience_import"]["outputs"]
+    assert audience["status"] == "skipped"
+    assert {gap["source"] for gap in audience["coverage_gaps"]} == {
+        "chart_evidence",
+        "research_profiles",
+    }
 
 
 def test_real_publish_defaults_to_local_snapshot_install(
@@ -714,6 +836,31 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
             assert command[command.index("--source-queue") + 1] == str(primary_wrapper_queue_path)
             assert command[command.index("--proxy") + 1] == "http://127.0.0.1:7890"
             return {"queue_manifest": {"queued": 0}}, subprocess.CompletedProcess(command, 0, "", "")
+        if name == "capture_kugou_audience_charts.py":
+            audience_dir = Path(command[command.index("--output-dir") + 1])
+            assert command[command.index("--reuse-directory") + 1] == str(
+                tmp_path / "data" / "weekly_runs" / "fresh-campaign" / "charts"
+            )
+            audience_dir.mkdir(parents=True, exist_ok=True)
+            manifest = audience_dir / "audience-charts-manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "snapshot_date": "2026-10-20",
+                        "charts": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return {
+                "chart_count": 1,
+                "captured_charts": 0,
+                "reused_charts": ["52144"],
+                "total_source_records": 1,
+                "snapshot_date": "2026-10-20",
+                "manifest": str(manifest),
+            }, subprocess.CompletedProcess(command, 0, "", "")
         if name == "cnb_campaign_repository.py" and "prepare" in command:
             assert command[command.index("--retained-campaign-receipt") + 1] == str(retained_receipt)
             receipt = Path(command[command.index("--receipt") + 1])
@@ -776,6 +923,17 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
     assert fallback_inputs["source_queue"] == str(primary_wrapper_queue_path)
     assert campaign_preflight_commands[0][campaign_preflight_commands[0].index("--retained-campaign-receipt") + 1] == str(retained_receipt)
     assert (tmp_path / "data" / "weekly_runs" / "fresh-campaign" / "cnb-input" / "manifest.jsonl").is_file()
+    assert state["atoms"]["audience_chart_capture"]["status"] == "succeeded"
+    assert state["atoms"]["audience_chart_capture"]["outputs"]["chart_count"] == 1
+    assert state["atoms"]["audience_import"]["outputs"] == {
+        "status": "skipped",
+        "reason": "no delivery in dry-run",
+    }
+    assert (
+        _atom_started(state, "chart_capture")
+        < _atom_started(state, "audience_chart_capture")
+        < _atom_started(state, "chart_dedupe")
+    )
 
 
 @pytest.mark.parametrize("receipt_completed", [False, True])

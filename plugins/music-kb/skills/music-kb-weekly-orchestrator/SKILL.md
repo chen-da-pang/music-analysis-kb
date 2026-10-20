@@ -43,6 +43,12 @@ data/weekly_runs/<run-id>/atoms/<atom>.json
 Each atom receipt carries the same `operations_sha256` as `run-state.json`,
 so the validated operation record used for that atom can be audited on its own.
 
+The two audience atoms (`audience_chart_capture`, `audience_import`) are
+enrichment. A missing or failed audience input records a coverage gap in its
+atom receipt and the run continues to release and publish; it never becomes a
+publication gate. A `--delivery` resume skips chart capture and imports only
+the supplied research profile JSONL.
+
 A failed atom stops the run. Resume only from a recorded safe boundary and
 reuse the same run id, campaign repository, and campaign receipt; never create
 a replacement slug to hide a failure.
@@ -106,8 +112,11 @@ pending still bypasses workspace allocation entirely.
 
 With `--delivery`, validate the supplied canonical Music Flamingo JSONL and its
 expected count first. This is a post-analysis resume: mark chart capture,
-download, fallback, CNB input, campaign repository, campaign submit, and CNB
-analysis as skipped; do not query CNB capacity or repeat pre-analysis work. If
+audience chart capture, download, fallback, CNB input, campaign repository,
+campaign submit, and CNB analysis as skipped; do not query CNB capacity or
+repeat pre-analysis work. `audience_import` still runs after `knowledge_import`
+and imports only `--audience` research profiles, recording why no chart
+snapshot was re-read. If
 the same run also has a campaign receipt, bind the supplied delivery to that
 receipt and still run receipt-bound cleanup after the local release and peer
 gates. An external delivery normally has no disposable repository to clean up.
@@ -157,6 +166,13 @@ be purged, so inventory—not file presence alone—is the dedupe record.
    `--cnb-command` path alone uses the old protected-repository storage gate.
 3. **`chart_capture`** — save every raw Kugou page JSON, normalize it, and keep
    absolute ranks.
+3a. **`audience_chart_capture`** — capture the 24 versioned audience charts
+   (3 generation + 7 scene + 14 tribe) from
+   `references/kugou-audience-charts-v1.json` into `run_dir/audience-charts/`
+   through the same kugou-cli capture script; 52144 is reused from
+   `run_dir/charts/` when that capture exists. Never write the download queue.
+   Skipped with a reason on `--delivery`/campaign resume; a capture failure is
+   recorded as a coverage gap instead of stopping the run.
 4. **`chart_dedupe`** — dedupe by `kugou:<mix_song_id>`, falling back to
    normalized title/artist, while preserving each song's `play_link`.
 5. **`historical_dedupe`** — rebuild the inventory and queue only missing,
@@ -212,6 +228,13 @@ be purged, so inventory—not file presence alone—is the dedupe record.
 11. **`cnb_analysis`** — validate the canonical delivery and expected count.
 12. **`knowledge_import`** — import idempotently, backfill song links, enrich
     retrieval tags, and verify the source-link completeness gate.
+12a. **`audience_import`** — read the captured chart pages, match them to
+    canonical recordings by MixSongID first and normalized title+artist next,
+    write title-hit/artist-miss entries to a review queue without auto-labelling
+    them, then import in-memory `chart_snapshot` evidence plus any
+    `--audience` research profile JSONL before lyrics and snapshot. Output
+    counts: chart hits, unmatched, ambiguous, profile imports, tags, and
+    coverage gaps. `--delivery` resumes import profiles only.
 13. **`lyrics_import`** — import the automatic CC lyric receipt (and any
     supplied historical receipt) only through exact `source_name +
     source_track_id` identity binding. Title/artist is never a database binding
@@ -300,6 +323,22 @@ uv run music-kb --json weekly-run \
   --cnb-transport lfs \
   --download-dry-run
 ```
+
+A fresh run captures the audience charts automatically. Supply assembled
+research profiles explicitly; both audience inputs are optional and their
+absence only narrows audience coverage:
+
+```bash
+uv run music-kb --json weekly-run \
+  --workspace /path/to/music-workspace \
+  --run-id kugou-2026w30 \
+  --db "$HOME/.music-kb/music-master.sqlite" \
+  --audience "$HOME/music-kb/audience/weekly-profiles.jsonl" \
+  --download-dry-run
+```
+
+`weekly-update` exposes the same `--audience` / `--audience-charts` inputs and
+imports them after deterministic tagging, before `validate`.
 
 When a receipt has the recorded build-GPU platform failure and the explicit
 Dev GPU recovery atom is selected, keep the source receipt untouched:

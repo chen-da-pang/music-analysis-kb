@@ -325,6 +325,24 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--output-dir", type=Path, required=True)
     weekly.add_argument("--release-name", default=None)
     weekly.add_argument(
+        "--audience",
+        type=Path,
+        default=None,
+        help="Optional research audience profile JSONL imported before validate",
+    )
+    weekly.add_argument(
+        "--audience-charts",
+        type=Path,
+        default=None,
+        help="Directory of normalized audience chart captures imported before validate",
+    )
+    weekly.add_argument(
+        "--audience-chart-profile",
+        type=Path,
+        default=None,
+        help="Versioned Kugou audience chart profile (default: references/kugou-audience-charts-v1.json)",
+    )
+    weekly.add_argument(
         "--lyrics-receipt",
         action="append",
         default=[],
@@ -394,6 +412,24 @@ def build_parser() -> argparse.ArgumentParser:
     weekly_run.add_argument("--download-dry-run", action="store_true")
     weekly_run.add_argument("--download-max-items", type=int)
     weekly_run.add_argument("--embed-python", type=Path, help="External model interpreter (or MUSIC_KB_EMBED_PYTHON)")
+    weekly_run.add_argument(
+        "--audience",
+        type=Path,
+        default=None,
+        help="Optional research audience profile JSONL imported after knowledge_import",
+    )
+    weekly_run.add_argument(
+        "--audience-charts",
+        type=Path,
+        default=None,
+        help="Optional pre-captured audience chart directory (default: run_dir/audience-charts)",
+    )
+    weekly_run.add_argument(
+        "--audience-chart-profile",
+        type=Path,
+        default=None,
+        help="Versioned Kugou audience chart profile (default: references/kugou-audience-charts-v1.json)",
+    )
     weekly_run.add_argument("--confirm-delete-audio", action="store_true")
     weekly_run.add_argument(
         "--confirm-cnb-analysis",
@@ -654,6 +690,9 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             peer_names=args.peer,
             publish=args.publish,
             state_file=args.state_file,
+            audience_input=args.audience,
+            audience_charts=args.audience_charts,
+            audience_chart_profile=args.audience_chart_profile,
         )
         return (0 if result["publish"]["failed_count"] == 0 else 1), result
     if args.command == "weekly-run":
@@ -700,6 +739,9 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             cnb_campaign_work_dir=args.cnb_campaign_work_dir,
             retained_campaign_receipt=args.retained_campaign_receipt,
             embed_python=args.embed_python,
+            audience_input=args.audience,
+            audience_charts=args.audience_charts,
+            audience_chart_profile=args.audience_chart_profile,
         )
         return 0, result
     raise AssertionError("unhandled command")
