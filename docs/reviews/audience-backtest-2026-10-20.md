@@ -10,6 +10,8 @@ ticket：[#142](https://github.com/chen-da-pang/music-analysis-kb/issues/142) ·
 
 山风 `full_lifecycle` 画像对票内写死基线的复算与票内预期完全一致：**年龄 L1 = 24.05pp**（≤25 通过）、**31–50 误差 = 8.36pp**（≤10 通过）、**性别方向 correct** → **山风 PASS**，偏差 0.00pp。第二首没有任何离线基线或画像输入，按票记 `blocked: 无离线输入`，不给 PASS/FAIL、不伪造基线；作为 fallback，对山风同一条 profile 做契约字段 / 八条反偏见 / 每条数值有 `source_id` / 无平台占比事实自洽检查，**全部通过**。
 
+复核补充（code-review 复核项）：① **每个进入回测的数字都能指回 `source_id`**——8/8 条带数值 observation 均解析到 `src_shanfeng_kugou_search`（§3）；② **省份 / 城市层级无数据，标「不可核」**——基线没有省份/城市层级字段，画像只有一条 4_inferred 的城市层级推断，本回测不比较、报告不引用（§窗口与口径偏差 4、`not_compared`）；③ **榜单证据导入不改变调研画像数值**——`chart_snapshot` 证据与本回测的 `full_lifecycle` 数值隔离，导入后 8 条 research observation 与 profile 逐字段不变、L1/31–50/性别方向复算仍为 24.05 / 8.36 / correct（§自洽检查 5，测试锁定）。
+
 ## 输入（写死，不刷新）
 
 | 项 | 值 |
@@ -23,6 +25,8 @@ ticket：[#142](https://github.com/chen-da-pang/music-analysis-kb/issues/142) ·
 | 基线 gender | `{"male": 0.6040, "female": 0.3960}` |
 
 基线与窗口逐字来自 #142 正文「输入（写死）」，**不依赖仓库外文件**；画像数值来自 fixture 的 `value_mid`（0–1），不读 `value_low/high`。
+
+> fixture 修正（review fix #3）：原 `coverage_note` 写「年龄未重算前先留空」，与同一条 profile 里的 5 个 age `value_mid` 矛盾。现改为声明平台口径差异，并明确「年龄/性别/城市层级均为 `4_inferred` 推断区间，不是平台报表」——数值本身未改。
 
 ## 方法（写死口径）
 
@@ -126,6 +130,12 @@ uv run --offline pytest -q tests/test_audience_backtest.py      # 断言票内�
 - 唯一可能被误读的数字是城市层级 0.60–0.73（mid 0.66）：它是 4_inferred，且基线根本没有城市层级字段，本回测**未做数值对比**、报告未引用为事实。
 - 结论：记录中不存在“平台占比事实”表述。
 
+### 5. 榜单证据导入不改变调研画像数值（回归锁定）
+
+- 在同一临时库里先导入山风 `full_lifecycle` research profile，再导入 `chart_snapshot` 榜单证据；导入前后 8 条 research observation 的 `dimension` / `bucket` / `value_low` / `value_mid` / `value_high` / `evidence_level` / `source_id` 逐项相同，profile 行逐字段相同。
+- 导入榜单证据后从库内 observation 复算仍为 **L1 24.05pp / 31–50 8.36pp / 性别方向 correct / PASS**，不存在“榜单证据污染回测数值”。
+- 榜单证据分组自身不产生覆盖缺口：命中数写在 `basis_note`（如「单期快照命中 N 榜」），`coverage_note` 只留给真正缺口；该断言由 `tests/test_audience_backtest.py::test_chart_evidence_import_does_not_change_research_profile_values` 与 `tests/test_audience_tags.py` 的投影回归共同锁定。
+
 ## 不能支持什么
 
 - **不能支撑投放级百分比或平台受众报表**：全部年龄/性别/城市层级数字是 4_inferred 推断区间，不是抖音后台数据。
@@ -134,7 +144,7 @@ uv run --offline pytest -q tests/test_audience_backtest.py      # 断言票内�
 - **不能支撑省份/城市层级结论**：两维均不可核，不引用。
 - **不能验证分版本画像**：fixture 只保留 1 条总体 profile，不含 SOP L2 的分版本画像表；方法“先分版本再合总体”的关键一步未被本次回测覆盖。
 - **不能校准置信度**：profile `confidence=low` 未经任何置信度回测，“low 是否恰当”无证据。
-- **不能用于榜单证据回测**：榜单证据不产出受众占比，本报告不包含 `chart_snapshot` 数值回测。
+- **不能用于榜单证据数值回测**：榜单证据不产出受众占比，本报告不包含 `chart_snapshot` 的受众数值；只做了「导入榜单证据后调研画像数值不变」的隔离回归（§5）。
 - **不能替代 #137 正文的验收改写**：本报告只作为 #142 的 PR Evidence；不改写/不回贴 #137。
 
 ## 交付物与测试证据
@@ -145,4 +155,4 @@ uv run --offline pytest -q tests/test_audience_backtest.py      # 断言票内�
 | 离线测试 | [`plugins/music-kb/tests/test_audience_backtest.py`](../../plugins/music-kb/tests/test_audience_backtest.py) |
 | 本报告 | [`docs/reviews/audience-backtest-2026-10-20.md`](audience-backtest-2026-10-20.md) |
 
-离线测试覆盖：票内预期值断言（24.05 / 8.36 / correct）、L1 不除 2 的公式性质、31–50 两档相加、性别方向翻转/并列、第二首 blocked 且无 verdict、自洽检查通过 + 4 类破坏样本各自失败、fixture 经 `import-audience` 导入临时 SQLite 后从库内 observation 复算同值（无网络）。全量测试命令：`cd plugins/music-kb && uv run --offline pytest -q`。
+离线测试覆盖：票内预期值断言（24.05 / 8.36 / correct）、L1 不除 2 的公式性质、31–50 两档相加、性别方向翻转/并列、第二首 blocked 且无 verdict、自洽检查通过 + 4 类破坏样本各自失败、fixture 经 `import-audience` 导入临时 SQLite 后从库内 observation 复算同值、**导入 `chart_snapshot` 榜单证据后 research observation/profile 逐字段不变且复算仍 PASS**（无网络）。全量测试命令：`cd plugins/music-kb && uv run --offline pytest -q`。
