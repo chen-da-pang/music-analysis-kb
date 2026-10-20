@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>music-kb · 库地图</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #14171c; --line: #262b33; --ink: #d8dce2; --muted: #8a93a0;
+    --soft: #1a1e25; --accent: #6ea8fe; --warn: #f0a35e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--ink);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid var(--line); background: #12151a; flex: none; flex-wrap: wrap; }
+  .brand { font-size: 15px; font-weight: 700; white-space: nowrap; }
+  .brand small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  #channels { display: flex; gap: 6px; }
+  #channels button { background: var(--soft); color: var(--muted); border: 1px solid var(--line);
+    border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
+  #channels button.on { background: #222a38; color: #dbe6fb; border-color: #44506b; }
+  #search { background: var(--soft); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px; width: 200px; outline: none; }
+  #search:focus { border-color: #44506b; }
+  #reset { background: transparent; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  #reset:hover { color: var(--ink); }
+  #count { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #mapwrap { flex: 1; position: relative; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  #legend { position: absolute; left: 12px; top: 12px; background: rgba(16,18,22,.9);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    font-size: 12px; width: 210px; max-height: calc(100% - 60px); overflow: auto; }
+  #legend h4 { margin: 0 0 6px; font-size: 11px; letter-spacing: .08em; color: var(--muted);
+    text-transform: uppercase; }
+  #legend .row { display: flex; align-items: center; gap: 7px; padding: 3px 6px;
+    border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+  #legend .row:hover { background: #1d222a; }
+  #legend .row.off { opacity: .35; }
+  #legend .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  #legend .n { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #hint { position: absolute; left: 12px; bottom: 10px; color: #5f6875; font-size: 12px; }
+  #tooltip { position: absolute; pointer-events: none; background: rgba(20,23,28,.96);
+    border: 1px solid #3a414c; border-radius: 7px; padding: 7px 10px; font-size: 12px;
+    display: none; max-width: 320px; z-index: 5; }
+  #tooltip b { font-weight: 600; }
+  #tooltip span { color: var(--muted); }
+  aside { width: 410px; flex: none; border-left: 1px solid var(--line); background: var(--panel);
+    overflow-y: auto; padding: 16px; }
+  aside h2 { font-size: 17px; line-height: 1.4; margin: 0 0 4px; }
+  aside .artists { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px;
+    border-radius: 999px; background: var(--soft); border: 1px solid var(--line);
+    font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .badge i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  audio { width: 100%; height: 36px; margin: 4px 0 12px; }
+  .meta { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .section-title { font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); margin: 14px 0 6px; }
+  .nb { display: flex; align-items: baseline; gap: 8px; padding: 7px 8px; border-radius: 7px;
+    cursor: pointer; border: 1px solid transparent; }
+  .nb:hover { background: #1b2027; border-color: #2c333d; }
+  .nb .d { color: var(--warn); font-variant-numeric: tabular-nums; font-size: 12px; flex: none; }
+  .nb .t { min-width: 0; }
+  .nb .t div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nb .t span { color: var(--muted); font-size: 12px; }
+  .note { color: var(--muted); font-size: 12px; line-height: 1.7; }
+  details.lyrics { margin: 8px 0 4px; border: 1px solid var(--line); border-radius: 8px;
+    background: #12151a; }
+  details.lyrics summary { cursor: pointer; padding: 8px 10px; color: var(--muted); font-size: 12px; }
+  details.lyrics pre { margin: 0; padding: 0 12px 12px; white-space: pre-wrap; word-break: break-word;
+    font: 13px/1.75 inherit; color: var(--ink); max-height: 260px; overflow: auto; }
+  .filelink { display: inline-block; margin: 0 0 10px; color: var(--accent); font-size: 12px; }
+  .empty { color: var(--muted); font-size: 13px; line-height: 1.8; }
+  .empty b { color: var(--ink); }
+  kbd { background: var(--soft); border: 1px solid var(--line); border-radius: 4px;
+    padding: 0 5px; font-size: 11px; }
+  @media (max-width: 900px) { aside { width: 340px; } #search { width: 150px; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">music-kb 库地图 <small id="recipe"></small></div>
+  <div id="channels"></div>
+  <input id="search" placeholder="搜索歌名 / 艺人…" autocomplete="off">
+  <button id="reset">重置视图</button>
+  <div id="count"></div>
+</header>
+<main>
+  <div id="mapwrap">
+    <canvas id="map"></canvas>
+    <div id="legend"></div>
+    <div id="hint">滚轮缩放 · 拖拽平移 · 单击查看（完整播放 + 歌词） · 双击重置</div>
+    <div id="tooltip"></div>
+  </div>
+  <aside id="panel"></aside>
+</main>
+
+<script src="data.js"></script>
+<script>
+(function () {
+  const data = window.VIZ_DATA;
+  const canvas = document.getElementById("map");
+  const ctx = canvas.getContext("2d");
+  const panel = document.getElementById("panel");
+  const legend = document.getElementById("legend");
+  const tooltip = document.getElementById("tooltip");
+  const count = document.getElementById("count");
+  const search = document.getElementById("search");
+  const recipe = document.getElementById("recipe");
+
+  let channelIndex = 0;
+  let selected = null;      // song index in current channel
+  let hovered = null;
+  let zoom = 1;
+  const pan = { x: 0, y: 0 };
+  const hidden = new Set(); // cluster ids hidden
+  const query = () => search.value.trim().toLowerCase();
+
+  const channel = () => data.channels[channelIndex];
+  const songList = () => channel().songs;
+  const clusterMap = () => {
+    const map = new Map();
+    for (const cluster of channel().clusters) map.set(cluster.id, cluster);
+    return map;
+  };
+  const matches = (song) => {
+    const value = query();
+    if (!value) return true;
+    return (song.title + " " + song.artists.join(" ")).toLowerCase().includes(value);
+  };
+  const visible = (song) => !hidden.has(song.cluster) && matches(song);
+
+  function cssSize() {
+    const rect = canvas.getBoundingClientRect();
+    return { w: rect.width, h: rect.height };
+  }
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+  function project(song) {
+    const { w, h } = cssSize();
+    const scale = Math.min(w, h) * 0.46 * zoom;
+    return [w / 2 + pan.x + song.x * scale, h / 2 + pan.y - song.y * scale];
+  }
+  function nearest(px, py) {
+    let best = null;
+    let bestDistance = 10;
+    channel().songs.forEach((song, index) => {
+      if (!visible(song)) return;
+      const [x, y] = project(song);
+      const distance = Math.hypot(x - px, y - py);
+      if (distance < bestDistance) { bestDistance = distance; best = index; }
+    });
+    return best;
+  }
+
+  function draw() {
+    const { w, h } = cssSize();
+    ctx.clearRect(0, 0, w, h);
+    const clusters = clusterMap();
+    const value = query();
+    for (let index = 0; index < songList().length; index += 1) {
+      const song = songList()[index];
+      const cluster = clusters.get(song.cluster);
+      if (hidden.has(song.cluster)) continue;
+      const [x, y] = project(song);
+      const active = visible(song);
+      ctx.beginPath();
+      const noisy = song.cluster < 0;
+      ctx.arc(x, y, index === selected ? 6.2 : (noisy ? 2.6 : 3.8), 0, Math.PI * 2);
+      ctx.fillStyle = cluster ? cluster.color : "#4a505a";
+      ctx.globalAlpha = active ? (noisy ? 0.7 : 0.92) : (value ? 0.08 : 0.45);
+      ctx.fill();
+      if (index === selected) {
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#ffffff";
+        ctx.stroke();
+      } else if (index === hovered) {
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "rgba(255,255,255,.75)";
+        ctx.stroke();
+      }
+    }
+    // cluster labels at centroids
+    ctx.font = "11px -apple-system, PingFang SC, sans-serif";
+    ctx.textAlign = "center";
+    for (const cluster of clusters.values()) {
+      if (cluster.id < 0 || cluster.size < 10) continue;
+      const members = songList().filter(song => song.cluster === cluster.id);
+      if (!members.length) continue;
+      let cx = 0, cy = 0;
+      for (const member of members) { const [x, y] = project(member); cx += x; cy += y; }
+      cx /= members.length; cy /= members.length;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(10,12,16,.9)";
+      ctx.strokeText(cluster.name, cx, cy - 12);
+      ctx.fillStyle = "#e8ecf2";
+      ctx.globalAlpha = 0.9;
+      ctx.fillText(cluster.name, cx, cy - 12);
+    }
+    ctx.globalAlpha = 1;
+    count.textContent = `${channel().label} · ${songList().length} 首` +
+      (value ? ` · 匹配 ${songList().filter(matches).length}` : "") +
+      (selected === null ? "" : " · 已选 1 首");
+  }
+
+  function renderChannels() {
+    const box = document.getElementById("channels");
+    box.innerHTML = "";
+    data.channels.forEach((item, index) => {
+      const button = document.createElement("button");
+      button.textContent = item.label;
+      button.className = index === channelIndex ? "on" : "";
+      button.onclick = () => {
+        channelIndex = index;
+        selected = null;
+        hidden.clear();
+        hovered = null;
+        zoom = 1; pan.x = 0; pan.y = 0;
+        renderChannels();
+        renderLegend();
+        renderPanel();
+        draw();
+      };
+      box.appendChild(button);
+    });
+    recipe.textContent = `${channel().model_id} · ${channel().recipe}`;
+  }
+
+  function renderLegend() {
+    const clusters = channel().clusters;
+    const total = songList().length;
+    legend.innerHTML = `<h4>簇（点击隐藏/显示）</h4>` +
+      clusters.map(cluster =>
+        `<div class="row ${hidden.has(cluster.id) ? "off" : ""}" data-id="${cluster.id}">
+           <span class="dot" style="background:${cluster.color}"></span>
+           <span>${cluster.name}</span><span class="n">${cluster.size}</span>
+         </div>`).join("") +
+      `<div class="row" data-id="all" style="margin-top:6px;border-top:1px solid #262b33;padding-top:8px">
+         <span class="dot" style="background:#2a2f37"></span><span>全部</span><span class="n">${total}</span>
+       </div>`;
+    legend.querySelectorAll(".row").forEach(row => {
+      row.onclick = () => {
+        const id = row.dataset.id;
+        if (id === "all") { hidden.clear(); }
+        else {
+          const key = Number(id);
+          if (hidden.has(key)) hidden.delete(key); else hidden.add(key);
+        }
+        renderLegend();
+        draw();
+      };
+    });
+  }
+
+  function clusterOf(song) {
+    return channel().clusters.find(cluster => cluster.id === song.cluster);
+  }
+
+  function renderPanel() {
+    if (selected === null) {
+      const clusters = channel().clusters;
+      const noise = clusters.find(cluster => cluster.id === -1);
+      panel.innerHTML = `
+        <div class="empty">
+          <b>${songList().length} 首 × 3 个听感通道</b><br>
+          当前：${channel().label}（${channel().model_id}）<br>
+          ${clusters.filter(c => c.id >= 0).length} 个浏览用簇${noise ? `，${noise.size} 首散点` : ""}。
+          <div class="section-title">怎么用</div>
+          · 滚轮缩放、拖拽平移、双击重置<br>
+          · 点击任意点：完整播放、查看歌词、看${channel().label}最近 5 首<br>
+          · 顶部切换整体听感 / 节奏 / 音色，布局会重算<br>
+          · 搜索会高亮匹配点，簇图例可隐藏
+          <div class="section-title">注意</div>
+          <div class="note">
+            这里是探索性浏览：HDBSCAN 的簇对参数敏感，簇不是质量结论。
+            邻域来自对应通道的原始向量空间；距离越小越像（0–2）。
+          </div>
+        </div>`;
+      return;
+    }
+    const song = songList()[selected];
+    const cluster = clusterOf(song);
+    const neighbors = song.neighbors.map(([index, distance]) => ({ index, distance, song: songList()[index] }));
+    panel.innerHTML = `
+      <h2>${escapeHtml(song.title)}</h2>
+      <div class="artists">${escapeHtml(song.artists.join("、") || "未知艺人")}</div>
+      <div class="badge"><i style="background:${cluster ? cluster.color : "#4a505a"}"></i>
+        ${cluster ? cluster.name : "未分簇"} · ${channel().label}</div>
+      <div class="meta">${channel().model_id} · ${channel().recipe}</div>
+      ${song.full ? `<audio controls preload="none" src="${escapeHtml(song.full)}"></audio>
+        <a class="filelink" href="${escapeHtml(song.full)}" target="_blank" rel="noopener">在新标签播放完整音频</a>`
+                  : `<div class="note">本地音频缺失，无法试听。</div>`}
+      ${song.lyric ? `<details class="lyrics" open><summary>歌词${
+          song.lyric_status === "available" ? "" : "（" + song.lyric_status + "）"
+        }</summary><pre>${escapeHtml(song.lyric)}</pre></details>`
+        : `<div class="note">无歌词（${song.lyric_status || "missing"}）</div>`}
+      <div class="section-title">${channel().label}最近 5 首</div>
+      ${neighbors.map(item => `
+        <div class="nb" data-index="${item.index}">
+          <span class="d">${item.distance.toFixed(3)}</span>
+          <div class="t">
+            <div>${escapeHtml(item.song.title)}</div>
+            <span>${escapeHtml(item.song.artists.join("、"))}</span>
+          </div>
+        </div>`).join("")}
+    `;
+    panel.querySelectorAll(".nb").forEach(row => {
+      row.onclick = () => {
+        selected = Number(row.dataset.index);
+        renderPanel();
+        draw();
+      };
+    });
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, ch =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+  }
+
+  function locate(event) {
+    const rect = canvas.getBoundingClientRect();
+    return [event.clientX - rect.left, event.clientY - rect.top];
+  }
+
+  canvas.addEventListener("mousemove", event => {
+    const [x, y] = locate(event);
+    if (drag) {
+      pan.x += event.clientX - drag.x;
+      pan.y += event.clientY - drag.y;
+      drag.x = event.clientX; drag.y = event.clientY;
+      draw();
+      return;
+    }
+    const index = nearest(x, y);
+    hovered = index;
+    if (index === null) {
+      tooltip.style.display = "none";
+    } else {
+      const song = songList()[index];
+      const cluster = clusterOf(song);
+      tooltip.innerHTML = `<b>${escapeHtml(song.title)}</b><br><span>${escapeHtml(song.artists.join("、"))}${
+        cluster ? " · " + cluster.name : ""}</span>`;
+      tooltip.style.display = "block";
+      tooltip.style.left = `${x + 14}px`;
+      tooltip.style.top = `${y + 14}px`;
+    }
+    draw();
+  });
+  canvas.addEventListener("mouseleave", () => { hovered = null; tooltip.style.display = "none"; draw(); });
+
+  let drag = null;
+  canvas.addEventListener("mousedown", event => {
+    drag = { x: event.clientX, y: event.clientY };
+    canvas.style.cursor = "grabbing";
+  });
+  window.addEventListener("mouseup", () => { drag = null; canvas.style.cursor = "crosshair"; });
+  canvas.addEventListener("click", event => {
+    const [x, y] = locate(event);
+    const index = nearest(x, y);
+    if (index !== null) {
+      selected = index;
+      renderPanel();
+      draw();
+    }
+  });
+  canvas.addEventListener("dblclick", () => resetView());
+  canvas.addEventListener("wheel", event => {
+    event.preventDefault();
+    zoom = Math.min(8, Math.max(0.5, zoom * Math.exp(-event.deltaY * 0.0015)));
+    draw();
+  }, { passive: false });
+
+  function resetView() {
+    zoom = 1; pan.x = 0; pan.y = 0; draw();
+  }
+  document.getElementById("reset").onclick = resetView;
+  search.addEventListener("input", draw);
+
+  window.addEventListener("resize", resize);
+  renderChannels();
+  renderLegend();
+  renderPanel();
+  resize();
+  const hash = /select=(\d+)/.exec(location.hash);
+  if (hash && Number(hash[1]) < songList().length) {
+    selected = Number(hash[1]);
+    renderPanel();
+    draw();
+  }
+})();
+</script>
+</body>
+</html>
