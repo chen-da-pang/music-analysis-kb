@@ -275,14 +275,23 @@ def _audience_bucket_value(prefix: str, bucket: str) -> str | None:
     return None
 
 
-def _audience_tag_name(dimension: str, bucket: str) -> tuple[str, str] | None:
-    """Map one observation to ``(namespace, path-style tag name)`` or ``None``."""
+def _audience_tag_name(
+    dimension: str, bucket: str, *, chart_evidence: bool
+) -> tuple[str, str] | None:
+    """Map one observation from its own profile kind to a tag, or skip it.
 
-    prefix = AUDIENCE_TAG_PREFIXES.get(dimension)
-    namespace = AUDIENCE_TAG_NAMESPACE
-    if prefix is None:
-        prefix = AUDIENCE_HINT_TAG_PREFIXES.get(dimension)
-        namespace = AUDIENCE_HINT_TAG_NAMESPACE
+    Spec v2.1 §7 gives each namespace its own closed projection table, so the
+    profile kind decides the vocabulary: a research profile may only project
+    ``age``/``gender``/``city_tier`` into ``audience`` and a chart profile may
+    only project ``generation_hint``/``scene``/``tribe`` into ``audience-hint``.
+    Looking the dimension up in both tables (the pre-review behavior) let a
+    research ``scene`` observation leak into ``audience-hint/scene/*`` and made
+    a chart-derived hint look like SOP research.
+    """
+
+    prefixes = AUDIENCE_HINT_TAG_PREFIXES if chart_evidence else AUDIENCE_TAG_PREFIXES
+    namespace = AUDIENCE_HINT_TAG_NAMESPACE if chart_evidence else AUDIENCE_TAG_NAMESPACE
+    prefix = prefixes.get(dimension)
     if prefix is None:
         return None
     value = _audience_bucket_value(prefix, bucket)
@@ -2735,7 +2744,7 @@ class MusicKBRepository:
                 continue
             research_recordings += 1
             tag_plan.setdefault(recording_id, set()).update(
-                self._audience_observation_tags(str(profile["id"]))
+                self._audience_observation_tags(str(profile["id"]), chart_evidence=False)
             )
 
         latest_period_row = self.connection.execute(
@@ -2764,7 +2773,7 @@ class MusicKBRepository:
                     continue
                 chart_recordings += 1
                 tag_plan.setdefault(recording_id, set()).update(
-                    self._audience_observation_tags(str(profile["id"]))
+                    self._audience_observation_tags(str(profile["id"]), chart_evidence=True)
                 )
 
         tags_written = 0
@@ -2807,13 +2816,19 @@ class MusicKBRepository:
             "fts_rebuilt": len(set(tag_plan) | stale_recordings),
         }
 
-    def _audience_observation_tags(self, profile_id: str) -> set[tuple[str, str]]:
+    def _audience_observation_tags(
+        self, profile_id: str, *, chart_evidence: bool
+    ) -> set[tuple[str, str]]:
         tags: set[tuple[str, str]] = set()
         for row in self.connection.execute(
             "SELECT dimension, bucket FROM audience_observation WHERE profile_id = ?",
             (profile_id,),
         ):
-            tag = _audience_tag_name(str(row["dimension"]), str(row["bucket"]))
+            tag = _audience_tag_name(
+                str(row["dimension"]),
+                str(row["bucket"]),
+                chart_evidence=chart_evidence,
+            )
             if tag is not None:
                 tags.add(tag)
         return tags

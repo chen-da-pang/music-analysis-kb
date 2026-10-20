@@ -26,6 +26,7 @@ from music_kb.audience_charts import (
     load_audience_chart_profile,
     load_chart_capture,
     match_chart_entries,
+    precaptured_audience_chart_summary,
 )
 
 
@@ -552,7 +553,10 @@ def test_build_chart_evidence_keeps_best_rank_and_confidence_rule() -> None:
     assert record["profile"]["researched_at"] == "2026-10-20"
     assert record["profile"]["confidence"] == "medium"
     assert record["profile"]["is_proxy"] == 1
-    assert record["profile"]["coverage_note"] == "榜单证据：单期快照命中 2 榜"
+    # A chart hit is evidence, not a coverage gap: the hit count lives in
+    # basis_note, and coverage_note is reserved for genuinely missing evidence.
+    assert "coverage_note" not in record["profile"]
+    assert record["profile"]["basis_note"] == "单期快照命中 2 榜（榜单证据，非受众占比）"
     assert {source["source_key"] for source in record["sources"]} == {
         "chart:49223:2026-10-20",
         "chart:49224:2026-10-20",
@@ -742,6 +746,10 @@ def test_import_audience_inputs_imports_chart_evidence_and_profiles(tmp_path: Pa
         assert len(chart_group["profiles"]) == 1
         assert chart_group["profiles"][0]["method_id"] == "chart_signal_v1"
         assert chart_group["profiles"][0]["confidence"] == "medium"
+        # Matched chart evidence must not surface as a coverage gap; the hit
+        # count is visible in basis_note instead (review finding #2).
+        assert chart_group["coverage_gaps"] == []
+        assert "命中 2 榜" in chart_group["profiles"][0]["basis_note"]
         assert len(chart_group["observations"]) == 2
         assert {observation["bucket"] for observation in chart_group["observations"]} == {
             "gen/00后",
@@ -787,6 +795,30 @@ def test_import_audience_inputs_records_missing_inputs_as_coverage_gaps(tmp_path
         ).fetchone()[0] == 0
 
 
+def test_import_audience_inputs_reports_partial_capture_as_coverage_gap(tmp_path: Path) -> None:
+    database = _seed_library(tmp_path / "master.sqlite")
+    chart_dir = tmp_path / "audience-charts"
+    _write_chart_capture(
+        chart_dir,
+        "49224",
+        [_chart_song("霓虹夜航", "示例乐队", track_key="900", rank=3)],
+    )
+    _write_chart_capture(
+        chart_dir,
+        "49223",
+        [_chart_song("霓虹夜航", "示例乐队", track_key="900", rank=8)],
+    )
+    result = import_audience_inputs(database=database, chart_directory=chart_dir)
+    # The two present charts still import; the other 22 are an explicit,
+    # auditable coverage gap rather than a silent omission.
+    assert result["chart_evidence"]["status"] == "imported"
+    gap = next(gap for gap in result["coverage_gaps"] if gap["source"] == "chart_evidence")
+    assert "partial" in gap["reason"]
+    assert len(gap["missing_rank_ids"]) == 22
+    assert "49225" in gap["missing_rank_ids"]
+    assert "49224" not in gap["missing_rank_ids"]
+
+
 def test_import_audience_inputs_delivery_resume_imports_profiles_only(tmp_path: Path) -> None:
     database = _seed_library(tmp_path / "master.sqlite")
     chart_dir = tmp_path / "audience-charts"
@@ -811,6 +843,83 @@ def test_import_audience_inputs_delivery_resume_imports_profiles_only(tmp_path: 
             "SELECT COUNT(*) FROM audience_profile WHERE method_id='chart_signal_v1'"
         ).fetchone()[0]
     assert chart_profiles == 0
+
+
+# -- pre-captured reuse ------------------------------------------------------
+
+
+def test_precaptured_summary_reuses_manifest_directory(tmp_path: Path) -> None:
+    chart_dir = tmp_path / "audience-charts"
+    chart_dir.mkdir()
+    manifest = chart_dir / "audience-charts-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "snapshot_date": "2026-10-20",
+                "chart_count": 24,
+                "captured_charts": 23,
+                "reused_charts": ["52144"],
+                "total_source_records": 2403,
+                "charts": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    summary = precaptured_audience_chart_summary(
+        chart_dir, chart_profile=REFERENCE_PROFILE
+    )
+    assert summary is not None
+    assert summary["status"] == "reused"
+    assert "manifest reused" in summary["reason"]
+    assert summary["manifest"] == str(manifest)
+    assert summary["snapshot_date"] == "2026-10-20"
+    assert summary["chart_count"] == 24
+    assert summary["reused_charts"] == ["52144"]
+    assert summary["total_source_records"] == 2403
+
+
+def test_precaptured_summary_reuses_complete_page_directory_without_manifest(
+    tmp_path: Path,
+) -> None:
+    chart_dir = tmp_path / "audience-charts"
+    profile = load_audience_chart_profile(REFERENCE_PROFILE)
+    for chart in profile["charts"]:
+        _write_chart_capture(
+            chart_dir,
+            str(chart["rank_id"]),
+            [_chart_song(f"歌{chart['rank_id']}", "歌手", track_key=None, rank=1)],
+        )
+    summary = precaptured_audience_chart_summary(
+        chart_dir, chart_profile=REFERENCE_PROFILE
+    )
+    assert summary is not None
+    assert summary["status"] == "reused"
+    assert summary["manifest"] is None
+    assert summary["chart_count"] == len(profile["charts"])
+    assert summary["snapshot_date"] == "2026-10-20"
+    assert summary["total_source_records"] == len(profile["charts"])
+
+
+def test_precaptured_summary_ignores_missing_partial_and_unreadable_directories(
+    tmp_path: Path,
+) -> None:
+    assert precaptured_audience_chart_summary(None) is None
+    assert precaptured_audience_chart_summary(tmp_path / "absent") is None
+
+    partial = tmp_path / "partial"
+    _write_chart_capture(
+        partial,
+        "49224",
+        [_chart_song("晴天", "周杰伦", track_key="111", rank=1)],
+    )
+    assert precaptured_audience_chart_summary(partial, chart_profile=REFERENCE_PROFILE) is None
+
+    malformed = tmp_path / "malformed"
+    malformed.mkdir()
+    (malformed / "audience-charts-manifest.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValidationError, match="pre-captured audience chart manifest"):
+        precaptured_audience_chart_summary(malformed, chart_profile=REFERENCE_PROFILE)
 
 
 # -- operation registry -----------------------------------------------------

@@ -150,3 +150,59 @@ def lyric_receipt_writer(tmp_path: Path):
         return path
 
     return write
+
+
+@pytest.fixture()
+def audience_chart_capture_writer():
+    """Write one normalized audience chart page for workflow/orchestrator tests.
+
+    The same single-chart JSONL capture shape is used by the weekly-update and
+    weekly-run audience fixtures; keeping one writer avoids the copies drifting.
+    """
+
+    def write(
+        directory: Path,
+        *,
+        rank_id: str = "49224",
+        title: str = "霓虹夜航",
+        artist: str = "示例乐队",
+        track_key: str = "900",
+        rank: int = 3,
+        run_id: str = "fixture-run",
+        captured_at: str = "2026-10-20T10:40:21+08:00",
+    ) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"chart-{rank_id}-p1-songs.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "platform": "kugou",
+                    "run_id": run_id,
+                    "summary": {
+                        "run_id": run_id,
+                        "rank_id": rank_id,
+                        "page": 1,
+                        "size": 100,
+                        "rank_start": 1,
+                        "source_records": 1,
+                        "captured_at": captured_at,
+                    },
+                    "songs": [
+                        {
+                            "identity_key": f"kugou:{track_key}",
+                            "platform": "kugou",
+                            "platform_track_key": track_key,
+                            "title": title,
+                            "artist": artist,
+                            "chart_appearances": [{"rank": rank}],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    return write

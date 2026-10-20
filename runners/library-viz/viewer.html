@@ -325,6 +325,7 @@
       <div class="au-title">${escapeHtml(title)}<small>${escapeHtml(meta)}</small></div>
       ${rows || `<div class="note">该组无方向性结论。</div>`}
       ${sourceLinks ? `<div class="au-sources">来源：${sourceLinks}</div>` : ""}
+      ${group.basis_note ? `<div class="note">依据：${escapeHtml(group.basis_note)}</div>` : ""}
       ${group.coverage_note ? `<div class="note">缺口：${escapeHtml(group.coverage_note)}</div>` : ""}
     </div>`;
   }

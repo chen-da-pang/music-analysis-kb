@@ -279,6 +279,89 @@ def test_fixture_imports_through_import_audience_and_backtest_matches(
     assert result["verdict"] == "PASS"
 
 
+CHART_FIXTURE = Path(__file__).parent / "fixtures" / "audience" / "chart-evidence.jsonl"
+
+
+def _chart_evidence_rows() -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in CHART_FIXTURE.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_chart_evidence_import_does_not_change_research_profile_values(
+    tmp_path: Path,
+) -> None:
+    """Review finding #3: chart evidence is separate and never mutates research.
+
+    The ticket #142 backtest compares research ``value_mid`` numbers; importing
+    the weekly chart snapshot afterwards must leave every research observation,
+    profile and the recomputed L1/31–50/sex-direction numbers byte-for-byte
+    unchanged.
+    """
+
+    database = tmp_path / "music-master.sqlite"
+    initialize_database(database)
+    with MusicKBRepository(database) as repository:
+        seed_recording(repository)
+        assert repository.import_audience([load_fixture_record()])["errors"] == 0
+        before = repository.get_audience(RECORDING_ID)
+        research_before = before["groups"][0]
+        observations_before = [
+            (
+                observation["dimension"],
+                observation["bucket"],
+                observation["value_low"],
+                observation["value_mid"],
+                observation["value_high"],
+                observation["evidence_level"],
+                observation["source_id"],
+            )
+            for observation in research_before["observations"]
+        ]
+        profile_before = dict(research_before["profiles"][0])
+
+        chart_stats = repository.import_audience(
+            _chart_evidence_rows(), kind="chart_evidence"
+        )
+        assert chart_stats["errors"] == 0
+        assert chart_stats["profiles"] == 2
+
+        after = repository.get_audience(RECORDING_ID)
+        research_after = after["groups"][0]
+        observations_after = [
+            (
+                observation["dimension"],
+                observation["bucket"],
+                observation["value_low"],
+                observation["value_mid"],
+                observation["value_high"],
+                observation["evidence_level"],
+                observation["source_id"],
+            )
+            for observation in research_after["observations"]
+        ]
+        assert observations_after == observations_before
+        assert dict(research_after["profiles"][0]) == profile_before
+        assert research_after["coverage_gaps"] == research_before["coverage_gaps"]
+
+        # Chart evidence is grouped separately; a chart hit is not a gap and
+        # its hit count is carried in basis_note.
+        chart = after["groups"][1]
+        assert len(chart["profiles"]) == 2
+        assert chart["coverage_gaps"] == []
+        assert all(profile["coverage_note"] is None for profile in chart["profiles"])
+        assert all("命中" in profile["basis_note"] for profile in chart["profiles"])
+
+        # The ticket numbers still reproduce from the untouched research rows.
+        result = backtest_observations(research_after["observations"])
+        assert result["age"]["l1_pp"] == pytest.approx(24.05, abs=0.01)
+        assert result["age_31_50"]["error_pp"] == pytest.approx(8.36, abs=0.01)
+        assert result["gender"]["direction"] == "correct"
+        assert result["verdict"] == "PASS"
+
+
 def test_cli_json_output_is_the_same_evidence_payload(capsys) -> None:
     exit_code = main(["--fixture", str(FIXTURE), "--json"])
     assert exit_code == 0

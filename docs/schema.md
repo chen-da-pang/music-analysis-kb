@@ -111,8 +111,10 @@ decimals, never percentages or threshold judgments. Only recordings with
 vectors participate; status counts `recordings_with_embeddings / recordings`
 describe coverage (initially 434/2005), not quality.
 
-Migrate/bootstrap the master, create/verify and install a v9 snapshot **before**
-upgrading clients: new clients cannot open v8 snapshots. The external
+Upgrade clients/peers **first** (a v8 client cannot open a v9 snapshot and the
+distribution gate requires peer plugin version ≥ publisher version), then
+migrate/bootstrap the master, validate, and rebuild/verify the v9 snapshot
+before installing or distributing it. The external
 [audio runner and Suno evaluation scripts](../runners/audio-embed/README.md)
 keep inference outside plugin dependencies. MuQ-MuLan/MERT weights are
 CC-BY-NC-4.0 and MERIT heads MIT; internal research only until authorization

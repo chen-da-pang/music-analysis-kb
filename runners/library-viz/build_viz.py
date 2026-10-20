@@ -238,7 +238,7 @@ def load_audience(connection: sqlite3.Connection, recording_ids) -> dict[str, di
             SELECT p.id, p.recording_id, p.target_platform, p.time_window,
                    p.method_id, p.method_version, p.status, p.confidence,
                    p.is_proxy, p.researched_at, p.window_start, p.window_end,
-                   p.coverage_note
+                   p.basis_note, p.coverage_note
             FROM audience_profile p
             WHERE p.recording_id IN ({placeholders})
             ORDER BY p.recording_id, p.researched_at DESC,
@@ -359,6 +359,7 @@ def load_audience(connection: sqlite3.Connection, recording_ids) -> dict[str, di
                 "method_version": str(profile["method_version"]),
                 "confidence": str(profile["confidence"]),
                 "status": str(profile["status"]),
+                "basis_note": str(profile["basis_note"] or ""),
                 "coverage_note": str(profile["coverage_note"] or ""),
                 "items": items,
                 "sources": [

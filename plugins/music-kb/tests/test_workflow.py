@@ -183,7 +183,7 @@ def test_campaign_weekly_update_rejects_missing_source_links(tmp_path: Path, lyr
 
 
 def test_weekly_update_imports_audience_inputs_before_validate(
-    tmp_path: Path, lyric_receipt_writer
+    tmp_path: Path, lyric_receipt_writer, audience_chart_capture_writer
 ) -> None:
     database = tmp_path / "master.sqlite"
     initialize_database(database)
@@ -194,37 +194,7 @@ def test_weekly_update_imports_audience_inputs_before_validate(
     lyrics = lyric_receipt_writer("generic-audience", [("fixture", "fixture-001")])
 
     chart_dir = tmp_path / "audience-charts"
-    chart_dir.mkdir()
-    (chart_dir / "chart-49224-p1-songs.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "platform": "kugou",
-                "run_id": "weekly-update-audience",
-                "summary": {
-                    "run_id": "weekly-update-audience",
-                    "rank_id": "49224",
-                    "page": 1,
-                    "size": 100,
-                    "rank_start": 1,
-                    "source_records": 1,
-                    "captured_at": "2026-10-20T10:40:21+08:00",
-                },
-                "songs": [
-                    {
-                        "identity_key": "kugou:900",
-                        "platform": "kugou",
-                        "platform_track_key": "900",
-                        "title": "霓虹夜航",
-                        "artist": "示例乐队",
-                        "chart_appearances": [{"rank": 3}],
-                    }
-                ],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    audience_chart_capture_writer(chart_dir, run_id="weekly-update-audience")
     profiles = tmp_path / "audience-profiles.jsonl"
     profiles.write_text(
         json.dumps(
@@ -296,11 +266,19 @@ def test_weekly_update_imports_audience_inputs_before_validate(
     assert chart_evidence["unmatched"] == 0
     assert chart_evidence["snapshot_date"] == "2026-10-20"
     assert audience["profiles"]["import"]["profiles"] == 1
-    assert isinstance(audience["tags"], int)
-    assert audience["coverage_gaps"] == []
+    assert isinstance(audience["tag_count"], int)
+    # The fixture directory holds one of the 24 profile charts, so the missing
+    # ones are surfaced as an auditable coverage gap (review finding #2).
+    assert {gap["source"] for gap in audience["coverage_gaps"]} == {"chart_evidence"}
+    partial = next(gap for gap in audience["coverage_gaps"] if gap["source"] == "chart_evidence")
+    assert "partial" in partial["reason"]
+    assert len(partial["missing_rank_ids"]) == 23
     with MusicKBRepository(database, read_only=True) as repository:
         audience_row = repository.get_audience("rec_neon_night_studio")
     groups = {group["group"]: group for group in audience_row["groups"]}
     assert groups["chart_evidence"]["profiles"][0]["confidence"] == "low"
     assert groups["chart_evidence"]["observations"][0]["bucket"] == "gen/00后"
+    # Matched chart evidence is not a gap: the hit count lives in basis_note.
+    assert groups["chart_evidence"]["coverage_gaps"] == []
+    assert "命中 1 榜" in groups["chart_evidence"]["profiles"][0]["basis_note"]
     assert groups["research"]["profiles"][0]["method_id"] == "version-matrix"

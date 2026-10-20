@@ -66,10 +66,12 @@ not full-library recall. Publisher `import-embeddings` imports SHA-bound JSONL;
 clients load no models. See [plugin commands](plugins/music-kb/README.md) and
 [runner and Suno evaluation scripts](runners/audio-embed/README.md).
 
-**Upgrade order:** migrate/bootstrap the publisher, produce and verify a v9
-snapshot, install/distribute it, then upgrade clients. The new plugin cannot
-open v8 snapshots and never migrates them on read. Peer distribution is a
-separate explicit operation; a local release does not push to peers.
+**Upgrade order:** upgrade clients/peers first, then migrate/bootstrap the
+publisher master, validate, rebuild and verify a v9 snapshot, and finally
+install/distribute it. A v8 client cannot open a v9 snapshot and queries never
+migrate a read-only database, so the peer/plugin version must be at least the
+publisher version before distribution. Peer distribution is a separate explicit
+operation; a local release does not push to peers.
 
 MuQ-MuLan and MERT weights are **CC-BY-NC-4.0**; MERIT heads are MIT.
 This feature is for internal research; commercial use requires authorization

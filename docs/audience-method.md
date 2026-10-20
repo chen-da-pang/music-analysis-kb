@@ -131,7 +131,7 @@ chart → bucket 映射（写死）：
 
 来源：`music-kb --json get-audience <recording_id>` 返回的 `chart_evidence` 分组，或调用方传入的证据文件；调研 skill 不抓榜。
 
-引用方式：把用到的榜单来源复制进输出 `sources[]`——保留 `source_platform='kugou'`、`source_key='chart:<rank_id>:<YYYY-MM-DD>'`、`title`（榜名）、`fetched_at`，并写 `source_type='chart_snapshot'`、`evidence_level='1_platform_public'`、`coverage_note='榜内热度≠人口构成'`、`local_path`（如 master 中有）。据此得出的观察仍是 `4_inferred`；名次只写 `observation.rank`，绝不写成 `value_*`。
+引用方式：把用到的榜单来源复制进输出 `sources[]`——保留 `source_platform='kugou'`、`source_key='chart:<rank_id>:<YYYY-MM-DD>'`、`title`（榜名）、`fetched_at`，并写 `source_type='chart_snapshot'`、`evidence_level='1_platform_public'`、`coverage_note='榜内热度≠人口构成'`、`local_path`（如 master 中有）。**榜单证据本身以 `3_proxy` 入库**（`observation.evidence_level='3_proxy'`、`is_proxy=1`，`chart_signal_v1` profile 由抓取侧生成）；调研基于榜单信号继续推导的画像观察才写 `4_inferred`。名次只写 `observation.rank`，绝不写成 `value_*`。
 
 三种常见误读要避免：① 上榜 ≠ 占比；② 单期在榜 ≠ persistence（多期才谈稳定性）；③ 多榜命中 ≠ 人群冲突，是「广谱/多场景」信号。`get-audience` 的 `chart_evidence_note` 已固定声明「榜单证据只代表进过哪些池子，不代表受众占比」。
 

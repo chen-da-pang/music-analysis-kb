@@ -401,7 +401,14 @@ def test_cnb_analysis_gate_blocks_fresh_run_without_confirmation(tmp_path: Path)
         )
 
 
-def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path: Path, lyric_receipt_writer) -> None:
+@pytest.mark.parametrize("fail_audience_import", [False, True])
+def test_supplied_delivery_resumes_after_analysis_without_upstream_work(
+    tmp_path: Path,
+    lyric_receipt_writer,
+    audience_chart_capture_writer,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_audience_import: bool,
+) -> None:
     delivery = tmp_path / "canonical_delivery.jsonl"
     rows = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines() if line]
     for row in rows:
@@ -432,37 +439,7 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
     progress.write_text("{}\n", encoding="utf-8")
     lyrics = _delivery_lyrics(lyric_receipt_writer, "supplied-delivery")
     audience_charts = tmp_path / "audience-charts"
-    audience_charts.mkdir()
-    (audience_charts / "chart-49224-p1-songs.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "platform": "kugou",
-                "run_id": "supplied-delivery-resume",
-                "summary": {
-                    "run_id": "supplied-delivery-resume",
-                    "rank_id": "49224",
-                    "page": 1,
-                    "size": 100,
-                    "rank_start": 1,
-                    "source_records": 1,
-                    "captured_at": "2026-10-20T10:40:21+08:00",
-                },
-                "songs": [
-                    {
-                        "identity_key": "kugou:900",
-                        "platform": "kugou",
-                        "platform_track_key": "900",
-                        "title": "霓虹夜航",
-                        "artist": "示例乐队",
-                        "chart_appearances": [{"rank": 3}],
-                    }
-                ],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    audience_chart_capture_writer(audience_charts, run_id="supplied-delivery-resume")
     audience_profiles = tmp_path / "audience-profiles.jsonl"
     audience_profiles.write_text(
         json.dumps(
@@ -506,6 +483,14 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
         encoding="utf-8",
     )
 
+    if fail_audience_import:
+        def failing_audience_import(**kwargs):
+            raise RuntimeError("synthetic audience import failure")
+
+        monkeypatch.setattr(
+            "music_kb.weekly_orchestration.import_audience_inputs",
+            failing_audience_import,
+        )
     result = run_weekly_run(
         workspace=tmp_path,
         run_id="supplied-delivery-resume",
@@ -561,11 +546,18 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
         "reason": resumed,
     }
     audience = state["atoms"]["audience_import"]["outputs"]
-    assert audience["status"] == "succeeded"
-    assert audience["chart_evidence"]["status"] == "skipped"
-    assert "delivery resume" in audience["chart_evidence"]["reason"]
-    assert audience["profiles"]["import"]["profiles"] == 1
-    assert isinstance(audience["tags"], int)
+    if fail_audience_import:
+        # Enrichment failures are recorded as coverage gaps and never crash the
+        # publication (review finding #7).
+        assert audience["status"] == "failed"
+        assert {gap["source"] for gap in audience["coverage_gaps"]} == {"audience_import"}
+        assert "synthetic audience import failure" in audience["error"]
+    else:
+        assert audience["status"] == "succeeded"
+        assert audience["chart_evidence"]["status"] == "skipped"
+        assert "delivery resume" in audience["chart_evidence"]["reason"]
+        assert audience["profiles"]["import"]["profiles"] == 1
+        assert isinstance(audience["tag_count"], int)
     from music_kb.repository import MusicKBRepository
 
     with MusicKBRepository(database, read_only=True) as repository:
@@ -573,10 +565,13 @@ def test_supplied_delivery_resumes_after_analysis_without_upstream_work(tmp_path
             "SELECT id FROM recording WHERE canonical_analysis_id IS NOT NULL ORDER BY id"
         ).fetchall()
         audience_row = repository.get_audience(str(recordings[0]["id"]))
-    assert any(
-        group["group"] == "research" and group["profiles"]
-        for group in audience_row["groups"]
-    )
+    if fail_audience_import:
+        assert audience_row["groups"][0]["profiles"] == []
+    else:
+        assert any(
+            group["group"] == "research" and group["profiles"]
+            for group in audience_row["groups"]
+        )
     assert (
         _atom_started(state, "chart_capture")
         < _atom_started(state, "audience_chart_capture")
@@ -734,13 +729,39 @@ def test_real_publish_defaults_to_local_snapshot_install(
     assert (tmp_path / "current.sqlite").resolve().name == "default-local-install.sqlite"
 
 
+@pytest.mark.parametrize(
+    "audience_capture_mode", ["live", "reused", "malformed_manifest"]
+)
 def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, audience_capture_mode: str
 ) -> None:
+    run_dir = tmp_path / "data" / "weekly_runs" / "fresh-campaign"
+    audience_dir = run_dir / "audience-charts"
+    if audience_capture_mode == "reused":
+        audience_dir.mkdir(parents=True)
+        (audience_dir / "audience-charts-manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "snapshot_date": "2026-10-20",
+                    "chart_count": 24,
+                    "captured_charts": 23,
+                    "reused_charts": ["52144"],
+                    "total_source_records": 2403,
+                    "charts": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+    elif audience_capture_mode == "malformed_manifest":
+        audience_dir.mkdir(parents=True)
+        (audience_dir / "audience-charts-manifest.json").write_text(
+            "{not json", encoding="utf-8"
+        )
     database = tmp_path / "master.sqlite"
     initialize_database(database)
     inventory = tmp_path / "data" / "song_inventory.json"
-    inventory.parent.mkdir(parents=True)
+    inventory.parent.mkdir(parents=True, exist_ok=True)
     audio_root = tmp_path / "audio"
     audio_root.mkdir()
     audio_file = audio_root / "song.flac"
@@ -837,6 +858,9 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
             assert command[command.index("--proxy") + 1] == "http://127.0.0.1:7890"
             return {"queue_manifest": {"queued": 0}}, subprocess.CompletedProcess(command, 0, "", "")
         if name == "capture_kugou_audience_charts.py":
+            # A pre-captured directory (reused) or a malformed manifest must
+            # never fall through to a live kugou-cli capture.
+            assert audience_capture_mode == "live"
             audience_dir = Path(command[command.index("--output-dir") + 1])
             assert command[command.index("--reuse-directory") + 1] == str(
                 tmp_path / "data" / "weekly_runs" / "fresh-campaign" / "charts"
@@ -923,8 +947,25 @@ def test_fresh_run_materializes_queue_and_records_disposable_campaign_atoms(
     assert fallback_inputs["source_queue"] == str(primary_wrapper_queue_path)
     assert campaign_preflight_commands[0][campaign_preflight_commands[0].index("--retained-campaign-receipt") + 1] == str(retained_receipt)
     assert (tmp_path / "data" / "weekly_runs" / "fresh-campaign" / "cnb-input" / "manifest.jsonl").is_file()
-    assert state["atoms"]["audience_chart_capture"]["status"] == "succeeded"
-    assert state["atoms"]["audience_chart_capture"]["outputs"]["chart_count"] == 1
+    capture_atom = state["atoms"]["audience_chart_capture"]
+    assert capture_atom["status"] == "succeeded"
+    if audience_capture_mode == "live":
+        assert capture_atom["outputs"]["chart_count"] == 1
+    elif audience_capture_mode == "reused":
+        # A pre-captured directory is reused instead of recaptured live.
+        assert capture_atom["outputs"]["status"] == "reused"
+        assert "manifest reused" in capture_atom["outputs"]["reason"]
+        assert capture_atom["outputs"]["chart_count"] == 24
+        assert capture_atom["outputs"]["manifest"] == str(
+            run_dir / "audience-charts" / "audience-charts-manifest.json"
+        )
+    else:
+        # A malformed manifest is a recorded coverage gap, not a crash or a
+        # silent live recapture.
+        assert capture_atom["outputs"]["status"] == "failed"
+        assert {gap["source"] for gap in capture_atom["outputs"]["coverage_gaps"]} == {
+            "chart_capture"
+        }
     assert state["atoms"]["audience_import"]["outputs"] == {
         "status": "skipped",
         "reason": "no delivery in dry-run",

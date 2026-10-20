@@ -38,11 +38,11 @@ HF_HUB_OFFLINE=1 NUMBA_CACHE_DIR=/tmp/music-kb-numba \
 - `songs[]`：`{id, title, artists, cluster, x, y, full, lyric, lyric_status, audience, neighbors: [[index, distance], ...]}`。
 - `x/y` 归一化到 `[-1, 1]`；`full` 是 `audio/` 下指向原始音频的符号链接（缺失时为空串）；`lyric` 来自 `recording_lyric.lyric_text`，`lyric_status` 为 available / platform_unavailable / missing。
 - `audience`：无受众记录时为 `null`；否则 `{research, chart, tags, note}`，由 `build_viz.load_audience()` 只读 master 预生成（静态页无后端查询）：
-  - `research` / `chart`：各取该歌最新一条调研画像 / 榜单证据（`null` 表示该组没有记录），字段为 `researched_at`、`time_window`、`method_id`、`method_version`、`confidence`、`status`、`coverage_note`、`items[]`、`sources[]`。
+  - `research` / `chart`：各取该歌最新一条调研画像 / 榜单证据（`null` 表示该组没有记录），字段为 `researched_at`、`time_window`、`method_id`、`method_version`、`confidence`、`status`、`basis_note`、`coverage_note`、`items[]`、`sources[]`。
   - `items[]`：`{dimension, label, bucket, value_low, value_high, value_mid, rank, evidence_level}`；`rank` 只有榜单证据有值，`value_*` 只有调研推断有值且是 0–1 区间。
   - `sources[]`：`{source_platform, source_key, url, title, source_type, evidence_level, coverage_note}`；不含发布端本机路径。
   - `tags[]`：`{namespace, name, path, key}`，即 `recording_tag(role='audience')` 投影出的可检索标签（`key` 形如 `audience/age/31-40`、`audience-hint/gen/00后`）。
-  - `note`：固定的「非占比」声明。
+  - `note`：固定的「非占比」声明（榜单证据只代表进过哪些池子，不代表受众占比）；榜单命中数写在 `basis_note`（如「单期快照命中 2 榜」），`coverage_note` 只表示真正的覆盖缺口，页面只在非空时显示「缺口」。
 
 ## 说明
 
