@@ -96,6 +96,20 @@ uv run music-kb --json get-audience rec_example
 uv run music-kb --json get-audience rec_example --window full_lifecycle --method version-matrix
 ```
 
+Every successful import also projects the directional conclusions into
+recording-level tags (`recording_tag(role='audience')`, never `analysis_tag`):
+research buckets into the `audience` namespace and the newest chart snapshot into
+`audience-hint`. The full public prefix is a `tag_alias`, so the existing exact
+`--tag` retrieval hits both without a new query syntax; percentages/ranks are
+never projected. A re-import replaces the previous projection, and a recording
+absent from the newest chart snapshot loses its old hint.
+
+```bash
+uv run music-kb search --tag audience/age/31-40
+uv run music-kb search --tag audience-hint/gen/00后
+uv run music-kb recommend --tag audience/city-tier/low   # --tag works on recommend/discover too
+```
+
 Snapshots stay client-safe: only the newest profile per
 `(recording, target_platform, time_window, method_id)` ships, all canonical
 recordings' version entries ship, orphan sources are pruned, `local_path` is
@@ -212,8 +226,10 @@ The current MCP workflow uses read tools for status, search, title/artist
 resolution, canonical analysis retrieval, selected-recording full lyrics, and
 tag facets. Candidate search stays compact; full lyrics are returned only for
 an explicitly selected recording ID. Audience records are available through the
-CLI `get-audience` reader in this release; tag projection and the library-map
-panel follow in #140.
+CLI `get-audience` reader and as the `audience` summary on `get` /
+`music_kb_get_canonical_analysis`; the same `--tag` filters by the projected
+`audience/*` and `audience-hint/*` tags, and the library map's detail panel shows
+the same research/chart evidence with its sources and non-share disclaimer.
 
 Campaign analyses receive deterministic, versioned tags for title, artist,
 section, genre, tempo/meter, rhythm, instrumentation, production/mix, harmony,

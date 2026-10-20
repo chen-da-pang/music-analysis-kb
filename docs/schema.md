@@ -75,6 +75,19 @@ profile per canonical recording:
   and release dates are stored as empty strings (never NULL) so the recording
   scoped unique key keeps working.
 
+A successful `import-audience` also projects the directional conclusions into
+recording-level tags (`recording_tag(role='audience')`, never `analysis_tag`):
+research observations go to the `audience` namespace and the newest chart
+snapshot to `audience-hint`. `tag.name` is a path-style key (`age/31-40`,
+`gen/00后`), and the full public prefix (`audience/age/31-40`,
+`audience-hint/gen/00后`) is registered as a `tag_alias`, so exact `--tag`
+retrieval keeps using the existing `tag_alias`/`recording_tag` branches without
+changing `_tag_candidate_sql` or `search_fts`. Values (`value_*`), ranks, and
+evidence levels stay in the observation tables and never become tags. The
+projection is rebuilt per import and replaces the previous namespaces, so a
+re-import never stacks and a recording absent from the newest chart snapshot
+loses its old hint.
+
 `validate` checks audience foreign keys, enums, the target-platform rule, bucket
 non-emptiness, share bounds/order, and entry identity; it deliberately has **no**
 `require_audience` publication gate because v1 coverage is partial. `doctor` /

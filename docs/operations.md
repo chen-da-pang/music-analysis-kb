@@ -290,7 +290,10 @@ The real release order is:
    for SOP research output and `--kind chart_evidence` for the weekly chart
    snapshot. A failed record is reported by line; remaining lines commit, and
    missing coverage is recorded in `coverage_note` instead of blocking the
-   release. Weekly-orchestrator integration of this step belongs to #141; for
+   release. Each successful import automatically rebuilds the recording-level
+   `audience` / `audience-hint` tags, so `search/recommend/discover --tag
+   audience/age/31-40` works immediately and the subsequent snapshot carries the
+   projection. Weekly-orchestrator integration of this step belongs to #141; for
    now the import is an explicit publisher command.
 5. **Rebuild and verify a v9 snapshot.** `snapshot create` keeps only the newest
    profile per `(recording_id, target_platform, time_window, method_id)`,
