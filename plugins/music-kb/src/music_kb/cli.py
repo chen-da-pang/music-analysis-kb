@@ -11,7 +11,12 @@ from .campaign_delivery import load_campaign_delivery_file
 from .distribution import publish_snapshot
 from .errors import DatabaseNotInitializedError, MusicKBError
 from .lyrics_backfill import materialize_lyric_backfill_queue
-from .repository import MusicKBRepository, iter_embedding_file, iter_import_file
+from .repository import (
+    MusicKBRepository,
+    iter_audience_file,
+    iter_embedding_file,
+    iter_import_file,
+)
 from .schema import SCHEMA_VERSION, initialize_database
 from .snapshot import create_snapshot, install_snapshot, verify_snapshot
 from .workflow import run_weekly_update
@@ -142,6 +147,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--input", type=Path, required=True, help="CC lyric receipt JSONL file"
     )
 
+    audience_importer = commands.add_parser(
+        "import-audience",
+        help=(
+            "Import research audience profiles or chart evidence into the "
+            "writable publisher database"
+        ),
+    )
+    _add_database_argument(audience_importer, required=True)
+    audience_importer.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="Audience JSON object/array or physical-LF JSONL record stream",
+    )
+    audience_importer.add_argument(
+        "--kind",
+        choices=("profile", "chart_evidence"),
+        default="profile",
+        help="Audience record kind (default: profile research records)",
+    )
+    audience_importer.add_argument(
+        "--batch-size",
+        type=int,
+        default=500,
+        help="Bounded import transaction size (1-5000; default: 500)",
+    )
+
     lyric_backfill = commands.add_parser(
         "prepare-lyrics-backfill",
         help="Materialize the exact-identity, no-audio CC lyric queue for unresolved canonical recordings",
@@ -224,6 +256,23 @@ def build_parser() -> argparse.ArgumentParser:
     lyric_getter = commands.add_parser("get-lyrics", help="Fetch one selected recording's full stored lyrics")
     _add_database_argument(lyric_getter)
     lyric_getter.add_argument("recording_id")
+
+    audience_getter = commands.add_parser(
+        "get-audience",
+        help="Fetch one recording's research profiles and chart evidence",
+    )
+    _add_database_argument(audience_getter)
+    audience_getter.add_argument("recording_id")
+    audience_getter.add_argument(
+        "--window",
+        default=None,
+        help="Filter by time_window: first_wave, full_lifecycle, chart_snapshot, rolling_30d",
+    )
+    audience_getter.add_argument(
+        "--method",
+        default=None,
+        help="Filter by method_id, for example version-matrix or chart_signal_v1",
+    )
 
     snapshot = commands.add_parser("snapshot", help="Create, verify, or install immutable local snapshots")
     snapshot_commands = snapshot.add_subparsers(dest="snapshot_command", required=True)
@@ -482,6 +531,17 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             read_only=False,
             operation=lambda repo: repo.import_lyric_receipt_file(args.input),
         )
+    if args.command == "import-audience":
+        result = _with_repository(
+            args.db,
+            read_only=False,
+            operation=lambda repo: repo.import_audience(
+                iter_audience_file(args.input),
+                kind=args.kind,
+                batch_size=args.batch_size,
+            ),
+        )
+        return (1 if result["errors"] else 0), result
     if args.command == "prepare-lyrics-backfill":
         return 0, materialize_lyric_backfill_queue(
             args.db,
@@ -553,6 +613,14 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             args.db,
             read_only=True,
             operation=lambda repo: repo.get_lyrics(args.recording_id),
+        )
+    if args.command == "get-audience":
+        return 0, _with_repository(
+            args.db,
+            read_only=True,
+            operation=lambda repo: repo.get_audience(
+                args.recording_id, window=args.window, method=args.method
+            ),
         )
     if args.command == "snapshot":
         if args.snapshot_command == "create":

@@ -6,7 +6,7 @@ from pathlib import Path
 from .errors import DatabaseNotInitializedError, MusicKBError, ReadOnlyError
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 EMBEDDING_SCHEMA_SQL = """
@@ -35,6 +35,81 @@ CREATE TABLE IF NOT EXISTS recording_embedding (
 CREATE INDEX IF NOT EXISTS idx_embedding_model_factor
     ON recording_embedding(model_id, factor, recording_id);
 INSERT OR IGNORE INTO meta(key, value) VALUES ('default_embedding_model', '');
+"""
+
+
+# Audience records (schema v9) are a separate, additive surface: one research
+# profile or chart-snapshot profile per canonical recording, with nested
+# observations, version entries, and an evidence source row per platform
+# artifact. They deliberately live outside ``analysis_revision`` so audience
+# evidence never changes what the public canonical analysis is.
+AUDIENCE_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS audience_source (
+    id              TEXT PRIMARY KEY,
+    source_platform TEXT NOT NULL,
+    source_key      TEXT NOT NULL,
+    url             TEXT,
+    title           TEXT,
+    source_type     TEXT NOT NULL,
+    fetched_at      TEXT NOT NULL,
+    evidence_level  TEXT NOT NULL,
+    coverage_note   TEXT,
+    local_path      TEXT,
+    UNIQUE(source_platform, source_key)
+);
+
+CREATE TABLE IF NOT EXISTS audience_profile (
+    id              TEXT PRIMARY KEY,
+    recording_id    TEXT NOT NULL REFERENCES recording(id) ON DELETE CASCADE,
+    target_platform TEXT NOT NULL,
+    time_window     TEXT NOT NULL,
+    window_start    TEXT,
+    window_end      TEXT,
+    method_id       TEXT NOT NULL,
+    method_version  TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    confidence      TEXT NOT NULL,
+    is_proxy        INTEGER NOT NULL DEFAULT 1,
+    researched_at   TEXT NOT NULL,
+    basis_note      TEXT,
+    coverage_note   TEXT,
+    payload_path    TEXT,
+    UNIQUE(recording_id, target_platform, time_window, method_version, researched_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audience_profile_lookup
+    ON audience_profile(recording_id, time_window);
+
+CREATE TABLE IF NOT EXISTS audience_observation (
+    id              TEXT PRIMARY KEY,
+    profile_id      TEXT NOT NULL REFERENCES audience_profile(id) ON DELETE CASCADE,
+    dimension       TEXT NOT NULL,
+    bucket          TEXT NOT NULL,
+    value_low       REAL,
+    value_high      REAL,
+    value_mid       REAL,
+    rank            INTEGER,
+    sample_n        INTEGER,
+    evidence_level  TEXT NOT NULL,
+    is_proxy        INTEGER NOT NULL DEFAULT 1,
+    source_id       TEXT REFERENCES audience_source(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audience_observation_profile
+    ON audience_observation(profile_id, dimension);
+
+CREATE TABLE IF NOT EXISTS audience_entry (
+    id                   TEXT PRIMARY KEY,
+    recording_id         TEXT NOT NULL REFERENCES recording(id) ON DELETE CASCADE,
+    entry_type           TEXT NOT NULL,
+    performer            TEXT,
+    released_at          TEXT,
+    platform             TEXT,
+    relation_to_original TEXT,
+    weight_basis         TEXT,
+    source_id            TEXT REFERENCES audience_source(id) ON DELETE SET NULL,
+    UNIQUE(recording_id, entry_type, performer, released_at)
+);
 """
 
 
@@ -510,6 +585,18 @@ def _migrate_v7_to_v8(connection: sqlite3.Connection) -> None:
     connection.executescript(EMBEDDING_SCHEMA_SQL)
 
 
+def _migrate_v8_to_v9(connection: sqlite3.Connection) -> None:
+    """Add the additive audience-record tables.
+
+    Version 9 only creates tables, indexes, and foreign keys; it never rewrites
+    an existing analysis, tag, lyric, or embedding row. ``IF NOT EXISTS`` plus
+    the unconditional replay in ``initialize_database`` make the migration safe
+    to run repeatedly after an interrupted process.
+    """
+
+    connection.executescript(AUDIENCE_SCHEMA_SQL)
+
+
 def initialize_database(path: str | Path) -> Path:
     database = _path(path)
     version: int | None = None
@@ -554,8 +641,12 @@ def initialize_database(path: str | Path) -> Path:
                 version = 7
             if version == 7:
                 _migrate_v7_to_v8(connection)
+                version = 8
+            if version == 8:
+                _migrate_v8_to_v9(connection)
             connection.executescript(SCHEMA_SQL)
             connection.executescript(EMBEDDING_SCHEMA_SQL)
+            connection.executescript(AUDIENCE_SCHEMA_SQL)
         except sqlite3.OperationalError as exc:
             if "fts5" in str(exc).casefold():
                 raise MusicKBError(

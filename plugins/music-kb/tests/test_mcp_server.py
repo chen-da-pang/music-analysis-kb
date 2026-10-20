@@ -71,7 +71,7 @@ def test_mcp_rejects_v7_snapshot(embedded_snapshot):
         connection.execute("UPDATE meta SET value='7' WHERE key='schema_version'")
     api = ReadOnlyMusicKB(database)
     for operation in (api.status, lambda: api.similar(recording_id="rec_neon_night_studio")):
-        with pytest.raises(DatabaseNotInitializedError, match="Unsupported schema version 7; expected 8"):
+        with pytest.raises(DatabaseNotInitializedError, match="Unsupported schema version 7; expected 9"):
             operation()
 
 
