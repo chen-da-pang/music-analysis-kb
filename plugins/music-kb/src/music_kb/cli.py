@@ -98,6 +98,17 @@ def build_parser() -> argparse.ArgumentParser:
         embedding_importer.add_argument(f"--{option}", required=True)
     embedding_importer.add_argument("--dim", type=int, required=True)
     embedding_importer.add_argument("--factor", default="", help="Empty (overall), rhythm, or timbre")
+    embedding_importer.add_argument(
+        "--allow-alternate-rendition",
+        action="store_true",
+        help=(
+            "Accept vectors whose audio_sha256 differs from recording.audio_sha256: the "
+            "audio was re-downloaded at a different rendition (for example a free 128k "
+            "transcode). The actual file sha256 is stored in source_audio_sha256; "
+            "recording.audio_sha256 is never modified and an alternate row cannot "
+            "overwrite a canonical embedding."
+        ),
+    )
 
     similar = commands.add_parser("similar", help="Find recordings by independent cosine distance channel")
     _add_database_argument(similar)
@@ -543,7 +554,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             operation=lambda repo: repo.import_embeddings(
                 iter_embedding_file(args.input), model_id=args.model_id, model_name=args.model_name,
                 recipe=args.recipe, dim=args.dim, metric=args.metric, weight_license=args.license,
-                factor=args.factor,
+                factor=args.factor, allow_alternate_rendition=args.allow_alternate_rendition,
             ),
         )
     if args.command == "similar":

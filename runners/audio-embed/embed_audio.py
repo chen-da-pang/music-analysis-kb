@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import sqlite3
 import stat
@@ -28,6 +29,8 @@ MERT_REVISION = "5240c2708a5acaee1007f43fb9735c7dcd0b78c9"
 MERIT_REVISION = "a85df30eca1ba112eb594285f3ba1d96488e7883"
 MUQ_REVISION = "2e01c796b71dca71b45251384c04cd7b237c9020"
 EXTENSIONS = {".flac", ".mp3", ".ogg", ".m4a"}
+ALTERNATE_ASSET_KIND = "alternate"
+SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
 def sha256_file(path):
@@ -42,14 +45,67 @@ def connect_readonly(database):
     return sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True)
 
 
-def scan_audio(root, db):
+def load_identity_map(path):
+    """Load per-file alternate-rendition identity rows (JSONL).
+
+    Required row fields: recording_id, path, downloaded_sha256, asset_kind
+    (alternate). Optional provenance copied onto output rows: platform_file_hash,
+    source_url, served_quality, title, artist. The digest is verified in
+    scan_audio so a file that changed after the download is never embedded.
+    """
+
+    path = Path(path)
+    entries = {}
+    with path.open("rb") as handle:
+        for line_number, raw_line in enumerate(handle, 1):
+            if not raw_line.strip():
+                raise ValueError("Identity map cannot contain blank lines")
+            try:
+                row = json.loads(raw_line)
+            except ValueError as error:
+                raise ValueError(f"Identity map line {line_number} is not valid JSON") from error
+            if not isinstance(row, dict):
+                raise ValueError(f"Identity map line {line_number} must be a JSON object")
+            recording_id = str(row.get("recording_id") or "").strip()
+            file_path = str(row.get("path") or "").strip()
+            digest = str(row.get("downloaded_sha256") or row.get("sha256") or "").strip().lower()
+            asset_kind = str(row.get("asset_kind") or ALTERNATE_ASSET_KIND).strip()
+            if not recording_id:
+                raise ValueError(f"Identity map line {line_number} needs a recording_id")
+            if not file_path:
+                raise ValueError(f"Identity map line {line_number} needs a path")
+            if not SHA256_HEX.fullmatch(digest):
+                raise ValueError(f"Identity map line {line_number} needs a downloaded_sha256 of 64 lowercase hex characters")
+            if asset_kind != ALTERNATE_ASSET_KIND:
+                raise ValueError(f"Identity map line {line_number} asset_kind must be alternate")
+            if recording_id in entries:
+                raise ValueError(f"Identity map repeats recording_id {recording_id}")
+            entries[recording_id] = {
+                "recording_id": recording_id,
+                "path": str(Path(file_path).expanduser()),
+                "audio_sha256": digest,
+                "asset_kind": asset_kind,
+                **{
+                    key: row[key]
+                    for key in ("platform_file_hash", "source_url", "served_quality", "title", "artist")
+                    if row.get(key) is not None
+                },
+            }
+    if not entries:
+        raise ValueError("Identity map is empty")
+    return entries
+
+
+def scan_audio(root, db, identity_map=None):
     root = Path(root)
     if not root.is_dir():
         raise ValueError(f"Audio root does not exist: {root}")
     with connect_readonly(db) as connection:
         identities = {}
+        known_recordings = set()
         for recording_id, audio_sha256 in connection.execute("SELECT id, audio_sha256 FROM recording"):
             identities.setdefault(audio_sha256, []).append(recording_id)
+            known_recordings.add(recording_id)
     candidates, failures, seen = [], [], set()
 
     def scan_error(error):
@@ -72,6 +128,33 @@ def scan_audio(root, db):
                     seen.add(recording_id)
         except OSError as error:
             failures.append({"path": str(path), "error": str(error)})
+    if identity_map:
+        for recording_id in sorted(identity_map):
+            if recording_id in seen:
+                continue
+            row = identity_map[recording_id]
+            file_path = Path(row["path"])
+            if recording_id not in known_recordings:
+                failures.append({"path": str(file_path), "recording_id": recording_id,
+                                 "error": "Identity map recording does not exist"})
+                continue
+            try:
+                info = file_path.stat()
+                if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+                    raise ValueError("identity map audio is not a regular non-empty file")
+                if sha256_file(file_path) != row["audio_sha256"]:
+                    raise ValueError("identity map audio sha256 mismatch")
+            except (OSError, ValueError) as error:
+                failures.append({"path": str(file_path), "recording_id": recording_id,
+                                 "error": f"{type(error).__name__}: {error}"})
+                continue
+            candidate = {"recording_id": recording_id, "audio_sha256": row["audio_sha256"],
+                         "path": str(file_path.resolve()), "asset_kind": row["asset_kind"]}
+            for key in ("platform_file_hash", "source_url", "served_quality", "title", "artist"):
+                if key in row:
+                    candidate[key] = row[key]
+            candidates.append(candidate)
+            seen.add(recording_id)
     return candidates, failures
 
 
@@ -85,7 +168,7 @@ def vector_bytes(vector, dim):
     return payload
 
 
-def read_resume(path, dim, identities):
+def read_resume(path, dim, identities, alternate_sha_by_recording=None):
     completed = set()
     if not path.exists():
         return completed
@@ -105,9 +188,13 @@ def read_resume(path, dim, identities):
             ):
                 raise ValueError("Resume row must contain nonempty recording_id, audio_sha256, vector_b64 strings")
             recording_id = entry["recording_id"]
-            if not isinstance(recording_id, str) or not identities.get(recording_id) or (
-                entry["audio_sha256"] != identities[recording_id]
-            ):
+            if not isinstance(recording_id, str) or not identities.get(recording_id):
+                raise ValueError(f"Resume identity mismatch: {recording_id}")
+            if entry.get("asset_kind") == ALTERNATE_ASSET_KIND:
+                expected_sha = (alternate_sha_by_recording or {}).get(recording_id)
+                if expected_sha != entry["audio_sha256"]:
+                    raise ValueError(f"Resume alternate identity mismatch: {recording_id}")
+            elif entry["audio_sha256"] != identities[recording_id]:
                 raise ValueError(f"Resume identity mismatch: {recording_id}")
             payload = base64.b64decode(entry["vector_b64"], validate=True)
             if len(payload) != dim * 4:
@@ -246,8 +333,17 @@ def run(args, embedder=None):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     receipt_path = output_dir / f"receipt-{args.channel}.json"
+    identity_map_path = getattr(args, "identity_map", None)
+    identity_map = load_identity_map(identity_map_path) if identity_map_path else None
+    alternate_sha_by_recording = (
+        {recording_id: row["audio_sha256"] for recording_id, row in identity_map.items()}
+        if identity_map else None
+    )
     config = {"db": str(Path(args.db).resolve()), "audio_root": str(Path(args.audio_root).resolve()),
               "channels": {channel: CHANNELS[channel] for channel in channels}, "device": args.device}
+    if identity_map_path:
+        config["identity_map"] = str(Path(identity_map_path).resolve())
+        config["identity_map_sha256"] = sha256_file(Path(identity_map_path))
     files = {channel: output_dir / f"{channel}.jsonl" for channel in channels}
     if not args.resume and (receipt_path.exists() or any(path.exists() for path in files.values())):
         raise ValueError("Output already exists; use --resume or a fresh output directory")
@@ -257,8 +353,9 @@ def run(args, embedder=None):
             raise ValueError("Resume configuration differs from receipt")
     elif args.resume and any(path.exists() for path in files.values()):
         raise ValueError("Cannot resume JSONL without its recipe receipt")
-    print(f"Scanning {args.audio_root} (SHA256 identity matching)", flush=True)
-    candidates, failures = scan_audio(args.audio_root, args.db)
+    print(f"Scanning {args.audio_root} (SHA256 identity matching"
+          + (", identity map for alternate renditions" if identity_map else "") + ")", flush=True)
+    candidates, failures = scan_audio(args.audio_root, args.db, identity_map)
     with connect_readonly(args.db) as connection:
         identities = dict(connection.execute("SELECT id, audio_sha256 FROM recording"))
         for channel in channels:
@@ -272,10 +369,16 @@ def run(args, embedder=None):
         existing = {channel: {row[0] for row in connection.execute(
             "SELECT recording_id FROM recording_embedding WHERE model_id=? AND factor=?",
             (CHANNELS[channel]["model_id"], CHANNELS[channel]["factor"]))} for channel in channels}
-    completed = {channel: read_resume(path, CHANNELS[channel]["dim"], identities)
-                 if args.resume else set() for channel, path in files.items()}
+    completed = {
+        channel: read_resume(path, CHANNELS[channel]["dim"], identities, alternate_sha_by_recording)
+        if args.resume else set()
+        for channel, path in files.items()
+    }
     receipt = {"config": config, "started_at": datetime.now(timezone.utc).isoformat(),
-               "matched_recordings": len(candidates), "inputs": candidates, "failures": failures,
+               "matched_recordings": len(candidates),
+               "alternate_candidates": sum(
+                   1 for candidate in candidates if candidate.get("asset_kind") == ALTERNATE_ASSET_KIND),
+               "inputs": candidates, "failures": failures,
                "model_revisions": {"muq": MUQ_REVISION} if args.channel == "overall" else {
                    "mert": MERT_REVISION, "merit": MERIT_REVISION},
                "skipped_database": {channel: len(existing[channel]) for channel in channels},
@@ -292,7 +395,13 @@ def run(args, embedder=None):
         for index, candidate in enumerate(pending, 1):
             try:
                 path = Path(candidate["path"])
-                if sha256_file(path) != candidate["audio_sha256"]:
+                digest = sha256_file(path)
+                if candidate.get("asset_kind") == ALTERNATE_ASSET_KIND:
+                    if digest != candidate["audio_sha256"]:
+                        raise ValueError("Audio changed after scan")
+                    if (alternate_sha_by_recording or {}).get(candidate["recording_id"]) != digest:
+                        raise ValueError("Identity map entry changed after scan")
+                elif digest != candidate["audio_sha256"]:
                     raise ValueError("Audio changed after scan")
                 vectors = embedder(path)
                 encoded = {}
@@ -302,6 +411,11 @@ def run(args, embedder=None):
                             vectors[CHANNELS[channel]["factor"]], CHANNELS[channel]["dim"])).decode("ascii")
                 for channel, payload in encoded.items():
                     entry = {key: candidate[key] for key in ("recording_id", "audio_sha256")}
+                    if candidate.get("asset_kind") == ALTERNATE_ASSET_KIND:
+                        entry["asset_kind"] = ALTERNATE_ASSET_KIND
+                        for key in ("platform_file_hash", "source_url", "served_quality", "title", "artist"):
+                            if candidate.get(key) is not None:
+                                entry[key] = candidate[key]
                     entry["vector_b64"] = payload
                     with files[channel].open("a", encoding="utf-8", newline="\n") as target:
                         target.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -334,6 +448,16 @@ def main(argv=None):
     parser.add_argument("--channel", choices=("overall", "merit"), required=True)
     parser.add_argument("--device", choices=("mps", "cpu"), default="mps")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--identity-map",
+        type=Path,
+        help=(
+            "JSONL rows {recording_id, path, downloaded_sha256, asset_kind=alternate, "
+            "platform_file_hash, source_url, served_quality}. Adds alternate-rendition "
+            "audio whose bytes differ from the canonical recording.audio_sha256; default "
+            "behaviour (no map) is unchanged."
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         return 0 if run(args)["status"] == "complete" else 1

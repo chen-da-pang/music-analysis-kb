@@ -514,3 +514,130 @@ def test_merit_normalized_average_is_unit_vector(runner):
     averaged = runner._normalized_average([first, second])
     assert abs(float(np.linalg.norm(averaged)) - 1.0) < 1e-6
     assert np.allclose(averaged, [2 ** -0.5, 2 ** -0.5])
+
+def write_identity_map(tmp_path, rows):
+    path = tmp_path / "identity-map.jsonl"
+    path.write_text(
+        "".join(json.dumps(row) + chr(10) for row in rows), encoding="utf-8")
+    return path
+
+
+def test_identity_map_embeds_alternate_rendition_with_provenance(runner, library, tmp_path):
+    args, add = library
+    canonical_path, _ = add("recording", content=b"canonical master bytes" * 131072)
+    canonical_path.unlink()
+    alternate_path = args.audio_root / "recovered" / "recording-128k.mp3"
+    alternate_path.parent.mkdir(parents=True)
+    alternate_path.write_bytes(b"128k transcode bytes" * 131072)
+    digest = hashlib.sha256(alternate_path.read_bytes()).hexdigest()
+    args.identity_map = write_identity_map(tmp_path, [{
+        "recording_id": "recording", "path": str(alternate_path),
+        "downloaded_sha256": digest, "asset_kind": "alternate",
+        "platform_file_hash": "F" * 32, "served_quality": "128",
+        "source_url": "https://www.kugou.com/mixsong/agent_gateway/fixture.html",
+        "title": "recording", "artist": "fixture artist",
+    }])
+    calls = []
+
+    def embedder(path):
+        calls.append(Path(path))
+        return {"": fake_vector(512)}
+
+    receipt = runner.run(args, embedder=embedder)
+    assert receipt["status"] == "complete"
+    assert receipt["alternate_candidates"] == 1
+    assert receipt["config"]["identity_map_sha256"] == hashlib.sha256(
+        args.identity_map.read_bytes()).hexdigest()
+    assert calls == [alternate_path.resolve()]
+    row = read_rows(args.output_dir / "overall.jsonl")[0]
+    assert row["recording_id"] == "recording"
+    assert row["audio_sha256"] == digest
+    assert row["asset_kind"] == "alternate"
+    assert row["served_quality"] == "128"
+    assert row["platform_file_hash"] == "F" * 32
+
+
+def test_identity_map_resume_is_idempotent(runner, library, tmp_path):
+    args, add = library
+    canonical_path, _ = add("recording", content=b"canonical master bytes" * 131072)
+    canonical_path.unlink()
+    alternate_path = args.audio_root / "recovered.mp3"
+    alternate_path.write_bytes(b"alternate rendition" * 131072)
+    digest = hashlib.sha256(alternate_path.read_bytes()).hexdigest()
+    args.identity_map = write_identity_map(tmp_path, [{
+        "recording_id": "recording", "path": str(alternate_path),
+        "downloaded_sha256": digest, "asset_kind": "alternate"}])
+    calls = []
+
+    def embedder(path):
+        calls.append(path)
+        return {"": fake_vector(512)}
+
+    runner.run(args, embedder=embedder)
+    args.resume = True
+    runner.run(args, embedder=embedder)
+    assert len(calls) == 1
+    assert len(read_rows(args.output_dir / "overall.jsonl")) == 1
+
+
+def test_canonical_sha_still_wins_and_map_rows_are_ignored_for_it(runner, library, tmp_path):
+    args, add = library
+    path, digest = add("recording")
+    args.identity_map = write_identity_map(tmp_path, [{
+        "recording_id": "recording", "path": str(path),
+        "downloaded_sha256": digest, "asset_kind": "alternate"}])
+    identity_map = runner.load_identity_map(args.identity_map)
+    candidates, failures = runner.scan_audio(args.audio_root, args.db, identity_map)
+    assert [candidate["recording_id"] for candidate in candidates] == ["recording"]
+    assert "asset_kind" not in candidates[0]
+    assert failures == []
+
+
+def test_identity_map_rejects_malformed_rows(runner, library, tmp_path):
+    args, add = library
+    add("recording")
+    args.identity_map = write_identity_map(tmp_path, [{
+        "recording_id": "recording", "path": "/tmp/missing.mp3",
+        "downloaded_sha256": "not-a-sha", "asset_kind": "alternate"}])
+    with pytest.raises(ValueError, match="64 lowercase hex"):
+        runner.run(args, embedder=lambda path: {"": fake_vector(512)})
+
+
+def test_identity_map_missing_or_changed_file_is_a_failure(runner, library, tmp_path):
+    args, add = library
+    canonical_path, _ = add("recording", content=b"canonical master bytes" * 131072)
+    canonical_path.unlink()
+    alternate_path = args.audio_root / "changed.mp3"
+    alternate_path.write_bytes(b"first bytes" * 131072)
+    digest = hashlib.sha256(alternate_path.read_bytes()).hexdigest()
+    alternate_path.write_bytes(b"tampered after download" * 131072)
+    args.identity_map = write_identity_map(tmp_path, [{
+        "recording_id": "recording", "path": str(alternate_path),
+        "downloaded_sha256": digest, "asset_kind": "alternate"}])
+    receipt = runner.run(args, embedder=lambda path: {"": fake_vector(512)})
+    assert receipt["status"] == "failed"
+    assert receipt["written"]["overall"] == 0
+    assert any("sha256 mismatch" in failure.get("error", "") for failure in receipt["failures"])
+
+
+def test_identity_map_detects_audio_changed_after_scan(runner, library, tmp_path, monkeypatch):
+    args, add = library
+    canonical_path, _ = add("recording", content=b"canonical master bytes" * 131072)
+    canonical_path.unlink()
+    alternate_path = args.audio_root / "changed-after-scan.mp3"
+    alternate_path.write_bytes(b"first bytes" * 131072)
+    digest = hashlib.sha256(alternate_path.read_bytes()).hexdigest()
+    args.identity_map = write_identity_map(tmp_path, [{
+        "recording_id": "recording", "path": str(alternate_path),
+        "downloaded_sha256": digest, "asset_kind": "alternate"}])
+    original_scan = runner.scan_audio
+
+    def tampering_scan(root, db, identity_map=None):
+        candidates, failures = original_scan(root, db, identity_map)
+        Path(candidates[0]["path"]).write_bytes(b"tampered" * 131072)
+        return candidates, failures
+
+    monkeypatch.setattr(runner, "scan_audio", tampering_scan)
+    receipt = runner.run(args, embedder=lambda path: {"": fake_vector(512)})
+    assert receipt["status"] == "failed"
+    assert any("Audio changed after scan" in failure.get("error", "") for failure in receipt["failures"])
