@@ -235,7 +235,16 @@ no-results cross-platform fallback is different: its direct wrapper uses two
 state-isolated staging shards by default, then merges only after both terminal
 receipts succeed and the real inventory has not changed. This is the measured
 fast path; it never lets concurrent workers write the durable files directly.
-An item receives at most two fallback rounds across runs; a second unsuccessful
+The fallback profile can also switch the downloader into a source-parallel mode
+(source_parallel=true): for each song it queries Netease (official cloudsearch/eapi
+direct client, not musicdl Netease client), Migu, QQ and Kuwo concurrently, first
+verified download wins, with a per-source 100s search/download timeout and a 120s
+per-song deadline; the queue is processed with 8 outer workers and the durable
+inventory/progress files stay single-writer behind a lock. Lossless sources are
+still accepted and transcoded to 128k mp3 (lossless_transcode_128k=true), since
+skipping them loses songs. Without the flag the downloader keeps the legacy
+sequential source order, which is the rollback path. See ADR-0007 for the
+measured decision data. An item receives at most two fallback rounds across runs; a second unsuccessful
 round becomes an auditable `abandoned` state and no longer re-enters automatic
 download queues. `--retry-abandoned` is the explicit manual recovery path.
 `--executor claude` is an explicit
