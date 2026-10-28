@@ -375,6 +375,12 @@ class _BoundedImportLookupCache:
         self._put(self._tags, key, tag_id)
 
 
+# v10 alternate renditions are auditable without a schema change: a row whose
+# source_audio_sha256 differs from the canonical recording.audio_sha256 was
+# embedded from a different rendition (e.g. a free 128k transcode). Canonical
+# rows keep the two sha values equal.
+EMBEDDING_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
 class MusicKBRepository:
     """All database operations. MCP uses only its read methods."""
 
@@ -464,12 +470,14 @@ class MusicKBRepository:
 
     def import_embeddings(
         self, entries: Iterable[Mapping[str, Any]], *, model_id: str,
-        factor: str = "", **model: Any,
+        factor: str = "", allow_alternate_rendition: bool = False, **model: Any,
     ) -> dict[str, Any]:
         self._require_embedding_publisher()
         if factor not in {"", "rhythm", "timbre"}:
             raise ValidationError("Embedding factor must be empty, rhythm, or timbre")
         imported = 0
+        imported_canonical = 0
+        imported_alternate = 0
         with self.connection:
             if model:
                 self._register_embedding_model(model_id=model_id, **model)
@@ -488,8 +496,22 @@ class MusicKBRepository:
                 if recording is None:
                     raise ValidationError("Embedding recording does not exist", details={"recording_id": recording_id})
                 sha = entry.get("audio_sha256")
-                if not sha or sha != recording["audio_sha256"]:
+                if not isinstance(sha, str) or not EMBEDDING_SHA256_HEX.fullmatch(sha):
+                    raise ValidationError("Embedding audio sha256 must be 64 lowercase hex characters")
+                canonical = sha == recording["audio_sha256"]
+                if not canonical and not allow_alternate_rendition:
                     raise ValidationError("Embedding audio sha256 does not match recording")
+                existing = self.connection.execute(
+                    "SELECT source_audio_sha256 FROM recording_embedding "
+                    "WHERE recording_id = ? AND model_id = ? AND factor = ?",
+                    (recording_id, model_id, factor),
+                ).fetchone()
+                if (existing is not None and not canonical
+                        and existing["source_audio_sha256"] == recording["audio_sha256"]):
+                    raise ValidationError(
+                        "Refusing to overwrite a canonical embedding with an alternate rendition",
+                        details={"recording_id": recording_id},
+                    )
                 vector = entry.get("vector")
                 actual_norm = self._embedding_norm(vector, registered["dim"])
                 norm = entry.get("norm", actual_norm)
@@ -502,11 +524,21 @@ class MusicKBRepository:
                     (recording_id, model_id, factor, vector, actual_norm, sha),
                 )
                 imported += 1
+                if canonical:
+                    imported_canonical += 1
+                else:
+                    imported_alternate += 1
             if imported and factor == "" and registered["modality"] == "audio":
                 self.connection.execute(
                     "UPDATE meta SET value = ? WHERE key = 'default_embedding_model' AND value = ''", (model_id,)
                 )
-        return {"imported": imported, "model_id": model_id, "factor": factor}
+        return {
+            "imported": imported,
+            "imported_canonical": imported_canonical,
+            "imported_alternate": imported_alternate,
+            "model_id": model_id,
+            "factor": factor,
+        }
 
     @staticmethod
     def _embedding_norm(vector: Any, dim: int) -> float:
@@ -4878,8 +4910,15 @@ class MusicKBRepository:
             "JOIN embedding_model m ON m.id=e.model_id JOIN recording r ON r.id=e.recording_id"
         ):
             identity = {"recording_id": row["recording_id"], "model_id": row["model_id"], "factor": row["factor"]}
-            if not row["audio_sha256"] or row["source_audio_sha256"] != row["audio_sha256"]:
-                issues.append({"code": "embedding_audio_sha256_mismatch", **identity})
+            canonical_sha = str(row["audio_sha256"] or "")
+            source_sha = str(row["source_audio_sha256"] or "")
+            if not EMBEDDING_SHA256_HEX.fullmatch(canonical_sha):
+                issues.append({"code": "embedding_recording_sha256_invalid", **identity})
+            if not EMBEDDING_SHA256_HEX.fullmatch(source_sha):
+                issues.append({"code": "embedding_audio_sha256_invalid", **identity})
+            # A row whose two sha columns differ is an alternate rendition. The
+            # mark is derived from the existing columns; no extra schema column
+            # is stored, so there is nothing else to validate here.
             try:
                 actual_norm = self._embedding_norm(row["vector"], row["dim"])
             except ValidationError:

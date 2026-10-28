@@ -20,7 +20,15 @@ publisher environment; Suno JSON reports stay outside git and never write the KB
 MuQ-MuLan/MERT weights are CC-BY-NC-4.0; MERIT heads are MIT. Internal
 research only; commercial use requires authorization or replacement.
 Only embedded recordings participate (initially 434/2005); coverage is not
-similarity quality. Schema v9 also carries the `audience_*` four-table
+similarity quality.
+
+**Cross-rendition (alternate) embeddings（2026-10-28 起支持）**：音频被历史清理的
+recording 可以用平台还能免费拿到的版本（如 128k mp3 转码）计算向量。做法是
+`embed_audio.py --identity-map`（按文件清单校验 sha）+ `import-embeddings
+--allow-alternate-rendition`：行的 `source_audio_sha256` 写**实际被嵌入文件**的
+sha256，与 `recording.audio_sha256` 不等即表示 alternate rendition（由既有列推导，
+schema 不变，见 ADR-0006）。`recording.audio_sha256` 永不被修改；alternate 行不能
+覆盖 canonical 行。此类向量来自转码/不同母带，相似度结论不得声称「同一音频」。 Schema v9 also carries the `audience_*` four-table
 audience records (research profiles + chart evidence); importing them projects
 recording-level `audience`/`audience-hint` tags and the canonical `get` returns
 an `audience` summary. Upgrade clients/peers first (a v8 client cannot open a

@@ -553,3 +553,26 @@ def test_cli_publish_partial_failure_exits_one_with_json_result(monkeypatch, cap
             "succeeded_count": 1,
         },
     }
+
+def test_cli_import_embeddings_requires_alternate_flag(master_database, tmp_path):
+    source = tmp_path / "alternate.jsonl"
+    source.write_text(json.dumps({
+        "recording_id": "rec_neon_night_studio", "audio_sha256": "b" * 64,
+        "vector_b64": base64.b64encode(struct.pack("<ff", 0.6, 0.8)).decode(),
+    }) + chr(10), encoding="utf-8")
+    base = ["--json", "import-embeddings", "--db", str(master_database),
+            "--input", str(source), "--model-id", "muq-v3", "--model-name", "MuQ-MuLan",
+            "--recipe", "v3", "--dim", "2", "--metric", "cosine", "--license", "CC-BY-NC-4.0"]
+    rejected = run_cli(*base)
+    assert rejected.returncode != 0
+    accepted = run_cli(*base, "--allow-alternate-rendition")
+    assert accepted.returncode == 0, accepted.stderr
+    result = json.loads(accepted.stdout)["result"]
+    assert result["imported"] == 1
+    assert result["imported_canonical"] == 0
+    assert result["imported_alternate"] == 1
+    with MusicKBRepository(master_database, read_only=True) as repository:
+        row = repository.connection.execute(
+            "SELECT source_audio_sha256 FROM recording_embedding WHERE factor = ''"
+        ).fetchone()
+        assert row[0] == "b" * 64
