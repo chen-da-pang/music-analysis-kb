@@ -254,9 +254,10 @@ def merge_isolated_shards(
     run_id: str,
     started_at: str,
     expected_inventory_sha256: str,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Merge terminal shard results in one writer after preflighting every move."""
-    if sha256_file(inventory_path) != expected_inventory_sha256:
+    # One writer merges terminal shard results; unsafe overwrites are rejected.
+    if not dry_run and sha256_file(inventory_path) != expected_inventory_sha256:
         raise RuntimeError("real inventory changed while fallback shards were running; refusing to merge")
 
     shard_data: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
@@ -270,13 +271,43 @@ def merge_isolated_shards(
         shard_data.append((shard, read_json(shard["inventory"]), progress))
 
     real_inventory = read_json(inventory_path)
+    resolved_work_dir = work_dir.resolve()
     combined_results: dict[str, dict[str, Any]] = {}
-    planned_moves: dict[Path, Path] = {}
-    planned_targets: dict[Path, Path] = {}
+    file_moves: dict[Path, Path] = {}
+    file_targets: dict[Path, Path] = {}
+    directory_moves: dict[Path, Path] = {}
+    directory_targets: dict[Path, Path] = {}
+    merged_directory_targets: set[Path] = set()
+    cleanup_directories: list[Path] = []
     updates: list[tuple[str, dict[str, Any], dict[str, Any], Path]] = []
     preserved_existing = 0
+    adopted_preserved = 0
+    root_files_moved = 0
+
+    def plan_file_move(source_file: Path, target_file: Path) -> None:
+        previous_target = file_moves.get(source_file)
+        if previous_target is not None and previous_target != target_file:
+            raise RuntimeError(f"one staging file maps to multiple targets: {source_file}")
+        previous_source = file_targets.get(target_file)
+        if previous_source is not None and previous_source != source_file:
+            raise RuntimeError(f"two staging files map to one target: {target_file}")
+        if target_file.exists():
+            raise RuntimeError(f"planned target unexpectedly exists: {target_file}")
+        file_moves[source_file] = target_file
+        file_targets[target_file] = source_file
+
+    def adopt_preserved_media(real_item: dict[str, Any], shard_download: dict[str, Any], existing_path: Path) -> None:
+        record = copy.deepcopy(shard_download)
+        record["path"] = str(existing_path.resolve())
+        record["file_present"] = True
+        record["exists"] = True
+        record["preserved_existing_media"] = True
+        record["size_bytes"] = existing_path.stat().st_size
+        record["sha256"] = sha256_file(existing_path)
+        real_item["download"] = record
 
     for shard, shard_inventory, shard_progress in shard_data:
+        shard_work_dir = shard["work_dir"].resolve()
         for candidate in shard["rows"]:
             identity = item_identity(candidate)
             result = copy.deepcopy(shard_progress.get("results", {}).get(identity, {}))
@@ -302,29 +333,102 @@ def merge_isolated_shards(
             if source_path is None or not source_path.is_file():
                 raise RuntimeError(f"shard {shard['index']} marked {identity} downloaded without a file")
             try:
-                relative_path = source_path.relative_to(shard["work_dir"].resolve())
+                relative_path = source_path.relative_to(shard_work_dir)
             except ValueError as exc:
                 raise RuntimeError(f"shard {shard['index']} media path escaped staging: {source_path}") from exc
             source_directory = source_path.parent
-            target_path = work_dir / relative_path
+            target_path = (resolved_work_dir / relative_path).resolve()
             target_directory = target_path.parent
-            if source_directory.parent == shard["work_dir"].resolve():
-                raise RuntimeError(f"shard {shard['index']} did not create a per-song media directory")
-            if target_path.exists() or target_directory.exists():
-                raise RuntimeError(f"refusing to overwrite existing fallback media directory: {target_directory}")
-            previous = planned_moves.get(source_directory)
+
+            if source_directory == shard_work_dir:
+                # NeteaseDirect writes flat files into the staging root; the parent is the audio root.
+                if target_path.exists():
+                    adopt_preserved_media(real_item, shard_download, target_path)
+                    adopted_preserved += 1
+                    result["merge"] = "preserved_existing_media"
+                    combined_results[identity]["path"] = str(target_path.resolve())
+                    continue
+                plan_file_move(source_path, target_path)
+                root_files_moved += 1
+                updates.append((identity, real_item, shard_download, target_path))
+                result["merge"] = "root_file_moved"
+                continue
+
+            if target_path.exists():
+                adopt_preserved_media(real_item, shard_download, target_path)
+                adopted_preserved += 1
+                result["merge"] = "preserved_existing_media"
+                combined_results[identity]["path"] = str(target_path.resolve())
+                continue
+
+            if target_directory.exists():
+                if target_directory in merged_directory_targets:
+                    raise RuntimeError(f"two staging directories map to one merged target: {target_directory}")
+                merged_directory_targets.add(target_directory)
+                for source_file in sorted(path for path in source_directory.rglob("*") if path.is_file()):
+                    relative_file = source_file.relative_to(source_directory)
+                    destination = target_directory / relative_file
+                    if destination.exists():
+                        continue
+                    plan_file_move(source_file, destination)
+                cleanup_directories.append(source_directory)
+                updates.append((identity, real_item, shard_download, target_path))
+                result["merge"] = "directory_merged"
+                continue
+
+            previous = directory_moves.get(source_directory)
             if previous is not None and previous != target_directory:
                 raise RuntimeError(f"one staging directory maps to multiple targets: {source_directory}")
-            previous_source = planned_targets.get(target_directory)
+            previous_source = directory_targets.get(target_directory)
             if previous_source is not None and previous_source != source_directory:
                 raise RuntimeError(f"two staging directories map to one target: {target_directory}")
-            planned_moves[source_directory] = target_directory
-            planned_targets[target_directory] = source_directory
+            directory_moves[source_directory] = target_directory
+            directory_targets[target_directory] = source_directory
             updates.append((identity, real_item, shard_download, target_path))
+            result["merge"] = "directory_moved"
 
-    for source_directory, target_directory in planned_moves.items():
+    merge_summary = {
+        "root_files_moved": root_files_moved,
+        "file_moves": len(file_moves),
+        "directory_moves": len(directory_moves),
+        "media_directories_moved": len(directory_moves) + len(cleanup_directories),
+        "directory_merges": len(cleanup_directories),
+        "preserved_existing_downloads": preserved_existing,
+        "preserved_existing_media": adopted_preserved,
+        "downloaded_updates": len(updates),
+        "dry_run": dry_run,
+    }
+
+    progress = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "started_at": started_at,
+        "finished_at": now_iso(),
+        "parallelism": len(shards),
+        "results": combined_results,
+        "summary": merged_progress_summary(combined_results),
+        "merge": merge_summary,
+    }
+    if dry_run:
+        return progress
+
+    for source_file, target_file in file_moves.items():
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source_file), str(target_file))
+    for source_directory, target_directory in directory_moves.items():
         target_directory.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(source_directory), str(target_directory))
+    for source_directory in cleanup_directories:
+        for leftover in sorted(source_directory.rglob("*"), key=lambda path: len(path.parts), reverse=True):
+            if leftover.is_dir():
+                try:
+                    leftover.rmdir()
+                except OSError:
+                    pass
+        try:
+            source_directory.rmdir()
+        except OSError:
+            pass
 
     for identity, real_item, shard_download, target_path in updates:
         assert target_path.is_file()
@@ -336,22 +440,8 @@ def merge_isolated_shards(
 
     refresh_inventory_counts(real_inventory)
     atomic_write_json(inventory_path, real_inventory)
-    progress = {
-        "schema_version": 1,
-        "run_id": run_id,
-        "started_at": started_at,
-        "finished_at": now_iso(),
-        "parallelism": len(shards),
-        "results": combined_results,
-        "summary": merged_progress_summary(combined_results),
-        "merge": {
-            "media_directories_moved": len(planned_moves),
-            "preserved_existing_downloads": preserved_existing,
-        },
-    }
     atomic_write_json(progress_path, progress)
     return progress
-
 
 def execute_isolated_parallel(
     *,
