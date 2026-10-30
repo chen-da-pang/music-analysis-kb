@@ -20,7 +20,15 @@ publisher environment; Suno JSON reports stay outside git and never write the KB
 MuQ-MuLan/MERT weights are CC-BY-NC-4.0; MERIT heads are MIT. Internal
 research only; commercial use requires authorization or replacement.
 Only embedded recordings participate (initially 434/2005); coverage is not
-similarity quality. Schema v9 also carries the `audience_*` four-table
+similarity quality.
+
+**Cross-rendition (alternate) embeddings（2026-10-28 起支持）**：音频被历史清理的
+recording 可以用平台还能免费拿到的版本（如 128k mp3 转码）计算向量。做法是
+`embed_audio.py --identity-map`（按文件清单校验 sha）+ `import-embeddings
+--allow-alternate-rendition`：行的 `source_audio_sha256` 写**实际被嵌入文件**的
+sha256，与 `recording.audio_sha256` 不等即表示 alternate rendition（由既有列推导，
+schema 不变，见 ADR-0006）。`recording.audio_sha256` 永不被修改；alternate 行不能
+覆盖 canonical 行。此类向量来自转码/不同母带，相似度结论不得声称「同一音频」。 Schema v9 also carries the `audience_*` four-table
 audience records (research profiles + chart evidence); importing them projects
 recording-level `audience`/`audience-hint` tags and the canonical `get` returns
 an `audience` summary. Upgrade clients/peers first (a v8 client cannot open a
@@ -235,7 +243,16 @@ no-results cross-platform fallback is different: its direct wrapper uses two
 state-isolated staging shards by default, then merges only after both terminal
 receipts succeed and the real inventory has not changed. This is the measured
 fast path; it never lets concurrent workers write the durable files directly.
-An item receives at most two fallback rounds across runs; a second unsuccessful
+The fallback profile can also switch the downloader into a source-parallel mode
+(source_parallel=true): for each song it queries Netease (official cloudsearch/eapi
+direct client, not musicdl Netease client), Migu, QQ and Kuwo concurrently, first
+verified download wins, with a per-source 100s search/download timeout and a 120s
+per-song deadline; the queue is processed with 8 outer workers and the durable
+inventory/progress files stay single-writer behind a lock. Lossless sources are
+still accepted and transcoded to 128k mp3 (lossless_transcode_128k=true), since
+skipping them loses songs. Without the flag the downloader keeps the legacy
+sequential source order, which is the rollback path. See ADR-0007 for the
+measured decision data. An item receives at most two fallback rounds across runs; a second unsuccessful
 round becomes an auditable `abandoned` state and no longer re-enters automatic
 download queues. `--retry-abandoned` is the explicit manual recovery path.
 `--executor claude` is an explicit

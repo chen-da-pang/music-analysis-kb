@@ -5,12 +5,24 @@
     "QQMusicClient",
     "KuwoMusicClient"
   ],
+  "parallel_sources": [
+    "NeteaseDirect",
+    "MiguMusicClient",
+    "QQMusicClient",
+    "KuwoMusicClient"
+  ],
+  "source_parallel": true,
+  "per_song_deadline_seconds": 120,
+  "outer_concurrency": 8,
+  "search_timeout_seconds": 100,
+  "download_timeout_seconds": 100,
+  "lossless_transcode_128k": true,
   "retry_statuses": [
     "no_results",
     "failed"
   ],
   "max_fallback_attempts": 2,
-  "source_timeout_seconds": 45,
+  "source_timeout_seconds": 100,
   "minimum_size_bytes": 1000000,
   "minimum_duration_seconds": 60,
   "artist_aliases": {

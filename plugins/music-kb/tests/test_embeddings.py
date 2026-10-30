@@ -157,7 +157,7 @@ def test_validate_detects_corrupt_vector_norm_length_and_identity(master_databas
         for column, value, code in [
             ("norm", 7.0, "embedding_norm_mismatch"),
             ("vector", b"bad", "embedding_vector_invalid"),
-            ("source_audio_sha256", "b" * 64, "embedding_audio_sha256_mismatch"),
+            ("source_audio_sha256", "not-a-sha", "embedding_audio_sha256_invalid"),
         ]:
             with repository.connection:
                 repository.connection.execute(f"UPDATE recording_embedding SET {column}=?", (value,))
@@ -265,3 +265,74 @@ def test_real_v7_database_upgrades_with_data_intact(tmp_path):
         assert connection.execute(
             "SELECT canonical_title, audio_sha256 FROM recording WHERE id='legacy'"
         ).fetchone() == ("Legacy song", "b" * 64)
+
+def test_alternate_rendition_requires_opt_in_and_keeps_canonical_identity(master_database):
+    alternate_sha = "b" * 64
+    row = {"recording_id": SEED, "audio_sha256": alternate_sha,
+           "vector": struct.pack("<ff", 0.6, 0.8)}
+    with MusicKBRepository(master_database) as repository:
+        with pytest.raises(ValidationError, match="does not match recording"):
+            repository.import_embeddings([row], **MODEL)
+        result = repository.import_embeddings([row], allow_alternate_rendition=True, **MODEL)
+        assert result["imported"] == 1
+        assert result["imported_canonical"] == 0
+        assert result["imported_alternate"] == 1
+        stored = repository.connection.execute(
+            "SELECT source_audio_sha256 FROM recording_embedding WHERE recording_id = ?",
+            (SEED,),
+        ).fetchone()[0]
+        assert stored == alternate_sha
+        assert repository.validate()["valid"]
+    with sqlite3.connect(master_database) as connection:
+        assert connection.execute(
+            "SELECT audio_sha256 FROM recording WHERE id = ?", (SEED,)
+        ).fetchone()[0] == "a" * 64
+
+
+def test_canonical_import_never_needs_the_flag_and_counts_stay_separate(master_database):
+    with MusicKBRepository(master_database) as repository:
+        result = repository.import_embeddings(
+            [{"recording_id": SEED, "audio_sha256": "a" * 64,
+              "vector": struct.pack("<ff", 1.0, 0.0)}], **MODEL)
+        assert result["imported"] == 1
+        assert result["imported_canonical"] == 1
+        assert result["imported_alternate"] == 0
+
+
+def test_alternate_rendition_cannot_replace_a_canonical_embedding(master_database):
+    canonical = {"recording_id": SEED, "audio_sha256": "a" * 64,
+                 "vector": struct.pack("<ff", 1.0, 0.0)}
+    alternate = dict(canonical, audio_sha256="b" * 64)
+    with MusicKBRepository(master_database) as repository:
+        repository.import_embeddings([canonical], **MODEL)
+        with pytest.raises(ValidationError, match="Refusing to overwrite a canonical embedding"):
+            repository.import_embeddings([alternate], allow_alternate_rendition=True, **MODEL)
+        stored = repository.connection.execute(
+            "SELECT source_audio_sha256 FROM recording_embedding WHERE recording_id = ?",
+            (SEED,),
+        ).fetchone()[0]
+        assert stored == "a" * 64
+
+
+def test_alternate_rendition_is_auditable_from_existing_sha_columns(master_database):
+    with MusicKBRepository(master_database) as repository:
+        repository.import_embeddings(
+            [{"recording_id": SEED, "audio_sha256": "b" * 64,
+              "vector": struct.pack("<ff", 0.6, 0.8)}],
+            allow_alternate_rendition=True, **MODEL)
+        rows = list(repository.connection.execute(
+            "SELECT r.audio_sha256 AS canonical, e.source_audio_sha256 AS source "
+            "FROM recording_embedding e JOIN recording r ON r.id = e.recording_id"))
+        assert rows[0]["canonical"] == "a" * 64
+        assert rows[0]["source"] == "b" * 64
+        assert rows[0]["canonical"] != rows[0]["source"]
+        assert repository.validate()["valid"]
+        with repository.connection:
+            repository.connection.execute(
+                "UPDATE recording_embedding SET source_audio_sha256 = ?", ("0" * 64,))
+        assert repository.validate()["valid"]
+        with repository.connection:
+            repository.connection.execute(
+                "UPDATE recording_embedding SET source_audio_sha256 = 'not-a-sha'")
+        codes = {issue["code"] for issue in repository.validate()["issues"]}
+        assert "embedding_audio_sha256_invalid" in codes
