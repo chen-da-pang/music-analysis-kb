@@ -365,3 +365,40 @@ never mutates either release database.
 - SSH key: restricted sync account, no shell access when infrastructure permits;
   real peer configuration stays in `~/.config/music-kb/peers.toml` on the
   publisher, never in Git.
+## Weekly coverage gate (research/weekly-auto, issue #147)
+
+The weekly operator script in research/weekly-auto runs embedding and audience
+coverage stages around the existing import/lyrics/snapshot flow:
+
+1. import_delivery
+2. embedding - newly imported canonical recordings without vectors are staged by
+   audio sha256 and embedded with the audio runner (overall MuQ-MuLan v3 512d,
+   then rhythm and timbre MERIT/MERT 128d), then imported with
+   music-kb import-embeddings. DRY_RUN writes a planned receipt only.
+3. audience_pending - writes audience-pending.jsonl,
+   audience-pending.summary.json and audience-pending.research.json (machine
+   readable parallel research entry). Missing profiles never fail the run.
+4. lyrics_backfill, audience_charts, weekly_update, doctor_validate
+5. coverage_gate - fails when a newly imported canonical recording has no
+   vector, or when the vector ratio drops more than 2.0 percentage points
+   versus the pre-run baseline captured at backup_master time. Set
+   ALLOW_GAPS=1 to downgrade to a warning (report status succeeded-with-gaps).
+   Audience gaps are warnings only. MOSS batch is retried up to three times and
+   records moss.retry.json.
+
+Run the dry rehearsal before a real run:
+
+    DRY_RUN=1 ./run_weekly.sh --run-id kugou-YYYYwWW-dry
+
+The rehearsal ends with status succeeded, writes embedding.receipt.json
+(status=planned) and coverage-report.json, and does not write master or create
+a release. The helper (helpers/weekly_coverage.py) is read-only against master
+and its plan-embedding probe is useful before a run:
+
+    python3 helpers/weekly_coverage.py plan-embedding \
+      --db "$HOME/.music-kb/music-master.sqlite" \
+      --audio-root /path/to/workspace/music_downloads/KugouMusicClient \
+      --out /tmp/embedding-plan --allow-missing
+
+Historical canonical recordings without retained audio are reported as
+missing files; the embedding stage scopes planning to the current run's ids.
